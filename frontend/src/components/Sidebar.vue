@@ -86,18 +86,18 @@ function dropToSection(sectionKey: string, event: DragEvent) {
 
 <template>
   <aside class="sidebar">
-    <div class="brand">ROS Tool Suite</div>
+    <div class="brand">TreeMoonBox</div>
 
     <button class="home-button" :class="{ active: selectedKey === 'home' }" @click="emit('selectHome')">
-      Overview Home
+      首页总览
     </button>
 
-    <div class="section-label">TOOLS</div>
+    <div class="section-label">工具导航</div>
 
     <input
       v-model="toolQuery"
       class="sidebar-search"
-      placeholder="Search tool"
+      placeholder="搜索小功能"
     />
 
     <div v-for="section in groupedSections" :key="section.key" class="nav-group">

@@ -29,6 +29,8 @@ int main(int argc, char** argv) {
             options.tile_size = std::stod(require_value(i, argc, argv));
         } else if (arg == "--overlap") {
             options.overlap = std::stod(require_value(i, argc, argv));
+        } else if (arg == "--format") {
+            options.format = require_value(i, argc, argv);
         } else if (arg == "--zip-output") {
             options.zip_output = true;
         }

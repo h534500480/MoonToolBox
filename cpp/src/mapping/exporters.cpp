@@ -103,7 +103,7 @@ std::vector<std::uint8_t> make_zlib_stored_stream(const std::vector<std::uint8_t
 std::vector<std::uint8_t> build_overlay_mask(const GridResult& result, const GridParameters& params) {
     std::vector<std::uint8_t> mask(result.grid.size(), 0u);
     for (std::size_t i = 0; i < result.grid.size(); ++i) {
-        if (result.grid[i] == static_cast<std::uint8_t>(CellType::Walkable)) {
+        if (result.grid[i] != static_cast<std::uint8_t>(CellType::Obstacle)) {
             mask[i] = 255u;
         }
     }
@@ -119,7 +119,7 @@ std::vector<std::uint8_t> build_overlay_mask(const GridResult& result, const Gri
     for (int row = 0; row < result.height; ++row) {
         for (int col = 0; col < result.width; ++col) {
             const int idx = row * result.width + col;
-            if (mask[idx] != 0u || result.grid[idx] != static_cast<std::uint8_t>(CellType::Walkable)) {
+            if (mask[idx] == 0u) {
                 continue;
             }
             for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
@@ -130,14 +130,11 @@ std::vector<std::uint8_t> build_overlay_mask(const GridResult& result, const Gri
                     const int nr = row + dy;
                     const int nc = col + dx;
                     if (nr >= 0 && nr < result.height && nc >= 0 && nc < result.width) {
-                        if (mask[nr * result.width + nc] != 0u) {
-                            dilated[idx] = 255u;
-                            break;
+                        const int nidx = nr * result.width + nc;
+                        if (result.grid[nidx] != static_cast<std::uint8_t>(CellType::Obstacle)) {
+                            dilated[nidx] = 255u;
                         }
                     }
-                }
-                if (dilated[idx] != 0u) {
-                    break;
                 }
             }
         }
@@ -157,12 +154,14 @@ std::vector<std::uint8_t> build_overlay_mask(const GridResult& result, const Gri
                     }
                     const int nr = row + dy;
                     const int nc = col + dx;
-                    if (nr >= 0 && nr < result.height && nc >= 0 && nc < result.width) {
-                        const int nidx = nr * result.width + nc;
-                        if (result.grid[nidx] != static_cast<std::uint8_t>(CellType::Walkable) || dilated[nidx] == 0u) {
-                            eroded[idx] = 0u;
-                            break;
-                        }
+                    if (nr < 0 || nr >= result.height || nc < 0 || nc >= result.width) {
+                        eroded[idx] = 0u;
+                        break;
+                    }
+                    const int nidx = nr * result.width + nc;
+                    if (result.grid[nidx] == static_cast<std::uint8_t>(CellType::Obstacle) || dilated[nidx] == 0u) {
+                        eroded[idx] = 0u;
+                        break;
                     }
                 }
                 if (eroded[idx] == 0u) {
@@ -281,7 +280,7 @@ void write_walkable_preview_png(const std::filesystem::path& path, const GridRes
                 255u,
             };
         }
-        return std::array<std::uint8_t, 4>{0u, 0u, 0u, 255u};
+        return std::array<std::uint8_t, 4>{0u, 0u, 0u, 0u};
     });
 }
 

@@ -9,13 +9,34 @@ CONFIG_DIR = ROOT_DIR / "backend" / "data"
 CONFIG_PATH = CONFIG_DIR / "tool_preferences.json"
 
 DEFAULT_SECTIONS = [
-    ToolSection(key="all", label="All Tools"),
-    ToolSection(key="favorites", label="Favorites"),
-    ToolSection(key="mapping", label="Mapping"),
-    ToolSection(key="network", label="Network"),
-    ToolSection(key="perception", label="Perception"),
-    ToolSection(key="other", label="Other"),
+    ToolSection(key="all", label="全部工具"),
+    ToolSection(key="favorites", label="收藏夹"),
+    ToolSection(key="mapping", label="地图处理"),
+    ToolSection(key="network", label="网络工具"),
+    ToolSection(key="perception", label="感知工具"),
+    ToolSection(key="entertainment", label="娱乐分区"),
+    ToolSection(key="other", label="其他工具"),
 ]
+
+FIXED_SECTION_LABELS = {section.key: section.label for section in DEFAULT_SECTIONS}
+
+
+def _normalize_sections(sections):
+    custom_sections = []
+    section_map = {}
+    for section in sections:
+        if section.key in section_map:
+            continue
+        if section.key in FIXED_SECTION_LABELS:
+            section_map[section.key] = ToolSection(key=section.key, label=FIXED_SECTION_LABELS[section.key])
+        else:
+            custom_sections.append(section)
+
+    normalized = []
+    for default_section in DEFAULT_SECTIONS:
+        normalized.append(section_map.get(default_section.key, default_section))
+    normalized.extend(custom_sections)
+    return normalized
 
 
 def load_preferences() -> PreferencesPayload:
@@ -24,21 +45,14 @@ def load_preferences() -> PreferencesPayload:
 
     data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     payload = PreferencesPayload(**data)
-    if not any(section.key == "all" for section in payload.sections):
-        payload.sections = [DEFAULT_SECTIONS[0], *payload.sections]
-    if not any(section.key == "favorites" for section in payload.sections):
-        payload.sections = [DEFAULT_SECTIONS[0], DEFAULT_SECTIONS[1], *[section for section in payload.sections if section.key != "all"]]
+    payload.sections = _normalize_sections(payload.sections)
     return payload
 
 
 def save_preferences(payload: PreferencesPayload) -> PreferencesPayload:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-    sections = payload.sections
-    if not any(section.key == "all" for section in sections):
-        sections = [DEFAULT_SECTIONS[0], *sections]
-    if not any(section.key == "favorites" for section in sections):
-        sections = [DEFAULT_SECTIONS[0], DEFAULT_SECTIONS[1], *[section for section in sections if section.key != "all"]]
+    sections = _normalize_sections(payload.sections)
 
     normalized = PreferencesPayload(
         sections=sections,

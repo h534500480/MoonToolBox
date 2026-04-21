@@ -81,7 +81,7 @@ function renameSection(section: ToolSection) {
   if (section.key === "all" || section.key === "favorites") {
     return;
   }
-  const nextLabel = window.prompt("Rename section", section.label);
+  const nextLabel = window.prompt("重命名分区", section.label);
   if (!nextLabel) {
     return;
   }
@@ -92,7 +92,7 @@ function deleteSection(section: ToolSection) {
   if (section.key === "all" || section.key === "favorites") {
     return;
   }
-  const confirmed = window.confirm(`Delete section "${section.label}"? Tools in this section will move to Other.`);
+  const confirmed = window.confirm(`删除分区“${section.label}”后，其中的小功能会移动到“其他工具”，是否继续？`);
   if (!confirmed) {
     return;
   }
@@ -104,18 +104,18 @@ function deleteSection(section: ToolSection) {
   <div class="home-shell">
     <section class="home-hero panel">
       <div>
-        <div class="home-eyebrow">Workspace</div>
-        <h1>Tool Sections</h1>
-        <p>按分区管理工具，支持搜索分区、拖拽归类、展开查看小功能并直接跳转。</p>
+        <div class="home-eyebrow">工作台</div>
+        <h1>工具分区</h1>
+        <p>按大分区管理工具，支持搜索分区、拖拽归类、展开查看小功能并直接跳转。</p>
       </div>
       <div class="home-stats">
         <div class="home-stat-card">
           <span class="home-stat-value">{{ sections.length }}</span>
-          <span class="home-stat-label">Sections</span>
+          <span class="home-stat-label">分区数量</span>
         </div>
         <div class="home-stat-card">
           <span class="home-stat-value">{{ tools.length }}</span>
-          <span class="home-stat-label">Tools</span>
+          <span class="home-stat-label">工具数量</span>
         </div>
       </div>
     </section>
@@ -125,17 +125,17 @@ function deleteSection(section: ToolSection) {
         <input
           v-model="sectionQuery"
           class="field-input"
-          placeholder="Search section"
+          placeholder="搜索分区"
         />
       </div>
       <div class="home-toolbar-right">
         <input
           v-model="newSectionLabel"
           class="field-input"
-          placeholder="New section name"
+          placeholder="输入新分区名称"
           @keydown.enter.prevent="submitSection"
         />
-        <button class="primary-btn" @click="submitSection">Create Section</button>
+        <button class="primary-btn" @click="submitSection">新建分区</button>
       </div>
     </section>
 
@@ -158,19 +158,19 @@ function deleteSection(section: ToolSection) {
               class="section-card-action"
               @click="renameSection(section)"
             >
-              Rename
+              重命名
             </button>
             <button
               v-if="section.key !== 'all' && section.key !== 'favorites'"
               class="section-card-action danger"
               @click="deleteSection(section)"
             >
-              Delete
+              删除
             </button>
           </div>
         </div>
 
-        <div class="section-card-drop">{{ section.key === "all" ? "All tools are shown here" : "Drop tool here" }}</div>
+        <div class="section-card-drop">{{ section.key === "all" ? "这里展示全部工具" : "可将左侧小功能拖到这里" }}</div>
 
         <div v-if="expandedSections.includes(section.key)" class="section-card-tools">
           <button
@@ -183,7 +183,7 @@ function deleteSection(section: ToolSection) {
             <span class="section-tool-subtitle">{{ tool.subtitle }}</span>
           </button>
           <div v-if="toolsForSection(section.key).length === 0" class="section-empty">
-            No tools in this section
+            当前分区下还没有小功能
           </div>
         </div>
       </article>

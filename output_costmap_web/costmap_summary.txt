@@ -1,0 +1,4 @@
+yaml_path: g:\ros_proj\ros_tool\output\temp_costmap.yaml
+fps: 2
+export_gif: true
+note: C++ costmap framework is ready.

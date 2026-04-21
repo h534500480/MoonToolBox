@@ -1,31 +1,35 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 
-import { fetchPreferences, fetchTools, runTool, savePreferences } from "./api/client";
+import { fetchPreferences, fetchSystemInfo, fetchTools, runTool, savePreferences } from "./api/client";
 import HomePage from "./components/HomePage.vue";
 import Sidebar from "./components/Sidebar.vue";
 import ToolForm from "./components/ToolForm.vue";
 import type { ToolDefinition, ToolSection } from "./types";
 
 const defaultSections: ToolSection[] = [
-  { key: "all", label: "All Tools" },
-  { key: "favorites", label: "Favorites" },
-  { key: "mapping", label: "Mapping" },
-  { key: "network", label: "Network" },
-  { key: "perception", label: "Perception" },
-  { key: "other", label: "Other" }
+  { key: "all", label: "全部工具" },
+  { key: "favorites", label: "收藏夹" },
+  { key: "mapping", label: "地图处理" },
+  { key: "network", label: "网络工具" },
+  { key: "perception", label: "感知工具" },
+  { key: "entertainment", label: "娱乐分区" },
+  { key: "other", label: "其他工具" }
 ];
 
 const tools = ref<ToolDefinition[]>([]);
 const selectedKey = ref("home");
 const loading = ref(false);
-const logs = ref<string[]>(["[INFO] frontend shell ready"]);
-const summary = ref("Loading tools...");
+const logs = ref<string[]>(["[INFO] 前端界面已就绪"]);
+const summary = ref("正在加载工具...");
 const sections = ref<ToolSection[]>(defaultSections);
 const sectionAssignments = ref<Record<string, string>>({});
 const favoriteKeys = ref<string[]>([]);
-const expandedSections = ref<string[]>(["all", "favorites", "mapping", "network", "perception", "other"]);
+const expandedSections = ref<string[]>(["all", "favorites", "mapping", "network", "perception", "entertainment", "other"]);
 const preferencesLoaded = ref(false);
+const themeKey = ref("blue");
+const localIp = ref("127.0.0.1");
+const resultData = ref<Record<string, any>>({});
 let saveTimer: number | undefined;
 
 const selectedTool = computed(() => tools.value.find((tool) => tool.key === selectedKey.value) ?? null);
@@ -49,6 +53,9 @@ function defaultSectionForTool(tool: ToolDefinition) {
   }
   if (tool.key.includes("pcd")) {
     return "mapping";
+  }
+  if (tool.key.includes("mtslash")) {
+    return "entertainment";
   }
   return "other";
 }
@@ -74,12 +81,18 @@ async function loadTools() {
   tools.value = await fetchTools();
   const mergedAssignments = { ...sectionAssignments.value };
   tools.value.forEach((tool) => {
+    if (tool.key === "network_scan" && localIp.value) {
+      const field = tool.fields.find((item) => item.key === "prefix");
+      if (field) {
+        field.value = localIp.value.split(".").slice(0, 3).join(".");
+      }
+    }
     if (!mergedAssignments[tool.key]) {
       mergedAssignments[tool.key] = defaultSectionForTool(tool);
     }
   });
   sectionAssignments.value = mergedAssignments;
-  summary.value = "Select a section on the home page or open a tool from the left navigation.";
+  summary.value = "可在首页选择分区，或从左侧导航打开具体功能。";
 }
 
 async function handleRun(values: Record<string, string>) {
@@ -91,9 +104,11 @@ async function handleRun(values: Record<string, string>) {
     const result = await runTool(selectedTool.value.key, values);
     summary.value = result.summary;
     logs.value = result.logs;
+    resultData.value = result.data ?? {};
   } catch (error) {
-    summary.value = "Backend call failed.";
+    summary.value = "后端调用失败。";
     logs.value = [`[ERROR] ${(error as Error).message}`];
+    resultData.value = {};
   } finally {
     loading.value = false;
   }
@@ -164,7 +179,20 @@ function handleSelectTool(toolKey: string) {
   if (tool) {
     summary.value = tool.description;
   }
+  resultData.value = {};
 }
+
+function handleClearLogs() {
+  logs.value = [];
+}
+
+watch(
+  themeKey,
+  (value) => {
+    document.documentElement.setAttribute("data-theme", value);
+  },
+  { immediate: true }
+);
 
 watch(
   [sections, sectionAssignments, favoriteKeys],
@@ -193,9 +221,11 @@ watch(
 onMounted(async () => {
   await loadPreferences();
   try {
+    const systemInfo = await fetchSystemInfo();
+    localIp.value = systemInfo.local_ip || localIp.value;
     await loadTools();
   } catch (error) {
-    summary.value = "Failed to load backend tools.";
+    summary.value = "加载后端工具失败。";
     logs.value = [`[ERROR] ${(error as Error).message}`];
   }
 });
@@ -220,7 +250,18 @@ onMounted(async () => {
     <main class="workspace">
       <div class="topbar">
         <div class="topbar-path">{{ selectedTool ? `/tools/${selectedTool.key}` : "/home" }}</div>
-        <div class="topbar-status">{{ selectedTool ? "Tool Page" : "Overview" }}</div>
+        <div class="topbar-actions">
+          <div class="topbar-ip">本机 IP: {{ localIp }}</div>
+          <label class="theme-switcher">
+            <span>主题</span>
+            <select v-model="themeKey" class="theme-select">
+              <option value="blue">深海蓝</option>
+              <option value="emerald">青绿色</option>
+              <option value="amber">琥珀色</option>
+            </select>
+          </label>
+          <div class="topbar-status">{{ selectedTool ? "功能页" : "总览页" }}</div>
+        </div>
       </div>
 
       <HomePage
@@ -243,18 +284,12 @@ onMounted(async () => {
         <ToolForm
           :tool="selectedTool"
           :loading="loading"
+          :summary="summary"
+          :logs="logs"
+          :result-data="resultData"
           @run="handleRun"
+          @clear-logs="handleClearLogs"
         />
-
-        <section class="result-panel">
-          <div class="result-title">Output</div>
-          <p class="summary">{{ summary }}</p>
-        </section>
-
-        <section class="log-panel">
-          <div class="result-title">Logs</div>
-          <pre class="logs">{{ logs.join("\n") }}</pre>
-        </section>
       </template>
     </main>
   </div>

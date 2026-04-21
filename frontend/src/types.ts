@@ -20,6 +20,7 @@ export interface ToolRunResponse {
   status: string;
   summary: string;
   logs: string[];
+  data?: Record<string, any>;
 }
 
 export interface ToolSection {
@@ -31,4 +32,15 @@ export interface PreferencesPayload {
   sections: ToolSection[];
   section_assignments: Record<string, string>;
   favorite_keys: string[];
+}
+
+export interface BrowseDialogPayload {
+  mode: "open_file" | "open_dir" | "save_file";
+  title: string;
+  initial_path: string;
+}
+
+export interface SystemInfoResponse {
+  local_ip: string;
+  subnet_prefix: string;
 }

@@ -1,9 +1,25 @@
 from fastapi import APIRouter, HTTPException
 
 from app.catalog import TOOL_DEFINITIONS
-from app.models import PreferencesPayload, ToolRunRequest, ToolRunResponse
-from app.services.cpp_runner import run_pcd_map
+from app.models import (
+    BrowseDialogRequest,
+    BrowseDialogResponse,
+    OpenPathRequest,
+    PreferencesPayload,
+    SystemInfoResponse,
+    TilePreviewResponse,
+    ToolRunRequest,
+    ToolRunResponse,
+)
+from app.services.costmap_playback import run_costmap
+from app.services.cpp_runner import run_pcd_map, run_pcd_tile
+from app.services.dialogs import browse_local_path
+from app.services.mtslash_exporter import run_mtslash_export, start_mtslash_login_session, submit_mtslash_login
+from app.services.network_scan import run_network_scan
+from app.services.pcd_preview import preview_pcd_tile
 from app.services.preferences import load_preferences, save_preferences
+from app.services.system_info import get_system_info
+from app.services.system_actions import open_path_in_system
 
 
 router = APIRouter()
@@ -12,6 +28,11 @@ router = APIRouter()
 @router.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@router.get("/system/info", response_model=SystemInfoResponse)
+def system_info():
+    return get_system_info()
 
 
 @router.get("/tools")
@@ -29,6 +50,48 @@ def put_preferences(payload: PreferencesPayload):
     return save_preferences(payload)
 
 
+@router.post("/dialogs/browse", response_model=BrowseDialogResponse)
+def post_browse_dialog(payload: BrowseDialogRequest):
+    return BrowseDialogResponse(
+        path=browse_local_path(
+            mode=payload.mode,
+            title=payload.title,
+            initial_path=payload.initial_path,
+        )
+    )
+
+
+@router.post("/dialogs/open-path")
+def post_open_path(payload: OpenPathRequest):
+    try:
+        open_path_in_system(payload.path)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "ok"}
+
+
+@router.get("/tools/pcd_tile/preview", response_model=TilePreviewResponse)
+def get_pcd_tile_preview(path: str, tile_size: float = 20.0):
+    return preview_pcd_tile(path=path, tile_size=tile_size)
+
+
+@router.post("/tools/mtslash_export/login-captcha")
+def post_mtslash_login_captcha():
+    try:
+        return start_mtslash_login_session()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/tools/mtslash_export/login")
+def post_mtslash_login(payload: dict):
+    values = {key: str(value) for key, value in payload.items()}
+    try:
+        return submit_mtslash_login(values)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/tools/{tool_key}/run", response_model=ToolRunResponse)
 def run_tool(tool_key: str, request: ToolRunRequest):
     tool = next((item for item in TOOL_DEFINITIONS if item.key == tool_key), None)
@@ -38,6 +101,14 @@ def run_tool(tool_key: str, request: ToolRunRequest):
     values = {key: str(value) for key, value in request.values.items()}
     if tool_key == "pcd_map":
         return run_pcd_map(values)
+    if tool_key == "pcd_tile":
+        return run_pcd_tile(values)
+    if tool_key == "network_scan":
+        return run_network_scan(values)
+    if tool_key == "costmap":
+        return run_costmap(values)
+    if tool_key == "mtslash_export":
+        return run_mtslash_export(values)
 
     logs = [
         f"[INFO] selected tool: {tool.title}",

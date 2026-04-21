@@ -19,6 +19,7 @@ target_include_directories(pcd_map_cli PRIVATE ${COMMON_INCLUDE_DIR})
 add_executable(pcd_tile_cli
     src/pcd_tile_cli/main.cpp
     src/slicing/tile_splitter.cpp
+    src/mapping/pcd_reader.cpp
 )
 target_include_directories(pcd_tile_cli PRIVATE ${COMMON_INCLUDE_DIR})
 
