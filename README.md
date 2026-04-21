@@ -96,6 +96,40 @@ npm run dev
 - backend: `http://127.0.0.1:8000`
 - frontend: `http://127.0.0.1:5173`
 
+## 本地一键安装 / 启动 Web 版
+
+首次部署：
+
+```powershell
+.\scripts\install_local.cmd
+```
+
+启动：
+
+```powershell
+.\scripts\start_local.cmd
+```
+
+启动后访问：
+
+- `http://127.0.0.1:8000`
+
+这个模式会：
+
+- 在 `.venv/` 里安装 Python 依赖
+- 构建 `cpp/build/*.exe`
+- 安装并构建 `frontend/dist`
+- 由 FastAPI 后端直接托管前端页面
+
+目标机器需要预先安装：
+
+- Python 3.10+
+- Node.js LTS
+- CMake
+- 可用的 C++ 编译环境，例如 Visual Studio Build Tools；如果安装了 Ninja 会自动使用 Ninja
+
+如果 `cpp/build/` 里已经带有 `pcd_map_cli.exe`、`pcd_tile_cli.exe`、`network_scan_cli.exe`、`costmap_cli.exe`，安装脚本会跳过 C++ 构建，此时目标机器不需要 CMake。
+
 ## 打包单文件 EXE
 
 ```powershell
