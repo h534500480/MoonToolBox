@@ -12,29 +12,46 @@ function Require-Command($Name, $InstallHint) {
 function Invoke-Checked {
   param(
     [Parameter(Mandatory = $true)]
-    [string] $Command,
-    [Parameter(ValueFromRemainingArguments = $true)]
-    [string[]] $Arguments
+    [string] $Executable,
+    [string[]] $CommandArgs = @()
   )
 
-  & $Command @Arguments
+  & $Executable @CommandArgs
   if ($LASTEXITCODE -ne 0) {
-    throw "Command failed with exit code ${LASTEXITCODE}: $Command $($Arguments -join ' ')"
+    throw "Command failed with exit code ${LASTEXITCODE}: $Executable $($CommandArgs -join ' ')"
+  }
+}
+
+function Initialize-PipNetwork {
+  if ($env:ROS_TOOL_USE_SYSTEM_PROXY -ne "1") {
+    $env:NO_PROXY = "*"
+    $env:no_proxy = "*"
+    $env:HTTP_PROXY = ""
+    $env:HTTPS_PROXY = ""
+    $env:ALL_PROXY = ""
+    $env:http_proxy = ""
+    $env:https_proxy = ""
+    $env:all_proxy = ""
+  }
+
+  if (-not $env:ROS_TOOL_PIP_INDEX_URL) {
+    $env:ROS_TOOL_PIP_INDEX_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
   }
 }
 
 Require-Command "python" "Install Python 3.10+ and add it to PATH."
-Require-Command "npm" "Install Node.js LTS and add npm to PATH."
+Require-Command "npm.cmd" "Install Node.js LTS and add npm to PATH."
+Initialize-PipNetwork
 
 Write-Host "[1/5] Creating Python virtual environment..."
 if (-not (Test-Path ".venv\Scripts\python.exe")) {
-  Invoke-Checked "python" "-m" "venv" ".venv"
+  Invoke-Checked "python" @("-m", "venv", ".venv")
 }
 $Python = Join-Path $Root ".venv\Scripts\python.exe"
 
 Write-Host "[2/5] Installing Python dependencies..."
-Invoke-Checked $Python "-m" "pip" "install" "--upgrade" "pip"
-Invoke-Checked $Python "-m" "pip" "install" "-r" "requirements.txt" "-r" "backend\requirements.txt"
+Invoke-Checked $Python @("-m", "pip", "install", "-i", $env:ROS_TOOL_PIP_INDEX_URL, "--trusted-host", ([Uri]$env:ROS_TOOL_PIP_INDEX_URL).Host, "--upgrade", "pip")
+Invoke-Checked $Python @("-m", "pip", "install", "-i", $env:ROS_TOOL_PIP_INDEX_URL, "--trusted-host", ([Uri]$env:ROS_TOOL_PIP_INDEX_URL).Host, "-r", "requirements.txt", "-r", "backend\requirements.txt")
 
 $RequiredExes = @("pcd_map_cli.exe", "pcd_tile_cli.exe", "network_scan_cli.exe", "costmap_cli.exe")
 $MissingExes = @($RequiredExes | Where-Object { -not (Test-Path (Join-Path $Root "cpp\build\$_")) })
@@ -46,8 +63,8 @@ if ($MissingExes.Count -gt 0) {
   if (Get-Command "ninja" -ErrorAction SilentlyContinue) {
     $ConfigureArgs += @("-G", "Ninja")
   }
-  Invoke-Checked "cmake" @ConfigureArgs
-  Invoke-Checked "cmake" "--build" "cpp\build" "--config" "Release"
+  Invoke-Checked "cmake" $ConfigureArgs
+  Invoke-Checked "cmake" @("--build", "cpp\build", "--config", "Release")
 
   foreach ($ExeName in $RequiredExes) {
     $Exe = Get-ChildItem "cpp\build" -Recurse -Filter $ExeName | Select-Object -First 1
@@ -66,13 +83,13 @@ if ($MissingExes.Count -gt 0) {
 Write-Host "[4/5] Installing frontend dependencies..."
 Push-Location "frontend"
 if (Test-Path "package-lock.json") {
-  Invoke-Checked "npm" "ci"
+  Invoke-Checked "npm.cmd" @("ci")
 } else {
-  Invoke-Checked "npm" "install"
+  Invoke-Checked "npm.cmd" @("install")
 }
 
 Write-Host "[5/5] Building frontend..."
-Invoke-Checked "npm" "run" "build"
+Invoke-Checked "npm.cmd" @("run", "build")
 Pop-Location
 
 Write-Host ""
