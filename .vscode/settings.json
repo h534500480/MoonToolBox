@@ -1,0 +1,28 @@
+{
+  "cmake.sourceDirectory": "${workspaceFolder}/cpp",
+  "cmake.buildDirectory": "${workspaceFolder}/cpp/build",
+  "cmake.generator": "Ninja",
+  "cmake.configureOnOpen": false,
+  "cmake.parallelJobs": 8,
+  "cmake.installPrefix": "${workspaceFolder}/cpp/install",
+  "cmake.cmakePath": "C:/Program Files/CMake/bin/cmake.exe",
+  "cmake.configureSettings": {
+    "CMAKE_BUILD_TYPE": "Release"
+  },
+  "cmake.environment": {
+    "CC": "cl.exe",
+    "CXX": "cl.exe"
+  },
+  "cmake.preferredGenerators": [
+    "Ninja"
+  ],
+  "cmake.configureArgs": [],
+  "cmake.buildArgs": [],
+  "cmake.copyCompileCommands": "${workspaceFolder}/cpp/build/compile_commands.json",
+  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+  "C_Cpp.default.cppStandard": "c++17",
+  "C_Cpp.default.intelliSenseMode": "windows-msvc-x64",
+  "files.associations": {
+    "*.tpp": "cpp"
+  }
+}

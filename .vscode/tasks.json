@@ -1,0 +1,71 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "cpp: configure",
+      "type": "shell",
+      "command": "cmd",
+      "args": [
+        "/c",
+        "\"C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat\" && \"C:\\Program Files\\CMake\\bin\\cmake.exe\" -S \"${workspaceFolder}\\cpp\" -B \"${workspaceFolder}\\cpp\\build\" -G Ninja -DCMAKE_BUILD_TYPE=Release"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [
+        "$msCompile"
+      ],
+      "group": "build"
+    },
+    {
+      "label": "cpp: build",
+      "type": "shell",
+      "command": "cmd",
+      "args": [
+        "/c",
+        "\"C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat\" && \"C:\\Program Files\\CMake\\bin\\cmake.exe\" --build \"${workspaceFolder}\\cpp\\build\" --config Release"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [
+        "$msCompile"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "dependsOn": [
+        "cpp: configure"
+      ]
+    },
+    {
+      "label": "cpp: clean",
+      "type": "shell",
+      "command": "cmd",
+      "args": [
+        "/c",
+        "if exist \"${workspaceFolder}\\cpp\\build\" rmdir /s /q \"${workspaceFolder}\\cpp\\build\""
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "cpp: run help",
+      "type": "shell",
+      "command": "${workspaceFolder}\\cpp\\build\\pcd_map_cli.exe",
+      "args": [
+        "--help"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "dependsOn": [
+        "cpp: build"
+      ]
+    }
+  ]
+}
