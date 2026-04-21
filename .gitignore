@@ -21,6 +21,7 @@ backend/data/*.json
 build/
 dist/
 output/
+release/
 cpp/build/
 
 # CMake / native build artifacts

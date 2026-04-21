@@ -130,6 +130,33 @@ npm run dev
 
 如果 `cpp/build/` 里已经带有 `pcd_map_cli.exe`、`pcd_tile_cli.exe`、`network_scan_cli.exe`、`costmap_cli.exe`，安装脚本会跳过 C++ 构建，此时目标机器不需要 CMake。
 
+## 构建单目录发行版
+
+先在开发机完成本地安装：
+
+```powershell
+.\scripts\install_local.cmd
+```
+
+然后生成可拷贝的发行目录和 zip：
+
+```powershell
+.\scripts\build_dist.cmd
+```
+
+输出位置：
+
+- `release/MoonToolBox/`
+- `release/MoonToolBox.zip`
+
+把 `release/MoonToolBox/` 拷贝到目标 Windows 机器后，双击：
+
+```powershell
+.\scripts\start_local.cmd
+```
+
+这个发行版会内置 `.venv/`、前端静态文件和 C++ CLI，不要求目标机器安装 Node.js、CMake 或编译器。
+
 ## 打包单文件 EXE
 
 ```powershell
