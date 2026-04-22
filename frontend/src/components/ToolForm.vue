@@ -1,8 +1,18 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, reactive, watch } from "vue";
 
-import { browsePath, fetchMtslashCaptcha, fetchMtslashFavorites, fetchPcdTilePreview, loginMtslash, openLocalPath } from "../api/client";
-import type { MtslashFavoriteItem } from "../api/client";
+import {
+  browsePath,
+  fetchMtslashBrowserFavorites,
+  fetchMtslashBrowserTabs,
+  fetchMtslashCaptcha,
+  fetchMtslashFavorites,
+  fetchPcdTilePreview,
+  loginMtslash,
+  openLocalPath,
+  startMtslashBrowser,
+} from "../api/client";
+import type { MtslashBrowserTab, MtslashFavoriteItem } from "../api/client";
 import type { BrowseDialogPayload, ToolDefinition } from "../types";
 
 const props = defineProps<{
@@ -36,6 +46,11 @@ const mtslashFavoritesLoading = ref(false);
 const mtslashFavoritesMessage = ref("");
 const mtslashFavoritesPage = ref(1);
 const mtslashFavoritesKeyword = ref("");
+const mtslashBrowserTabs = ref<MtslashBrowserTab[]>([]);
+const mtslashBrowserLoading = ref(false);
+const mtslashBrowserMessage = ref("");
+const mtslashBrowserPage = ref(1);
+const mtslashBrowserKeyword = ref("");
 const mtslashPageSize = 20;
 let costmapTimer: number | undefined;
 
@@ -55,6 +70,10 @@ watch(
     mtslashFavoritesMessage.value = "";
     mtslashFavoritesPage.value = 1;
     mtslashFavoritesKeyword.value = "";
+    mtslashBrowserTabs.value = [];
+    mtslashBrowserMessage.value = "";
+    mtslashBrowserPage.value = 1;
+    mtslashBrowserKeyword.value = "";
     stopCostmapPlayback();
     costmapFrameIndex.value = 0;
   },
@@ -151,9 +170,26 @@ const pagedMtslashFavorites = computed(() => {
   const start = (safePage - 1) * mtslashPageSize;
   return filteredMtslashFavorites.value.slice(start, start + mtslashPageSize);
 });
+const filteredMtslashBrowserTabs = computed(() => {
+  const keyword = mtslashBrowserKeyword.value.trim().toLowerCase();
+  if (!keyword) {
+    return mtslashBrowserTabs.value;
+  }
+  return mtslashBrowserTabs.value.filter((item) => `${item.title} ${item.url}`.toLowerCase().includes(keyword));
+});
+const filteredMtslashBrowserTotalPages = computed(() => Math.max(1, Math.ceil(filteredMtslashBrowserTabs.value.length / mtslashPageSize)));
+const pagedMtslashBrowserTabs = computed(() => {
+  const safePage = Math.min(Math.max(1, mtslashBrowserPage.value), filteredMtslashBrowserTotalPages.value);
+  const start = (safePage - 1) * mtslashPageSize;
+  return filteredMtslashBrowserTabs.value.slice(start, start + mtslashPageSize);
+});
 
 watch(mtslashFavoritesKeyword, () => {
   mtslashFavoritesPage.value = 1;
+});
+
+watch(mtslashBrowserKeyword, () => {
+  mtslashBrowserPage.value = 1;
 });
 
 const costmapFrames = computed(() => props.resultData.frames ?? []);
@@ -314,7 +350,10 @@ function fieldKind(fieldKey: string) {
   if (props.tool.key === "pcd_tile" && fieldKey === "format") {
     return "select-format";
   }
-  if (fieldKey === "zip_output" || fieldKey === "export_gif" || fieldKey === "export_png" || fieldKey === "show_lethal" || fieldKey === "show_footprint" || fieldKey === "only_thread_author") {
+  if (props.tool.key === "mtslash_export" && fieldKey === "browser_type") {
+    return "select-browser";
+  }
+  if (fieldKey === "zip_output" || fieldKey === "export_gif" || fieldKey === "export_png" || fieldKey === "show_lethal" || fieldKey === "show_footprint" || fieldKey === "only_thread_author" || fieldKey === "browser_mode") {
     return "select-bool";
   }
   return "input";
@@ -354,17 +393,19 @@ async function loginMtslashSession() {
 }
 
 async function loadMtslashFavorites() {
-  if (!formValues.login_session_id?.trim()) {
+  const useBrowser = String(formValues.browser_mode ?? "false").toLowerCase() === "true";
+  if (!useBrowser && !formValues.login_session_id?.trim()) {
     mtslashFavoritesMessage.value = "请先获取验证码并登录。";
     return;
   }
   mtslashFavoritesLoading.value = true;
   mtslashFavoritesMessage.value = "";
   try {
-    const result = await fetchMtslashFavorites(formValues.login_session_id);
+    const browser = formValues.browser_type || "edge";
+    const result = useBrowser ? await fetchMtslashBrowserFavorites(browser) : await fetchMtslashFavorites(formValues.login_session_id);
     mtslashFavorites.value = result.items ?? [];
     mtslashFavoritesPage.value = 1;
-    mtslashFavoritesMessage.value = `已加载 ${mtslashFavorites.value.length} 条收藏，扫描 ${result.page_count} 页。`;
+    mtslashFavoritesMessage.value = `已加载 ${mtslashFavorites.value.length} 条收藏，扫描 ${result.page_count} 页${useBrowser ? "，来源: 浏览器模式" : ""}。`;
   } catch (error) {
     mtslashFavoritesMessage.value = `收藏夹加载失败: ${(error as Error).message}`;
   } finally {
@@ -374,6 +415,51 @@ async function loadMtslashFavorites() {
 
 function selectMtslashFavorite(item: MtslashFavoriteItem) {
   formValues.thread_url = item.url;
+}
+
+async function startMtslashBrowserMode() {
+  mtslashBrowserLoading.value = true;
+  mtslashBrowserMessage.value = "";
+  try {
+    const browser = formValues.browser_type || "edge";
+    const result = await startMtslashBrowser(browser);
+    formValues.browser_mode = "true";
+    mtslashBrowserMessage.value = result.message || `${browser} 浏览器模式已就绪`;
+    await loadMtslashBrowserTabs();
+  } catch (error) {
+    mtslashBrowserMessage.value = `浏览器模式启动失败: ${(error as Error).message}`;
+  } finally {
+    mtslashBrowserLoading.value = false;
+  }
+}
+
+async function loadMtslashBrowserTabs() {
+  mtslashBrowserLoading.value = true;
+  mtslashBrowserMessage.value = "";
+  try {
+    const browser = formValues.browser_type || "edge";
+    const result = await fetchMtslashBrowserTabs(browser);
+    mtslashBrowserTabs.value = result.items ?? [];
+    mtslashBrowserPage.value = 1;
+    mtslashBrowserMessage.value = `已发现 ${mtslashBrowserTabs.value.length} 个站内标签页。`;
+  } catch (error) {
+    mtslashBrowserMessage.value = `标签页读取失败: ${(error as Error).message}`;
+  } finally {
+    mtslashBrowserLoading.value = false;
+  }
+}
+
+function selectMtslashBrowserTab(item: MtslashBrowserTab) {
+  formValues.thread_url = item.url;
+  formValues.browser_mode = "true";
+}
+
+function prevMtslashBrowserPage() {
+  mtslashBrowserPage.value = Math.max(1, mtslashBrowserPage.value - 1);
+}
+
+function nextMtslashBrowserPage() {
+  mtslashBrowserPage.value = Math.min(filteredMtslashBrowserTotalPages.value, mtslashBrowserPage.value + 1);
 }
 
 function prevMtslashFavoritesPage() {
@@ -598,6 +684,14 @@ onBeforeUnmount(() => stopCostmapPlayback());
                 <option value="false">否</option>
                 <option value="true">是</option>
               </select>
+              <select
+                v-else-if="fieldKind(field.key) === 'select-browser'"
+                v-model="formValues[field.key]"
+                class="field-input"
+              >
+                <option value="edge">Edge</option>
+                <option value="chrome">Chrome</option>
+              </select>
               <input
                 v-else
                 v-model="formValues[field.key]"
@@ -639,6 +733,9 @@ onBeforeUnmount(() => stopCostmapPlayback());
             </button>
             <button class="secondary-btn" type="button" :disabled="mtslashFavoritesLoading" @click="loadMtslashFavorites">
               {{ mtslashFavoritesLoading ? "加载中..." : "加载收藏夹" }}
+            </button>
+            <button class="secondary-btn" type="button" :disabled="mtslashBrowserLoading" @click="startMtslashBrowserMode">
+              {{ mtslashBrowserLoading ? "处理中..." : "启动浏览器模式" }}
             </button>
             <button class="secondary-btn" type="button" @click="openOutputDir">打开输出目录</button>
             <button class="secondary-btn" type="button" @click="emit('clearLogs')">清空日志</button>
@@ -883,6 +980,48 @@ data: [0, 0, 100, ...]</pre>
                 </tr>
                 <tr v-if="pagedMtslashFavorites.length === 0">
                   <td colspan="2" class="empty-cell">登录后点击“加载收藏夹”，或调整搜索条件</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel mtslash-browser-panel">
+          <div class="section-head">
+            <div>
+              <div class="result-title">浏览器标签页</div>
+              <div class="section-subtitle">读取浏览器模式窗口中已打开的站内页面，点击行可填入帖子 URL。</div>
+            </div>
+            <div class="mtslash-favorites-tools">
+              <input v-model="mtslashBrowserKeyword" class="field-input compact-input mtslash-search-input" placeholder="搜索标题或链接" />
+              <button class="secondary-btn" type="button" :disabled="mtslashBrowserLoading" @click="startMtslashBrowserMode">
+                {{ mtslashBrowserLoading ? "处理中..." : "启动" }}
+              </button>
+              <button class="secondary-btn" type="button" :disabled="mtslashBrowserLoading" @click="loadMtslashBrowserTabs">
+                {{ mtslashBrowserLoading ? "刷新中..." : "刷新" }}
+              </button>
+              <button class="secondary-btn" type="button" :disabled="mtslashBrowserPage <= 1" @click="prevMtslashBrowserPage">上一页</button>
+              <button class="secondary-btn" type="button" :disabled="mtslashBrowserPage >= filteredMtslashBrowserTotalPages" @click="nextMtslashBrowserPage">下一页</button>
+            </div>
+          </div>
+          <div class="section-subtitle">
+            {{ mtslashBrowserMessage || `共 ${mtslashBrowserTabs.length} 个，筛选 ${filteredMtslashBrowserTabs.length} 个，当前第 ${mtslashBrowserPage} / ${filteredMtslashBrowserTotalPages} 页` }}
+          </div>
+          <div class="network-table-wrap mtslash-favorites-wrap">
+            <table class="network-table mtslash-favorites-table">
+              <thead>
+                <tr>
+                  <th>页面标题</th>
+                  <th>链接</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="item in pagedMtslashBrowserTabs" :key="item.id || item.url" @click="selectMtslashBrowserTab(item)">
+                  <td class="favorite-title" :title="item.title">{{ item.title }}</td>
+                  <td class="favorite-url">{{ item.url }}</td>
+                </tr>
+                <tr v-if="pagedMtslashBrowserTabs.length === 0">
+                  <td colspan="2" class="empty-cell">启动浏览器模式后，在该窗口打开站内帖子并点击刷新</td>
                 </tr>
               </tbody>
             </table>

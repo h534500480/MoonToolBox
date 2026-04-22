@@ -328,6 +328,11 @@ select {
   grid-column: 1 / 2;
 }
 
+.tool-layout-mtslash_export .mtslash-favorites-panel,
+.tool-layout-mtslash_export .mtslash-browser-panel {
+  grid-column: 2 / 3;
+}
+
 .tool-layout-mtslash_export .result-panel {
   grid-column: 2 / 3;
 }
@@ -395,6 +400,7 @@ select {
 
 .actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   margin-top: 20px;
 }
@@ -944,6 +950,14 @@ select {
 
   .tool-layout {
     grid-template-columns: 1fr;
+  }
+
+  .tool-form-panel,
+  .tool-layout-mtslash_export .mtslash-login-panel,
+  .tool-layout-mtslash_export .mtslash-favorites-panel,
+  .tool-layout-mtslash_export .mtslash-browser-panel,
+  .tool-layout-mtslash_export .result-panel {
+    grid-column: 1 / -1;
   }
 
   .costmap-viewer {

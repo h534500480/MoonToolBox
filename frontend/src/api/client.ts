@@ -198,3 +198,73 @@ export async function fetchMtslashFavorites(sessionId: string): Promise<MtslashF
   }
   return response.json();
 }
+
+export async function fetchMtslashBrowserFavorites(browser: string): Promise<MtslashFavoritesResponse> {
+  const query = new URLSearchParams({
+    browser,
+    max_pages: "50"
+  });
+  const response = await fetch(`${API_BASE}/tools/mtslash_export/browser/favorites?${query.toString()}`);
+  if (!response.ok) {
+    let detail = "Failed to fetch browser favorites";
+    try {
+      const data = await response.json();
+      detail = data.detail ?? detail;
+    } catch {
+      // Keep fallback message.
+    }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+export interface MtslashBrowserTab {
+  id: string;
+  title: string;
+  url: string;
+}
+
+export interface MtslashBrowserResponse {
+  status: string;
+  browser?: string;
+  port?: number;
+  message?: string;
+  items?: MtslashBrowserTab[];
+}
+
+export async function startMtslashBrowser(browser: string): Promise<MtslashBrowserResponse> {
+  const response = await fetch(`${API_BASE}/tools/mtslash_export/browser/start`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ browser })
+  });
+  if (!response.ok) {
+    let detail = "Failed to start browser mode";
+    try {
+      const data = await response.json();
+      detail = data.detail ?? detail;
+    } catch {
+      // Keep fallback message.
+    }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+export async function fetchMtslashBrowserTabs(browser: string): Promise<MtslashBrowserResponse> {
+  const query = new URLSearchParams({ browser });
+  const response = await fetch(`${API_BASE}/tools/mtslash_export/browser/tabs?${query.toString()}`);
+  if (!response.ok) {
+    let detail = "Failed to load browser tabs";
+    try {
+      const data = await response.json();
+      detail = data.detail ?? detail;
+    } catch {
+      // Keep fallback message.
+    }
+    throw new Error(detail);
+  }
+  return response.json();
+}

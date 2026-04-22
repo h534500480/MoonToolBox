@@ -12,9 +12,16 @@ from app.models import (
     ToolRunResponse,
 )
 from app.services.costmap_playback import run_costmap
+from app.services.browser_bridge import list_tabs, start_browser
 from app.services.cpp_runner import run_pcd_map, run_pcd_tile
 from app.services.dialogs import browse_local_path
-from app.services.mtslash_exporter import fetch_mtslash_favorites, run_mtslash_export, start_mtslash_login_session, submit_mtslash_login
+from app.services.mtslash_exporter import (
+    fetch_mtslash_browser_favorites,
+    fetch_mtslash_favorites,
+    run_mtslash_export,
+    start_mtslash_login_session,
+    submit_mtslash_login,
+)
 from app.services.network_scan import run_network_scan
 from app.services.pcd_preview import preview_pcd_tile
 from app.services.preferences import load_preferences, save_preferences
@@ -96,6 +103,31 @@ def post_mtslash_login(payload: dict):
 def get_mtslash_favorites(session_id: str, max_pages: int = 50):
     try:
         return fetch_mtslash_favorites(session_id=session_id, max_pages=max_pages)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/tools/mtslash_export/browser/favorites")
+def get_mtslash_browser_favorites(browser: str = "edge", max_pages: int = 50):
+    try:
+        return fetch_mtslash_browser_favorites(browser=browser, max_pages=max_pages)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/tools/mtslash_export/browser/start")
+def post_mtslash_browser_start(payload: dict):
+    browser = str(payload.get("browser", "edge"))
+    try:
+        return start_browser(browser)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/tools/mtslash_export/browser/tabs")
+def get_mtslash_browser_tabs(browser: str = "edge"):
+    try:
+        return {"status": "success", "items": list_tabs(browser)}
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

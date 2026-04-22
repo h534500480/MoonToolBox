@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 from urllib.request import HTTPCookieProcessor, ProxyHandler, Request, build_opener, getproxies, urlopen
 
 from app.models import ToolRunResponse
+from app.services.browser_bridge import get_page_html
 
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -583,6 +584,34 @@ def fetch_thread_page(fetch_client: FetchClient, url: str, warm_url: str, delay_
     return last_html, last_root, last_error
 
 
+def fetch_browser_thread_page(browser: str, url: str, delay_seconds: float, attempts: int = 3) -> tuple:
+    last_html = ""
+    last_root = parse_html("")
+    last_error = ""
+    for attempt in range(1, attempts + 1):
+        if attempt > 1:
+            time.sleep(delay_seconds + attempt * 0.8)
+        try:
+            html = get_page_html(browser, url, wait_seconds=max(1.5, delay_seconds))
+        except RuntimeError as exc:
+            last_error = str(exc)
+            continue
+
+        root = parse_html(html)
+        last_html = html
+        last_root = root
+        site_message = extract_site_message(root)
+        if site_message and any(token in site_message for token in ["尚未登录", "请登录", "没有权限"]):
+            last_error = site_message
+            continue
+        if is_empty_or_interstitial_page(html, root):
+            last_error = "浏览器返回空白页或站点中间页"
+            continue
+        return html, root, ""
+
+    return last_html, last_root, last_error
+
+
 def is_reload_page(html: str) -> bool:
     if RELOAD_TITLE_PATTERN.search(html):
         return True
@@ -959,6 +988,40 @@ def fetch_mtslash_favorites(session_id: str, max_pages: int = 50) -> Dict[str, o
     }
 
 
+def fetch_mtslash_browser_favorites(browser: str = "edge", max_pages: int = 50) -> Dict[str, object]:
+    all_threads: List[FavoriteThread] = []
+    seen_urls = set()
+    first_html = get_page_html(browser, FAVORITES_URL, wait_seconds=2.0)
+    first_root = parse_html(first_html)
+    site_message = extract_site_message(first_root)
+    if site_message:
+        raise RuntimeError(f"收藏夹页面不可用: {site_message}")
+    if is_empty_or_interstitial_page(first_html, first_root):
+        raise RuntimeError("浏览器返回的收藏夹页面为空白页或站点中间页，请确认浏览器模式窗口已登录")
+
+    total_pages = extract_favorite_max_page(first_root, FAVORITES_URL, max_pages=max_pages)
+    for page in range(1, total_pages + 1):
+        if page == 1:
+            root = first_root
+            current_url = FAVORITES_URL
+        else:
+            current_url = query_page_url(FAVORITES_URL, page)
+            html = get_page_html(browser, current_url, wait_seconds=2.0)
+            root = parse_html(html)
+
+        for item in extract_favorite_threads(root, current_url):
+            if item.url in seen_urls:
+                continue
+            seen_urls.add(item.url)
+            all_threads.append(item)
+
+    return {
+        "status": "success",
+        "page_count": total_pages,
+        "items": [{"title": item.title, "url": item.url} for item in all_threads],
+    }
+
+
 def extract_title(root: HtmlNode) -> str:
     title = first_text(root, lambda node: node.attrs.get("id") == "thread_subject")
     if title:
@@ -1160,6 +1223,8 @@ def run_mtslash_export(values: Dict[str, str]) -> ToolRunResponse:
     only_thread_author = _bool_value(values.get("only_thread_author"), True)
     max_pages = _int_value(values.get("max_pages"), default=20, minimum=1, maximum=80)
     delay_seconds = _float_value(values.get("delay_seconds"), default=1.5, minimum=1.0, maximum=10.0)
+    browser_mode = _bool_value(values.get("browser_mode"), False)
+    browser_type = values.get("browser_type", "edge").strip().lower() or "edge"
     cookie = values.get("cookie", "")
     user_agent = values.get("user_agent", "").strip() or DEFAULT_USER_AGENT
     login_username = values.get("login_username", "").strip()
@@ -1195,7 +1260,10 @@ def run_mtslash_export(values: Dict[str, str]) -> ToolRunResponse:
             data={},
         )
 
-    if cookie.strip():
+    if browser_mode:
+        fetch_client = None
+        logs.append(f"[INFO] 浏览器模式: 使用 {browser_type} 当前登录状态读取页面 HTML")
+    elif cookie.strip():
         fetch_client = FetchClient(cookie=cookie, user_agent=user_agent)
         logs.append("[INFO] 使用手动 Cookie 访问，不执行账号登录")
     elif authenticated_fetch_client(login_session_id) is not None:
@@ -1226,7 +1294,10 @@ def run_mtslash_export(values: Dict[str, str]) -> ToolRunResponse:
         fetch_client = FetchClient(cookie="", user_agent=user_agent)
         logs.append("[INFO] 未提供 Cookie 或登录信息，将以游客身份访问")
 
-    first_html, first_root, first_error = fetch_thread_page(fetch_client, thread_url, BASE_URL, delay_seconds, attempts=5)
+    if browser_mode:
+        first_html, first_root, first_error = fetch_browser_thread_page(browser_type, thread_url, delay_seconds, attempts=4)
+    else:
+        first_html, first_root, first_error = fetch_thread_page(fetch_client, thread_url, BASE_URL, delay_seconds, attempts=5)
     if first_error:
         logs.append(f"[WARN] 帖子首页多次重试后仍异常: {first_error}")
         if first_html:
@@ -1271,7 +1342,10 @@ def run_mtslash_export(values: Dict[str, str]) -> ToolRunResponse:
             if not robots_allowed(current_url, user_agent):
                 logs.append(f"[WARN] robots.txt disallow: {current_url}")
                 break
-            html, root, page_error = fetch_thread_page(fetch_client, current_url, thread_url, delay_seconds, attempts=4)
+            if browser_mode:
+                html, root, page_error = fetch_browser_thread_page(browser_type, current_url, delay_seconds, attempts=3)
+            else:
+                html, root, page_error = fetch_thread_page(fetch_client, current_url, thread_url, delay_seconds, attempts=4)
             if page_error:
                 logs.append(f"[WARN] 抓取第 {page} 页失败，已停止后续分页: {page_error}")
                 if html:

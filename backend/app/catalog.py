@@ -88,6 +88,8 @@ TOOL_DEFINITIONS = [
         fields=[
             ToolField(key="thread_url", label="帖子 URL", placeholder="https://mtslash.life/thread-123-1-1.html"),
             ToolField(key="output_dir", label="输出目录", value=""),
+            ToolField(key="browser_mode", label="浏览器模式", value="false"),
+            ToolField(key="browser_type", label="浏览器", value="edge"),
             ToolField(key="only_thread_author", label="只导出楼主", value="true"),
             ToolField(key="max_pages", label="最大页数", value="20"),
             ToolField(key="delay_seconds", label="请求间隔秒", value="1.5"),
