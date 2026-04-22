@@ -324,17 +324,27 @@ select {
   grid-column: 1 / -1;
 }
 
-.tool-layout-mtslash_export .mtslash-login-panel {
+.tool-layout-mtslash_export {
+  align-items: start;
+}
+
+.mtslash-left-stack,
+.mtslash-right-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.mtslash-left-stack {
   grid-column: 1 / 2;
 }
 
-.tool-layout-mtslash_export .mtslash-favorites-panel,
-.tool-layout-mtslash_export .mtslash-browser-panel {
+.mtslash-right-stack {
   grid-column: 2 / 3;
 }
 
-.tool-layout-mtslash_export .result-panel {
-  grid-column: 2 / 3;
+.tool-layout-mtslash_export .tool-log-panel {
+  grid-column: 1 / -1;
 }
 
 .panel {
@@ -617,6 +627,41 @@ select {
   overflow-wrap: anywhere;
   word-break: break-word;
   color: #cfe0ff;
+}
+
+.mtslash-progress-track {
+  position: relative;
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  border: 1px solid #273245;
+  background: #111824;
+}
+
+.mtslash-progress-bar {
+  width: 100%;
+  height: 100%;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, #4c86ff, #49d79d, transparent);
+}
+
+.mtslash-progress-track.active .mtslash-progress-bar {
+  animation: mtslash-progress-sweep 1.2s ease-in-out infinite;
+}
+
+.mtslash-progress-text {
+  margin-top: 12px;
+  overflow-wrap: anywhere;
+}
+
+@keyframes mtslash-progress-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+
+  to {
+    transform: translateX(100%);
+  }
 }
 
 .costmap-player-panel {
@@ -953,7 +998,10 @@ select {
   }
 
   .tool-form-panel,
+  .mtslash-left-stack,
+  .mtslash-right-stack,
   .tool-layout-mtslash_export .mtslash-login-panel,
+  .tool-layout-mtslash_export .mtslash-progress-panel,
   .tool-layout-mtslash_export .mtslash-favorites-panel,
   .tool-layout-mtslash_export .mtslash-browser-panel,
   .tool-layout-mtslash_export .result-panel {

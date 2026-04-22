@@ -1,15 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""旧 Tkinter 工具共享样式。
+
+这些辅助函数只服务于 `src/ros_tool_suite/tools/` 下的桌面页面。Web UI 样式
+由 `frontend/src/styles.css` 维护。
+"""
+
 import tkinter as tk
 from tkinter import ttk
 
 
 def apply_suite_theme(root):
+    """应用旧桌面版统一主题。
+
+    输入为 Tk 根窗口或容器。部分运行环境可能缺少指定 theme 或无法配置背景，
+    这些失败不影响工具功能，因此仅在局部静默降级。
+    """
     style = ttk.Style()
     try:
         style.theme_use("clam")
     except tk.TclError:
+        # Tk 主题不可用时继续使用系统默认主题。
         pass
 
     bg = "#171c28"
@@ -25,6 +37,7 @@ def apply_suite_theme(root):
     try:
         root.configure(bg=bg)
     except tk.TclError:
+        # 某些嵌入式容器不支持 bg 配置，忽略后仍可使用 ttk 样式。
         pass
 
     style.configure(".", background=bg, foreground=text, font=("Microsoft YaHei UI", 10))

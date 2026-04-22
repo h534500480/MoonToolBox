@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-PCD tile splitter with GUI
-Features:
-- Select input PCD by dialog
-- Select output directory by dialog
-- Optional zip output
-- Choose output tile format: ascii / binary
-- Generate Autoware-style pointcloud_data_metadata.yaml
-- Progress bar
-- Preview point cloud bounds and estimated tile count
-- Optional auto-clean output directory
+"""旧桌面版 PCD 切片工具。
 
-Windows:
-    python pcd_tile_split_gui.py
+本文件同时包含 PCD 解析、切片写出和 Tkinter 页面，属于历史实现。当前 Web
+主线已通过后端调用 C++ CLI，后续如需继续扩展切片能力，应优先迁移到
+`backend/app/services/` 或 `cpp/`，不要继续扩大这个单文件。
 
-Linux:
-    python3 pcd_tile_split_gui.py
+主要能力：
+- 选择输入 PCD 和输出目录
+- 可选 zip 输出
+- 支持 ascii / binary tile 格式
+- 生成 Autoware 风格 pointcloud_data_metadata.yaml
+- 预扫描点云范围和预计 tile 数
+
+独立运行：
+    python -m ros_tool_suite.tools.pcd_tile_split_gui
 """
 
 import argparse
@@ -46,6 +44,7 @@ from ros_tool_suite.shared_ui import (
 # =========================
 
 def parse_pcd_header(f) -> Tuple[Dict[str, Any], int]:
+    """解析 PCD 头并返回结构化字段与数据偏移。"""
     header = {}
     lines = []
     while True:
@@ -55,6 +54,7 @@ def parse_pcd_header(f) -> Tuple[Dict[str, Any], int]:
         try:
             s = line.decode("utf-8", errors="ignore").strip()
         except Exception:
+            # 旧 PCD 文件头偶尔混入异常字节，退回 bytes 文本化以继续报出结构错误。
             s = str(line).strip()
         lines.append(s)
         if s.startswith("DATA"):
@@ -341,6 +341,7 @@ def clean_output_dir(out_dir: str, metadata_name: str, logger=None):
                 os.remove(full)
                 removed += 1
             except Exception:
+                # 输出目录可能被预览器或其它进程占用，清理失败不阻断本次切片。
                 pass
         elif os.path.isdir(full):
             # 不主动删子目录，避免误删
@@ -362,6 +363,12 @@ def split_pcd(
     logger=None,
     progress_cb: Optional[Callable[[float, str], None]] = None,
 ):
+    """旧 Python PCD 切片主流程。
+
+    输入 PCD、输出目录、tile 参数和输出格式，写出分片 PCD、metadata，并按需生成
+    zip。当前 Web 主线优先调用 C++ CLI。
+    """
+
     def log(msg: str):
         if logger:
             logger(msg)
@@ -521,6 +528,12 @@ def preview_pcd(
 # =========================
 
 class App:
+    """旧桌面版 PCD 切片页面。
+
+    页面负责参数收集、预扫描、后台执行和日志展示；实际切片由 `split_pcd`
+    完成。
+    """
+
     def __init__(self, root, embedded: bool = False):
         self.root = root
         self.embedded = embedded

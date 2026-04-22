@@ -27,7 +27,9 @@
 - `ip check`
   前后端页面和接口骨架已存在
 - `bag replay`
-  前后端页面和接口骨架已存在
+  已接通 `frontend -> backend -> costmap_cli.exe`
+- `MTSlash 导出`
+  已接通账号登录、收藏夹读取、浏览器模式标签页读取和单帖 TXT 导出
 
 ## 工具分区与收藏
 
@@ -49,8 +51,8 @@
 
 ## 下一步
 
-按同样模式继续补真实执行链路：
+继续沿 `frontend -> backend -> cpp` 的方向收敛旧 Python GUI 能力：
 
-- `frontend -> backend -> pcd_tile_cli.exe`
-- `frontend -> backend -> network_scan_cli.exe`
-- `frontend -> backend -> costmap_cli.exe`
+- 将仍在 `src/ros_tool_suite/tools/` 中维护的旧桌面逻辑逐步下沉到后端或 C++ CLI
+- 把体积较大的前端工具页面拆成职责更清晰的组件
+- 为 MTSlash 这类依赖外部页面结构的模块补充诊断说明和失败样例记录

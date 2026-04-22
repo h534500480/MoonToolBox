@@ -1,3 +1,9 @@
+"""通过浏览器 DevTools 协议读取已登录网页内容。
+
+本模块只启动由工具管理的 Edge/Chrome 独立 profile，并限制读取 mtslash.life
+站内标签页。这样可以复用浏览器里的登录态，同时避免扫描用户日常浏览器窗口。
+"""
+
 import json
 import subprocess
 import time
@@ -58,6 +64,11 @@ def devtools_available(browser: str) -> bool:
 
 
 def start_browser(browser: str) -> dict:
+    """启动或复用浏览器模式窗口。
+
+    输入为浏览器类型，当前支持 edge/chrome。函数会使用固定调试端口和独立
+    user-data-dir，避免污染用户默认浏览器 profile。
+    """
     browser = browser.lower()
     port = browser_port(browser)
     if not devtools_available(browser):
@@ -92,6 +103,11 @@ def is_mtslash_url(url: str) -> bool:
 
 
 def list_tabs(browser: str) -> list:
+    """列出浏览器模式窗口里的站内页面。
+
+    返回值只包含 mtslash.life 域名下的 page 类型标签页，供前端生成可点击 URL
+    列表；其他页面不会暴露给工具界面。
+    """
     try:
         raw_tabs = fetch_json(f"{browser_debug_base(browser)}/json", timeout=2)
     except URLError as exc:
@@ -113,6 +129,11 @@ def list_tabs(browser: str) -> list:
 
 
 def find_or_open_tab(browser: str, url: str) -> dict:
+    """查找目标标签页，必要时打开一个新标签页。
+
+    优先复用同 URL 标签页，其次复用任意站内标签页。这样翻页导出时会留在
+    同一个受控窗口中，站点登录态和风控状态更接近用户手动浏览。
+    """
     tabs = fetch_json(f"{browser_debug_base(browser)}/json", timeout=2)
     for tab in tabs:
         if tab.get("type") == "page" and tab.get("url", "").split("#", 1)[0] == url.split("#", 1)[0]:
@@ -128,6 +149,7 @@ def find_or_open_tab(browser: str, url: str) -> dict:
 
 
 def cdp_call(ws, counter: dict, method: str, params: Optional[dict] = None) -> dict:
+    """发送一次 Chrome DevTools Protocol 调用并等待对应响应。"""
     counter["id"] += 1
     message_id = counter["id"]
     ws.send(json.dumps({"id": message_id, "method": method, "params": params or {}}))
@@ -140,6 +162,11 @@ def cdp_call(ws, counter: dict, method: str, params: Optional[dict] = None) -> d
 
 
 def get_page_html(browser: str, url: str, wait_seconds: float = 2.0) -> str:
+    """导航到指定 URL 并返回当前页面 HTML。
+
+    该函数依赖浏览器真实加载页面，适合处理 Python 请求被重置、但浏览器可访问
+    的场景。调用方仍需要解析返回 HTML 并判断是否为站点中间页。
+    """
     start_browser(browser)
     tab = find_or_open_tab(browser, url)
     websocket_url = tab.get("webSocketDebuggerUrl")

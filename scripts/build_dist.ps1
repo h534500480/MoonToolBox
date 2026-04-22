@@ -84,14 +84,14 @@ function Install-EmbeddedPython($Destination) {
   Invoke-Checked $RuntimePython @($GetPip, "--no-warn-script-location")
   Invoke-Checked $RuntimePython @("-m", "pip", "install", "--no-warn-script-location", "--upgrade", "pip")
   Invoke-Checked $RuntimePython @("-m", "pip", "install", "--no-warn-script-location", "-r", "backend\requirements.txt")
-  Invoke-Checked $RuntimePython @("-c", "import fastapi, uvicorn, yaml, PIL")
+  Invoke-Checked $RuntimePython @("-c", "import fastapi, uvicorn, yaml, PIL, websockets")
 }
 
 Write-Host "[1/6] Checking local build outputs..."
 Require-Path ".venv\Scripts\python.exe" "Run .\scripts\install_local.cmd first."
 Require-Path "frontend\dist\index.html" "Run .\scripts\install_local.cmd first."
 
-& ".venv\Scripts\python.exe" -c "import fastapi, uvicorn, yaml, PIL"
+& ".venv\Scripts\python.exe" -c "import fastapi, uvicorn, yaml, PIL, websockets"
 if ($LASTEXITCODE -ne 0) {
   throw ".venv is missing runtime Python dependencies. Run .\scripts\install_local.cmd and fix any pip errors first."
 }
@@ -133,6 +133,8 @@ $CleanupPaths = @(
   "backend\app\__pycache__",
   "backend\app\api\__pycache__",
   "backend\app\services\__pycache__",
+  "backend\data\_debug",
+  "backend\data\browser_profiles",
   "backend\data\tool_preferences.json"
 )
 foreach ($RelativePath in $CleanupPaths) {

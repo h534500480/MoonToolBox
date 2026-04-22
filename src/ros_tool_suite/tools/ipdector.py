@@ -1,3 +1,10 @@
+"""旧桌面版局域网扫描工具。
+
+该模块包含 Tkinter 页面、ping 扫描、ARP/MAC 解析和 CSV 导出逻辑。当前 Web
+主线已经有独立的后端网络扫描服务，后续新增扫描能力应优先沉淀到
+`backend/app/services/network_scan.py` 或 C++ 网络模块。
+"""
+
 import csv
 import os
 import queue
@@ -18,6 +25,12 @@ from ros_tool_suite.shared_ui import (
 
 
 class NetworkScannerApp:
+    """旧桌面版局域网扫描页面。
+
+    输入为 Tk 容器，页面内部调度 ping、ARP、主机名和端口探测。Web 主线对应
+    能力位于后端 `network_scan.py`。
+    """
+
     def __init__(self, root, embedded=False):
         self.root = root
         self.embedded = embedded
@@ -244,6 +257,10 @@ class NetworkScannerApp:
         self.status_var.set("正在停止...")
 
     def scan_network(self, prefix, start_num, end_num, thread_num, timeout_num):
+        """按网段并发扫描。
+
+        结果通过队列回传给 UI 线程，避免 worker 线程直接操作 Tk 控件。
+        """
         import concurrent.futures
 
         targets = [f"{prefix}.{i}" for i in range(start_num, end_num + 1)]
@@ -340,6 +357,7 @@ class NetworkScannerApp:
                 return True, latency
             return False, ""
         except Exception:
+            # ping 是系统命令，目标不可达、编码异常或命令失败都按离线处理。
             return False, ""
 
     def lookup_arp(self, ip):
@@ -364,6 +382,7 @@ class NetworkScannerApp:
                     arp_type = match.group(3)
                     return mac, arp_type
         except Exception:
+            # ARP 表查询失败只影响 MAC 展示，不应中断单个 IP 的扫描结果。
             pass
         return "", ""
 
@@ -372,6 +391,7 @@ class NetworkScannerApp:
             host, _, _ = socket.gethostbyaddr(ip)
             return host
         except Exception:
+            # 反向 DNS 在局域网里经常不可用，失败时保留空主机名。
             return ""
 
     def check_port(self, ip, port, timeout=0.25):
@@ -380,6 +400,7 @@ class NetworkScannerApp:
                 s.settimeout(timeout)
                 return s.connect_ex((ip, port)) == 0
         except Exception:
+            # 端口探测失败等价于端口未开放，避免网络异常打断整轮扫描。
             return False
 
     def _poll_queue(self):
@@ -503,12 +524,14 @@ def main():
         from ctypes import windll
         windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
+        # DPI 设置只影响显示清晰度，失败时继续使用系统默认缩放。
         pass
 
     style = ttk.Style()
     try:
         style.theme_use("vista")
     except Exception:
+        # 非 Windows 或主题不可用时保留默认 ttk 主题。
         pass
 
     app = NetworkScannerApp(root)

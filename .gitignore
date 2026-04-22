@@ -12,6 +12,8 @@ venv/
 # Frontend
 frontend/node_modules/
 frontend/dist/
+.pnpm-store/
+npm-debug.log*
 
 # Backend local data
 backend/data/*.json
@@ -44,6 +46,8 @@ compile_commands.json
 # Logs and temp files
 logs/
 backend/data/_debug/
+coverage/
+.coverage
 *.log
 *.tmp
 *.temp
@@ -51,3 +55,7 @@ backend/data/_debug/
 # OS / editor junk
 .DS_Store
 Thumbs.db
+
+# IDE / editor local state
+.vscode/
+.idea/

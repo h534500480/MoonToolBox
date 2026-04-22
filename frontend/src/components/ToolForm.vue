@@ -183,6 +183,15 @@ const pagedMtslashBrowserTabs = computed(() => {
   const start = (safePage - 1) * mtslashPageSize;
   return filteredMtslashBrowserTabs.value.slice(start, start + mtslashPageSize);
 });
+const mtslashExportModeLabel = computed(() =>
+  String(formValues.browser_mode ?? "false").toLowerCase() === "true" ? `浏览器模式 / ${formValues.browser_type || "edge"}` : "直连/登录会话模式"
+);
+const mtslashProgressText = computed(() => {
+  if (props.loading) {
+    return `正在导出: ${formValues.thread_url || "等待帖子 URL"}`;
+  }
+  return props.summary || "等待导出任务";
+});
 
 watch(mtslashFavoritesKeyword, () => {
   mtslashFavoritesPage.value = 1;
@@ -658,7 +667,7 @@ onBeforeUnmount(() => stopCostmapPlayback());
     </header>
 
     <div class="tool-layout" :class="`tool-layout-${tool.key}`">
-      <section class="panel tool-form-panel">
+      <section v-if="tool.key !== 'mtslash_export'" class="panel tool-form-panel">
         <div class="section-head">
           <div class="result-title">参数配置</div>
           <div class="section-subtitle">支持手动输入和本地浏览选择</div>
@@ -947,126 +956,220 @@ data: [0, 0, 100, ...]</pre>
       </template>
 
       <template v-else-if="tool.key === 'mtslash_export'">
-        <section class="panel mtslash-favorites-panel">
-          <div class="section-head">
-            <div>
-              <div class="result-title">收藏夹</div>
-              <div class="section-subtitle">从当前登录用户收藏夹读取帖子，点击行可填入帖子 URL。</div>
+        <div class="mtslash-left-stack">
+          <section class="panel tool-form-panel">
+            <div class="section-head">
+              <div class="result-title">参数配置</div>
+              <div class="section-subtitle">支持手动输入和本地浏览选择</div>
             </div>
-            <div class="mtslash-favorites-tools">
-              <input v-model="mtslashFavoritesKeyword" class="field-input compact-input mtslash-search-input" placeholder="搜索标题或链接" />
+
+            <div class="grid-form">
+              <label v-for="field in tool.fields" v-show="fieldKind(field.key) !== 'hidden'" :key="field.key" class="field">
+                <span class="field-label">{{ field.label }}</span>
+                <div class="field-row">
+                  <select
+                    v-if="fieldKind(field.key) === 'select-format'"
+                    v-model="formValues[field.key]"
+                    class="field-input"
+                  >
+                    <option value="ascii">ASCII</option>
+                    <option value="binary">Binary</option>
+                  </select>
+                  <select
+                    v-else-if="fieldKind(field.key) === 'select-bool'"
+                    v-model="formValues[field.key]"
+                    class="field-input"
+                  >
+                    <option value="false">否</option>
+                    <option value="true">是</option>
+                  </select>
+                  <select
+                    v-else-if="fieldKind(field.key) === 'select-browser'"
+                    v-model="formValues[field.key]"
+                    class="field-input"
+                  >
+                    <option value="edge">Edge</option>
+                    <option value="chrome">Chrome</option>
+                  </select>
+                  <input
+                    v-else
+                    v-model="formValues[field.key]"
+                    class="field-input"
+                    :type="fieldKind(field.key) === 'password' ? 'password' : 'text'"
+                    :placeholder="field.placeholder"
+                  />
+                  <button
+                    v-if="getBrowseMode(field.key, field.label)"
+                    class="field-browse-btn"
+                    type="button"
+                    @click="browseField(field.key, field.label)"
+                  >
+                    选择
+                  </button>
+                </div>
+              </label>
+            </div>
+
+            <div class="actions">
+              <button class="primary-btn" :disabled="loading" @click="submit">
+                {{ loading ? "处理中..." : tool.primary_action }}
+              </button>
+              <button class="secondary-btn" type="button" :disabled="mtslashCaptchaLoading" @click="fetchCaptcha">
+                {{ mtslashCaptchaLoading ? "获取中..." : "获取验证码" }}
+              </button>
+              <button class="secondary-btn" type="button" :disabled="mtslashLoginLoading" @click="loginMtslashSession">
+                {{ mtslashLoginLoading ? "登录中..." : "登录" }}
+              </button>
               <button class="secondary-btn" type="button" :disabled="mtslashFavoritesLoading" @click="loadMtslashFavorites">
-                {{ mtslashFavoritesLoading ? "加载中..." : "刷新" }}
+                {{ mtslashFavoritesLoading ? "加载中..." : "加载收藏夹" }}
               </button>
-              <button class="secondary-btn" type="button" :disabled="mtslashFavoritesPage <= 1" @click="prevMtslashFavoritesPage">上一页</button>
-              <button class="secondary-btn" type="button" :disabled="mtslashFavoritesPage >= filteredMtslashFavoriteTotalPages" @click="nextMtslashFavoritesPage">下一页</button>
-            </div>
-          </div>
-          <div class="section-subtitle">
-            {{ mtslashFavoritesMessage || `共 ${mtslashFavorites.length} 条，筛选 ${filteredMtslashFavorites.length} 条，当前第 ${mtslashFavoritesPage} / ${filteredMtslashFavoriteTotalPages} 页` }}
-          </div>
-          <div class="network-table-wrap mtslash-favorites-wrap">
-            <table class="network-table mtslash-favorites-table">
-              <thead>
-                <tr>
-                  <th>帖子名</th>
-                  <th>链接</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="item in pagedMtslashFavorites" :key="item.url" @click="selectMtslashFavorite(item)">
-                  <td class="favorite-title" :title="item.title">{{ item.title }}</td>
-                  <td class="favorite-url">{{ item.url }}</td>
-                </tr>
-                <tr v-if="pagedMtslashFavorites.length === 0">
-                  <td colspan="2" class="empty-cell">登录后点击“加载收藏夹”，或调整搜索条件</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        <section class="panel mtslash-browser-panel">
-          <div class="section-head">
-            <div>
-              <div class="result-title">浏览器标签页</div>
-              <div class="section-subtitle">读取浏览器模式窗口中已打开的站内页面，点击行可填入帖子 URL。</div>
-            </div>
-            <div class="mtslash-favorites-tools">
-              <input v-model="mtslashBrowserKeyword" class="field-input compact-input mtslash-search-input" placeholder="搜索标题或链接" />
               <button class="secondary-btn" type="button" :disabled="mtslashBrowserLoading" @click="startMtslashBrowserMode">
-                {{ mtslashBrowserLoading ? "处理中..." : "启动" }}
+                {{ mtslashBrowserLoading ? "处理中..." : "启动浏览器模式" }}
               </button>
-              <button class="secondary-btn" type="button" :disabled="mtslashBrowserLoading" @click="loadMtslashBrowserTabs">
-                {{ mtslashBrowserLoading ? "刷新中..." : "刷新" }}
-              </button>
-              <button class="secondary-btn" type="button" :disabled="mtslashBrowserPage <= 1" @click="prevMtslashBrowserPage">上一页</button>
-              <button class="secondary-btn" type="button" :disabled="mtslashBrowserPage >= filteredMtslashBrowserTotalPages" @click="nextMtslashBrowserPage">下一页</button>
+              <button class="secondary-btn" type="button" @click="openOutputDir">打开输出目录</button>
+              <button class="secondary-btn" type="button" @click="emit('clearLogs')">清空日志</button>
             </div>
-          </div>
-          <div class="section-subtitle">
-            {{ mtslashBrowserMessage || `共 ${mtslashBrowserTabs.length} 个，筛选 ${filteredMtslashBrowserTabs.length} 个，当前第 ${mtslashBrowserPage} / ${filteredMtslashBrowserTotalPages} 页` }}
-          </div>
-          <div class="network-table-wrap mtslash-favorites-wrap">
-            <table class="network-table mtslash-favorites-table">
-              <thead>
-                <tr>
-                  <th>页面标题</th>
-                  <th>链接</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="item in pagedMtslashBrowserTabs" :key="item.id || item.url" @click="selectMtslashBrowserTab(item)">
-                  <td class="favorite-title" :title="item.title">{{ item.title }}</td>
-                  <td class="favorite-url">{{ item.url }}</td>
-                </tr>
-                <tr v-if="pagedMtslashBrowserTabs.length === 0">
-                  <td colspan="2" class="empty-cell">启动浏览器模式后，在该窗口打开站内帖子并点击刷新</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
+          </section>
 
-        <section class="panel mtslash-login-panel">
-          <div class="section-head">
-            <div>
-              <div class="result-title">一次性登录</div>
-              <div class="section-subtitle">验证码必须人工输入；登录失败不会自动重试，账号有 60 秒冷却。</div>
-            </div>
-          </div>
-          <div class="mtslash-login-box">
-            <div class="captcha-frame">
-              <img v-if="mtslashCaptchaImage" :src="mtslashCaptchaImage" alt="验证码" />
-              <span v-else>点击“获取验证码”后显示图片</span>
-            </div>
-            <div>
-              <div class="status-pill" :class="{ success: mtslashLoggedIn }">
-                {{ mtslashLoggedIn ? "已登录" : "未登录" }}
+          <section class="panel mtslash-login-panel">
+            <div class="section-head">
+              <div>
+                <div class="result-title">一次性登录</div>
+                <div class="section-subtitle">验证码必须人工输入；登录失败不会自动重试，账号有 60 秒冷却。</div>
               </div>
-              <p class="summary">{{ mtslashLoginMessage || "可继续使用 Cookie；不填 Cookie 时，先获取验证码并登录，再导出。" }}</p>
             </div>
-          </div>
-        </section>
+            <div class="mtslash-login-box">
+              <div class="captcha-frame">
+                <img v-if="mtslashCaptchaImage" :src="mtslashCaptchaImage" alt="验证码" />
+                <span v-else>点击“获取验证码”后显示图片</span>
+              </div>
+              <div>
+                <div class="status-pill" :class="{ success: mtslashLoggedIn }">
+                  {{ mtslashLoggedIn ? "已登录" : "未登录" }}
+                </div>
+                <p class="summary">{{ mtslashLoginMessage || "可继续使用 Cookie；不填 Cookie 时，先获取验证码并登录，再导出。" }}</p>
+              </div>
+            </div>
+          </section>
 
-        <section class="result-panel">
-          <div class="result-title">导出概览</div>
-          <p class="summary">{{ summary }}</p>
-          <div class="stat-strip">
-            <div class="stat-chip">
-              <span class="stat-chip-label">收录段落</span>
-              <strong>{{ props.resultData.post_count || "0" }}</strong>
+          <section class="panel mtslash-progress-panel">
+            <div class="section-head">
+              <div>
+                <div class="result-title">处理进度</div>
+                <div class="section-subtitle">{{ mtslashExportModeLabel }}</div>
+              </div>
+              <div class="status-pill" :class="{ success: !loading && Boolean(props.resultData.output_path) }">
+                {{ loading ? "导出中" : props.resultData.output_path ? "已完成" : "待处理" }}
+              </div>
             </div>
-            <div class="stat-chip">
-              <span class="stat-chip-label">帖子标题</span>
-              <strong>{{ props.resultData.title || "等待导出" }}</strong>
+            <div class="mtslash-progress-track" :class="{ active: loading }">
+              <div class="mtslash-progress-bar"></div>
             </div>
-            <div class="stat-chip">
-              <span class="stat-chip-label">输出文件</span>
-              <strong>{{ props.resultData.output_path || "未生成" }}</strong>
+            <p class="summary mtslash-progress-text">{{ mtslashProgressText }}</p>
+          </section>
+        </div>
+
+        <div class="mtslash-right-stack">
+          <section class="panel mtslash-favorites-panel">
+            <div class="section-head">
+              <div>
+                <div class="result-title">收藏夹</div>
+                <div class="section-subtitle">从当前登录用户收藏夹读取帖子，点击行可填入帖子 URL。</div>
+              </div>
+              <div class="mtslash-favorites-tools">
+                <input v-model="mtslashFavoritesKeyword" class="field-input compact-input mtslash-search-input" placeholder="搜索标题或链接" />
+                <button class="secondary-btn" type="button" :disabled="mtslashFavoritesLoading" @click="loadMtslashFavorites">
+                  {{ mtslashFavoritesLoading ? "加载中..." : "刷新" }}
+                </button>
+                <button class="secondary-btn" type="button" :disabled="mtslashFavoritesPage <= 1" @click="prevMtslashFavoritesPage">上一页</button>
+                <button class="secondary-btn" type="button" :disabled="mtslashFavoritesPage >= filteredMtslashFavoriteTotalPages" @click="nextMtslashFavoritesPage">下一页</button>
+              </div>
             </div>
-          </div>
-        </section>
+            <div class="section-subtitle">
+              {{ mtslashFavoritesMessage || `共 ${mtslashFavorites.length} 条，筛选 ${filteredMtslashFavorites.length} 条，当前第 ${mtslashFavoritesPage} / ${filteredMtslashFavoriteTotalPages} 页` }}
+            </div>
+            <div class="network-table-wrap mtslash-favorites-wrap">
+              <table class="network-table mtslash-favorites-table">
+                <thead>
+                  <tr>
+                    <th>帖子名</th>
+                    <th>链接</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="item in pagedMtslashFavorites" :key="item.url" @click="selectMtslashFavorite(item)">
+                    <td class="favorite-title" :title="item.title">{{ item.title }}</td>
+                    <td class="favorite-url">{{ item.url }}</td>
+                  </tr>
+                  <tr v-if="pagedMtslashFavorites.length === 0">
+                    <td colspan="2" class="empty-cell">登录后点击“加载收藏夹”，或调整搜索条件</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel mtslash-browser-panel">
+            <div class="section-head">
+              <div>
+                <div class="result-title">浏览器标签页</div>
+                <div class="section-subtitle">读取浏览器模式窗口中已打开的站内页面，点击行可填入帖子 URL。</div>
+              </div>
+              <div class="mtslash-favorites-tools">
+                <input v-model="mtslashBrowserKeyword" class="field-input compact-input mtslash-search-input" placeholder="搜索标题或链接" />
+                <button class="secondary-btn" type="button" :disabled="mtslashBrowserLoading" @click="startMtslashBrowserMode">
+                  {{ mtslashBrowserLoading ? "处理中..." : "启动" }}
+                </button>
+                <button class="secondary-btn" type="button" :disabled="mtslashBrowserLoading" @click="loadMtslashBrowserTabs">
+                  {{ mtslashBrowserLoading ? "刷新中..." : "刷新" }}
+                </button>
+                <button class="secondary-btn" type="button" :disabled="mtslashBrowserPage <= 1" @click="prevMtslashBrowserPage">上一页</button>
+                <button class="secondary-btn" type="button" :disabled="mtslashBrowserPage >= filteredMtslashBrowserTotalPages" @click="nextMtslashBrowserPage">下一页</button>
+              </div>
+            </div>
+            <div class="section-subtitle">
+              {{ mtslashBrowserMessage || `共 ${mtslashBrowserTabs.length} 个，筛选 ${filteredMtslashBrowserTabs.length} 个，当前第 ${mtslashBrowserPage} / ${filteredMtslashBrowserTotalPages} 页` }}
+            </div>
+            <div class="network-table-wrap mtslash-favorites-wrap">
+              <table class="network-table mtslash-favorites-table">
+                <thead>
+                  <tr>
+                    <th>页面标题</th>
+                    <th>链接</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="item in pagedMtslashBrowserTabs" :key="item.id || item.url" @click="selectMtslashBrowserTab(item)">
+                    <td class="favorite-title" :title="item.title">{{ item.title }}</td>
+                    <td class="favorite-url">{{ item.url }}</td>
+                  </tr>
+                  <tr v-if="pagedMtslashBrowserTabs.length === 0">
+                    <td colspan="2" class="empty-cell">启动浏览器模式后，在该窗口打开站内帖子并点击刷新</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="result-panel">
+            <div class="result-title">导出概览</div>
+            <p class="summary">{{ summary }}</p>
+            <div class="stat-strip">
+              <div class="stat-chip">
+                <span class="stat-chip-label">收录段落</span>
+                <strong>{{ props.resultData.post_count || "0" }}</strong>
+              </div>
+              <div class="stat-chip">
+                <span class="stat-chip-label">帖子标题</span>
+                <strong>{{ props.resultData.title || "等待导出" }}</strong>
+              </div>
+              <div class="stat-chip">
+                <span class="stat-chip-label">输出文件</span>
+                <strong>{{ props.resultData.output_path || "未生成" }}</strong>
+              </div>
+            </div>
+          </section>
+        </div>
       </template>
 
       <template v-else>

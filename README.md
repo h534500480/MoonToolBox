@@ -35,6 +35,8 @@
   扫描设备、解析 MAC 和 SSH 状态
 - `bag replay`
   回放 costmap 并导出 GIF / PNG
+- `MTSlash 导出`
+  支持账号验证码登录、收藏夹列表、浏览器模式读取当前登录态并导出单帖 TXT
 
 ## 当前主线
 
@@ -178,6 +180,18 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_onefile.ps1
 - `release/MoonToolBoxSetup.exe`
 
 安装包会包含内置 Python 运行时、后端依赖、前端静态文件和 C++ CLI。安装后可从开始菜单或桌面快捷方式启动。
+
+## MTSlash 浏览器模式
+
+如果 Python 直连站点不稳定，但浏览器可以正常访问，可以在 MTSlash 导出模块中启用浏览器模式：
+
+1. 在工具页面选择 `浏览器` 为 Edge 或 Chrome。
+2. 点击 `启动浏览器模式`，工具会打开一个独立浏览器窗口。
+3. 在该窗口内登录站点，并打开需要导出的帖子或收藏夹。
+4. 点击 `刷新` 读取站内标签页，点击列表中的 URL 会同步到 `帖子 URL`。
+5. 将 `浏览器模式` 设为 `是` 后执行 `导出 TXT`，导出流程会读取浏览器页面 HTML。
+
+浏览器模式使用 `backend/data/browser_profiles/` 保存本地浏览器状态，该目录属于本机运行数据，不进入版本控制。
 
 ## 依赖
 

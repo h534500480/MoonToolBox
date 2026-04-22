@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""旧桌面版 Costmap 回放工具。
+
+该模块解析 ROS costmap YAML，使用 Tkinter + Matplotlib 回放并导出图像。当前
+Web 主线已有后端 Costmap 处理服务，后续新增回放或导出能力应优先放到
+`backend/app/services/costmap_playback.py` 或 C++ 感知模块。
+"""
+
 import sys
 import traceback
 import threading
@@ -25,6 +32,11 @@ from matplotlib.patches import Rectangle
 
 @dataclass
 class CostmapFrame:
+    """单帧 Costmap 数据。
+
+    `grid` 保存二维代价值矩阵，其余字段来自 ROS OccupancyGrid/Costmap YAML。
+    """
+
     source: str
     index: int
     stamp_sec: int
@@ -82,6 +94,7 @@ def parse_one_doc(doc: dict, source: str, index: int):
 
 
 def load_frames_from_yaml(path: Path):
+    """从 YAML 文件读取一组 Costmap 帧。"""
     frames = []
     with open(path, "r", encoding="utf-8") as f:
         docs = list(yaml.safe_load_all(f))
@@ -93,6 +106,12 @@ def load_frames_from_yaml(path: Path):
 
 
 class CostmapPlayerPage(ttk.Frame):
+    """旧桌面版 Costmap 回放页面。
+
+    负责加载 YAML、播放帧序列、显示统计信息并导出 GIF/PNG。Web 主线的处理
+    逻辑位于 `backend/app/services/costmap_playback.py`。
+    """
+
     def __init__(self, master, embedded=False):
         super().__init__(master)
         self.root = master
@@ -504,5 +523,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception:
+        # 独立运行时保留 traceback，方便没有控制台日志的 Windows 环境定位问题。
         traceback.print_exc()
         input("程序报错，按回车退出...")

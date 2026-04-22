@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""旧桌面版 PCD 到地图转换工具。
+
+该文件包含点云读取、栅格构建、PGM/YAML/PNG 写出和 Tkinter 页面，体量较大。
+当前 Web 主线已通过 `backend -> cpp/pcd_map_cli` 执行地图生成；这里保留用于
+兼容旧桌面入口和作为迁移参考。后续新增算法能力应优先进入 `cpp/`。
+"""
+
 import argparse
 import binascii
 import math
@@ -48,6 +55,12 @@ def report_progress(progress_cb, percent, message):
 
 
 class ProgressTracker:
+    """旧桌面版长任务进度聚合器。
+
+    输入为可选进度回调，内部把多阶段扫描和写出过程折算为百分比，避免 UI
+    线程频繁刷新。
+    """
+
     def __init__(self, progress_cb=None):
         self.progress_cb = progress_cb
         self.total_units = 0
@@ -129,6 +142,12 @@ class GridResult:
 
 
 class PCDReader:
+    """PCD 点云顺序读取器。
+
+    支持 ascii、binary、binary_compressed 三种 PCD DATA 格式，向地图构建流程
+    逐点产出 x/y/z。它是旧 Python 实现的核心入口，Web 主线优先使用 C++ CLI。
+    """
+
     def __init__(self, file_path):
         self.file_path = str(file_path)
         self.fields = []
@@ -253,6 +272,7 @@ def compute_extent(reader, params, tracker=None):
 
     for processed, (x, y, z) in enumerate(reader.iter_xyz(), start=1):
         if z < params.clip_min_z or z > params.clip_max_z:
+            # 高度裁剪外的点只参与进度统计，不进入地图范围。
             pass
         else:
             kept_points += 1
@@ -285,6 +305,7 @@ def build_grid(reader, params, tracker=None):
 
     for processed, (x, y, z) in enumerate(reader.iter_xyz(), start=1):
         if z < params.clip_min_z or z > params.clip_max_z:
+            # 保持两遍扫描的裁剪条件一致，避免范围统计和栅格统计口径不同。
             pass
         else:
             gx = int((x - min_x) / params.resolution)
@@ -323,6 +344,7 @@ def build_grid(reader, params, tracker=None):
 
     for processed, (idx, cell) in enumerate(cells.items(), start=1):
         if cell.count < params.min_points_per_cell:
+            # 稀疏单元保持 UNKNOWN，降低离群点对地图分类的影响。
             pass
         else:
             has_walkable_band = (
@@ -587,6 +609,11 @@ def write_yaml(path, pgm_name, result, params):
 
 
 def export_maps(pcd_path, output_dir, base_name, params, progress_cb=None):
+    """旧 Python 地图导出主流程。
+
+    输入 PCD 路径、输出目录、基础文件名和栅格参数；输出 PGM、YAML、透明绿道图
+    与预览图。该函数被旧桌面页面和 CLI 共同调用。
+    """
     reader = PCDReader(pcd_path)
     tracker = ProgressTracker(progress_cb)
     total_points = max(1, reader.points or 0)
@@ -649,6 +676,12 @@ def add_labeled_entry(parent, row, label, var, width=14):
 
 
 class MapToolApp:
+    """旧桌面版 pcd -> pgm 页面。
+
+    负责参数表单、文件选择、后台 worker 和日志展示。地图计算本身通过
+    `export_maps` 完成。
+    """
+
     def __init__(self, root, embedded=False):
         self.root = root
         self.embedded = embedded

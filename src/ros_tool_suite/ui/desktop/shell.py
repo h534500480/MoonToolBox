@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""旧 Tkinter 桌面壳。
+
+该模块负责按 `tools/registry.py` 动态加载早期桌面工具页面。它是兼容入口，
+不是当前 Web 主线的页面框架。
+"""
+
 import importlib
 import tkinter as tk
 from tkinter import ttk
@@ -11,6 +17,12 @@ from ros_tool_suite.tools.registry import GROUP_ORDER, TOOLS
 
 
 class ToolSuiteApp:
+    """旧桌面版主窗口。
+
+    输入为 Tk 根窗口，内部按注册表创建左侧导航和右侧工具容器。页面加载失败
+    时只在当前卡片显示错误，避免单个旧工具依赖缺失导致整个桌面壳不可用。
+    """
+
     def __init__(self, root):
         self.root = root
         self.root.title("ROS Tool Suite")
@@ -187,6 +199,7 @@ class ToolSuiteApp:
                 instance.pack(fill=tk.BOTH, expand=True)
             return instance
         except Exception as exc:
+            # 旧桌面工具依赖差异较大，加载失败时降级为错误卡片，保留其它工具可用。
             self._build_error_card(parent, tool["title"], tool["module"], exc)
             return None
 
