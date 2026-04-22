@@ -1,6 +1,0 @@
-frame_count: 55
-width: 120
-height: 120
-resolution: 0.05000000074505806
-origin_x: -5.600000000372548
-origin_y: -3.1500000003725317

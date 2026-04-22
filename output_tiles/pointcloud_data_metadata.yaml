@@ -1,6 +1,0 @@
-input_pcd: G:\项目资料\机器狗\地图\go2w测试地图\fornav\map.pcd
-tile_size: 20
-overlap: 0
-format: binary
-zip_output: false
-note: C++ tile splitter skeleton generated this metadata.

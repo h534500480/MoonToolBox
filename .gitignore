@@ -21,6 +21,7 @@ backend/data/*.json
 build/
 dist/
 output/
+output_*/
 release/
 cpp/build/
 
@@ -40,6 +41,8 @@ compile_commands.json
 *.pdb
 
 # Logs and temp files
+logs/
+backend/data/_debug/
 *.log
 *.tmp
 *.temp
