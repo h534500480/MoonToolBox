@@ -223,6 +223,9 @@ onMounted(async () => {
   try {
     const systemInfo = await fetchSystemInfo();
     localIp.value = systemInfo.local_ip || localIp.value;
+    if (systemInfo.app_root) {
+      localStorage.setItem("moontoolbox.appRoot", systemInfo.app_root);
+    }
     await loadTools();
   } catch (error) {
     summary.value = "加载后端工具失败。";

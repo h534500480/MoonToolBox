@@ -14,7 +14,7 @@ from app.models import (
 from app.services.costmap_playback import run_costmap
 from app.services.cpp_runner import run_pcd_map, run_pcd_tile
 from app.services.dialogs import browse_local_path
-from app.services.mtslash_exporter import run_mtslash_export, start_mtslash_login_session, submit_mtslash_login
+from app.services.mtslash_exporter import fetch_mtslash_favorites, run_mtslash_export, start_mtslash_login_session, submit_mtslash_login
 from app.services.network_scan import run_network_scan
 from app.services.pcd_preview import preview_pcd_tile
 from app.services.preferences import load_preferences, save_preferences
@@ -92,6 +92,14 @@ def post_mtslash_login(payload: dict):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.get("/tools/mtslash_export/favorites")
+def get_mtslash_favorites(session_id: str, max_pages: int = 50):
+    try:
+        return fetch_mtslash_favorites(session_id=session_id, max_pages=max_pages)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/tools/{tool_key}/run", response_model=ToolRunResponse)
 def run_tool(tool_key: str, request: ToolRunRequest):
     tool = next((item for item in TOOL_DEFINITIONS if item.key == tool_key), None)
@@ -99,16 +107,25 @@ def run_tool(tool_key: str, request: ToolRunRequest):
         raise HTTPException(status_code=404, detail="Tool not found")
 
     values = {key: str(value) for key, value in request.values.items()}
-    if tool_key == "pcd_map":
-        return run_pcd_map(values)
-    if tool_key == "pcd_tile":
-        return run_pcd_tile(values)
-    if tool_key == "network_scan":
-        return run_network_scan(values)
-    if tool_key == "costmap":
-        return run_costmap(values)
-    if tool_key == "mtslash_export":
-        return run_mtslash_export(values)
+    try:
+        if tool_key == "pcd_map":
+            return run_pcd_map(values)
+        if tool_key == "pcd_tile":
+            return run_pcd_tile(values)
+        if tool_key == "network_scan":
+            return run_network_scan(values)
+        if tool_key == "costmap":
+            return run_costmap(values)
+        if tool_key == "mtslash_export":
+            return run_mtslash_export(values)
+    except RuntimeError as exc:
+        return ToolRunResponse(
+            tool=tool_key,
+            status="error",
+            summary=str(exc),
+            logs=[f"[ERROR] {exc}"],
+            data={},
+        )
 
     logs = [
         f"[INFO] selected tool: {tool.title}",

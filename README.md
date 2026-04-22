@@ -155,13 +155,29 @@ npm run dev
 .\scripts\start_local.cmd
 ```
 
-这个发行版会内置 `.venv/`、前端静态文件和 C++ CLI，不要求目标机器安装 Node.js、CMake 或编译器。
+这个发行版会内置 Python 运行时、后端依赖、前端静态文件和 C++ CLI，不要求目标机器安装 Python、Node.js、CMake 或编译器。
+
+不要直接复制开发机上的 `.venv/` 到其他电脑；Windows 虚拟环境会记录创建时的 Python 绝对路径，复制后容易出现 `No Python at ...`。请使用 `release/MoonToolBox/` 或 `release/MoonToolBox.zip`。
 
 ## 打包单文件 EXE
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build_onefile.ps1
 ```
+
+## 构建 Windows 安装包
+
+先安装 Inno Setup 6，然后执行：
+
+```powershell
+.\scripts\build_installer.cmd
+```
+
+输出位置：
+
+- `release/MoonToolBoxSetup.exe`
+
+安装包会包含内置 Python 运行时、后端依赖、前端静态文件和 C++ CLI。安装后可从开始菜单或桌面快捷方式启动。
 
 ## 依赖
 

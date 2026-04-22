@@ -43,4 +43,5 @@ export interface BrowseDialogPayload {
 export interface SystemInfoResponse {
   local_ip: string;
   subnet_prefix: string;
+  app_root: string;
 }

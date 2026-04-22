@@ -71,3 +71,4 @@ class OpenPathRequest(BaseModel):
 class SystemInfoResponse(BaseModel):
     local_ip: str = ""
     subnet_prefix: str = ""
+    app_root: str = ""

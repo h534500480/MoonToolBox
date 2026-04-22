@@ -1,9 +1,13 @@
 from pathlib import Path
-import tkinter as tk
-from tkinter import filedialog
 
 
 def browse_local_path(mode: str, title: str, initial_path: str) -> str:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("File browser is not available in this Python runtime.") from exc
+
     root = tk.Tk()
     root.withdraw()
     root.attributes("-topmost", True)

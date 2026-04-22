@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, reactive, watch } from "vue";
 
-import { browsePath, fetchMtslashCaptcha, fetchPcdTilePreview, loginMtslash, openLocalPath } from "../api/client";
+import { browsePath, fetchMtslashCaptcha, fetchMtslashFavorites, fetchPcdTilePreview, loginMtslash, openLocalPath } from "../api/client";
+import type { MtslashFavoriteItem } from "../api/client";
 import type { BrowseDialogPayload, ToolDefinition } from "../types";
 
 const props = defineProps<{
@@ -30,6 +31,12 @@ const mtslashLoginMessage = ref("");
 const mtslashCaptchaLoading = ref(false);
 const mtslashLoginLoading = ref(false);
 const mtslashLoggedIn = ref(false);
+const mtslashFavorites = ref<MtslashFavoriteItem[]>([]);
+const mtslashFavoritesLoading = ref(false);
+const mtslashFavoritesMessage = ref("");
+const mtslashFavoritesPage = ref(1);
+const mtslashFavoritesKeyword = ref("");
+const mtslashPageSize = 20;
 let costmapTimer: number | undefined;
 
 watch(
@@ -39,14 +46,29 @@ watch(
     tool.fields.forEach((field) => {
       formValues[field.key] = field.value ?? "";
     });
+    hydrateMtslashCachedFields(tool.key);
     tilePreview.value = "";
     mtslashCaptchaImage.value = "";
     mtslashLoginMessage.value = "";
     mtslashLoggedIn.value = false;
+    mtslashFavorites.value = [];
+    mtslashFavoritesMessage.value = "";
+    mtslashFavoritesPage.value = 1;
+    mtslashFavoritesKeyword.value = "";
     stopCostmapPlayback();
     costmapFrameIndex.value = 0;
   },
   { immediate: true }
+);
+
+watch(
+  () => [formValues.output_dir, formValues.login_username, formValues.login_password],
+  () => {
+    if (props.tool.key !== "mtslash_export") {
+      return;
+    }
+    persistMtslashCachedFields();
+  }
 );
 
 watch(
@@ -115,6 +137,25 @@ const filteredNetworkRows = computed(() =>
   })
 );
 
+const mtslashFavoriteTotalPages = computed(() => Math.max(1, Math.ceil(mtslashFavorites.value.length / mtslashPageSize)));
+const filteredMtslashFavorites = computed(() => {
+  const keyword = mtslashFavoritesKeyword.value.trim().toLowerCase();
+  if (!keyword) {
+    return mtslashFavorites.value;
+  }
+  return mtslashFavorites.value.filter((item) => `${item.title} ${item.url}`.toLowerCase().includes(keyword));
+});
+const filteredMtslashFavoriteTotalPages = computed(() => Math.max(1, Math.ceil(filteredMtslashFavorites.value.length / mtslashPageSize)));
+const pagedMtslashFavorites = computed(() => {
+  const safePage = Math.min(Math.max(1, mtslashFavoritesPage.value), filteredMtslashFavoriteTotalPages.value);
+  const start = (safePage - 1) * mtslashPageSize;
+  return filteredMtslashFavorites.value.slice(start, start + mtslashPageSize);
+});
+
+watch(mtslashFavoritesKeyword, () => {
+  mtslashFavoritesPage.value = 1;
+});
+
 const costmapFrames = computed(() => props.resultData.frames ?? []);
 const currentCostmapFrame = computed(() => {
   if (costmapFrames.value.length === 0) {
@@ -153,7 +194,32 @@ const costmapFrameInfo = computed(() => {
 });
 
 function submit() {
+  if (props.tool.key === "mtslash_export") {
+    persistMtslashCachedFields();
+  }
   emit("run", { ...formValues });
+}
+
+function defaultMtslashOutputDir() {
+  const root = localStorage.getItem("moontoolbox.appRoot") || "";
+  return root ? `${root.replace(/\\/g, "/")}/output` : "output";
+}
+
+function hydrateMtslashCachedFields(toolKey: string) {
+  if (toolKey !== "mtslash_export") {
+    return;
+  }
+  formValues.output_dir = localStorage.getItem("mtslash.outputDir") || formValues.output_dir || defaultMtslashOutputDir();
+  formValues.login_username = localStorage.getItem("mtslash.loginUsername") || formValues.login_username || "";
+  formValues.login_password = localStorage.getItem("mtslash.loginPassword") || formValues.login_password || "";
+}
+
+function persistMtslashCachedFields() {
+  if (formValues.output_dir?.trim()) {
+    localStorage.setItem("mtslash.outputDir", formValues.output_dir.trim());
+  }
+  localStorage.setItem("mtslash.loginUsername", formValues.login_username || "");
+  localStorage.setItem("mtslash.loginPassword", formValues.login_password || "");
 }
 
 function getBrowseMode(fieldKey: string, fieldLabel: string): BrowseDialogPayload["mode"] | null {
@@ -199,6 +265,9 @@ async function browseField(fieldKey: string, fieldLabel: string) {
     });
     if (path) {
       formValues[fieldKey] = path;
+      if (props.tool.key === "mtslash_export" && fieldKey === "output_dir") {
+        localStorage.setItem("mtslash.outputDir", path);
+      }
     }
   } catch {
     // Ignore dialog failures to keep manual input usable.
@@ -275,12 +344,44 @@ async function loginMtslashSession() {
     formValues.login_session_id = result.session_id;
     mtslashLoggedIn.value = true;
     mtslashLoginMessage.value = result.message;
+    persistMtslashCachedFields();
   } catch (error) {
     mtslashLoggedIn.value = false;
     mtslashLoginMessage.value = `登录失败: ${(error as Error).message}`;
   } finally {
     mtslashLoginLoading.value = false;
   }
+}
+
+async function loadMtslashFavorites() {
+  if (!formValues.login_session_id?.trim()) {
+    mtslashFavoritesMessage.value = "请先获取验证码并登录。";
+    return;
+  }
+  mtslashFavoritesLoading.value = true;
+  mtslashFavoritesMessage.value = "";
+  try {
+    const result = await fetchMtslashFavorites(formValues.login_session_id);
+    mtslashFavorites.value = result.items ?? [];
+    mtslashFavoritesPage.value = 1;
+    mtslashFavoritesMessage.value = `已加载 ${mtslashFavorites.value.length} 条收藏，扫描 ${result.page_count} 页。`;
+  } catch (error) {
+    mtslashFavoritesMessage.value = `收藏夹加载失败: ${(error as Error).message}`;
+  } finally {
+    mtslashFavoritesLoading.value = false;
+  }
+}
+
+function selectMtslashFavorite(item: MtslashFavoriteItem) {
+  formValues.thread_url = item.url;
+}
+
+function prevMtslashFavoritesPage() {
+  mtslashFavoritesPage.value = Math.max(1, mtslashFavoritesPage.value - 1);
+}
+
+function nextMtslashFavoritesPage() {
+  mtslashFavoritesPage.value = Math.min(filteredMtslashFavoriteTotalPages.value, mtslashFavoritesPage.value + 1);
 }
 
 function costColor(value: number) {
@@ -536,6 +637,9 @@ onBeforeUnmount(() => stopCostmapPlayback());
             <button class="secondary-btn" type="button" :disabled="mtslashLoginLoading" @click="loginMtslashSession">
               {{ mtslashLoginLoading ? "登录中..." : "登录" }}
             </button>
+            <button class="secondary-btn" type="button" :disabled="mtslashFavoritesLoading" @click="loadMtslashFavorites">
+              {{ mtslashFavoritesLoading ? "加载中..." : "加载收藏夹" }}
+            </button>
             <button class="secondary-btn" type="button" @click="openOutputDir">打开输出目录</button>
             <button class="secondary-btn" type="button" @click="emit('clearLogs')">清空日志</button>
           </template>
@@ -746,7 +850,46 @@ data: [0, 0, 100, ...]</pre>
       </template>
 
       <template v-else-if="tool.key === 'mtslash_export'">
-        <section class="panel">
+        <section class="panel mtslash-favorites-panel">
+          <div class="section-head">
+            <div>
+              <div class="result-title">收藏夹</div>
+              <div class="section-subtitle">从当前登录用户收藏夹读取帖子，点击行可填入帖子 URL。</div>
+            </div>
+            <div class="mtslash-favorites-tools">
+              <input v-model="mtslashFavoritesKeyword" class="field-input compact-input mtslash-search-input" placeholder="搜索标题或链接" />
+              <button class="secondary-btn" type="button" :disabled="mtslashFavoritesLoading" @click="loadMtslashFavorites">
+                {{ mtslashFavoritesLoading ? "加载中..." : "刷新" }}
+              </button>
+              <button class="secondary-btn" type="button" :disabled="mtslashFavoritesPage <= 1" @click="prevMtslashFavoritesPage">上一页</button>
+              <button class="secondary-btn" type="button" :disabled="mtslashFavoritesPage >= filteredMtslashFavoriteTotalPages" @click="nextMtslashFavoritesPage">下一页</button>
+            </div>
+          </div>
+          <div class="section-subtitle">
+            {{ mtslashFavoritesMessage || `共 ${mtslashFavorites.length} 条，筛选 ${filteredMtslashFavorites.length} 条，当前第 ${mtslashFavoritesPage} / ${filteredMtslashFavoriteTotalPages} 页` }}
+          </div>
+          <div class="network-table-wrap mtslash-favorites-wrap">
+            <table class="network-table mtslash-favorites-table">
+              <thead>
+                <tr>
+                  <th>帖子名</th>
+                  <th>链接</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="item in pagedMtslashFavorites" :key="item.url" @click="selectMtslashFavorite(item)">
+                  <td class="favorite-title" :title="item.title">{{ item.title }}</td>
+                  <td class="favorite-url">{{ item.url }}</td>
+                </tr>
+                <tr v-if="pagedMtslashFavorites.length === 0">
+                  <td colspan="2" class="empty-cell">登录后点击“加载收藏夹”，或调整搜索条件</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel mtslash-login-panel">
           <div class="section-head">
             <div>
               <div class="result-title">一次性登录</div>

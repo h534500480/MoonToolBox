@@ -19,7 +19,14 @@ export async function runTool(toolKey: string, values: Record<string, string>): 
     body: JSON.stringify({ values })
   });
   if (!response.ok) {
-    throw new Error("Failed to run tool");
+    let detail = "Failed to run tool";
+    try {
+      const data = await response.json();
+      detail = data.detail ?? detail;
+    } catch {
+      // Keep fallback message.
+    }
+    throw new Error(detail);
   }
   return response.json();
 }
@@ -151,6 +158,36 @@ export async function loginMtslash(values: Record<string, string>): Promise<Mtsl
   });
   if (!response.ok) {
     let detail = "Failed to login";
+    try {
+      const data = await response.json();
+      detail = data.detail ?? detail;
+    } catch {
+      // Keep fallback message.
+    }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+export interface MtslashFavoriteItem {
+  title: string;
+  url: string;
+}
+
+export interface MtslashFavoritesResponse {
+  status: string;
+  page_count: number;
+  items: MtslashFavoriteItem[];
+}
+
+export async function fetchMtslashFavorites(sessionId: string): Promise<MtslashFavoritesResponse> {
+  const query = new URLSearchParams({
+    session_id: sessionId,
+    max_pages: "50"
+  });
+  const response = await fetch(`${API_BASE}/tools/mtslash_export/favorites?${query.toString()}`);
+  if (!response.ok) {
+    let detail = "Failed to fetch favorites";
     try {
       const data = await response.json();
       detail = data.detail ?? detail;

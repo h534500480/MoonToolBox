@@ -324,6 +324,14 @@ select {
   grid-column: 1 / -1;
 }
 
+.tool-layout-mtslash_export .mtslash-login-panel {
+  grid-column: 1 / 2;
+}
+
+.tool-layout-mtslash_export .result-panel {
+  grid-column: 2 / 3;
+}
+
 .panel {
   padding: 20px;
 }
@@ -443,6 +451,19 @@ select {
   font-size: 13px;
 }
 
+.panel > .section-subtitle,
+.result-panel > .section-subtitle,
+.log-panel > .section-subtitle {
+  margin: 4px 0 12px;
+}
+
+.section-subtitle + .network-table-wrap,
+.section-subtitle + .logs,
+.section-subtitle + .kv-list,
+.section-subtitle + .stat-strip {
+  margin-top: 12px;
+}
+
 .summary {
   margin: 0;
 }
@@ -538,6 +559,58 @@ select {
   color: var(--muted);
   font-size: 13px;
   font-weight: 600;
+}
+
+.mtslash-favorites-wrap {
+  max-height: 620px;
+  max-width: 100%;
+}
+
+.mtslash-favorites-table tbody tr {
+  cursor: pointer;
+}
+
+.mtslash-favorites-table {
+  table-layout: fixed;
+}
+
+.mtslash-favorites-table th:first-child,
+.mtslash-favorites-table td:first-child {
+  width: 34%;
+}
+
+.mtslash-favorites-table th:last-child,
+.mtslash-favorites-table td:last-child {
+  width: 66%;
+}
+
+.mtslash-favorites-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.mtslash-favorites-tools {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.mtslash-search-input {
+  width: 240px;
+  max-width: 100%;
+}
+
+.favorite-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.favorite-url {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  color: #cfe0ff;
 }
 
 .costmap-player-panel {

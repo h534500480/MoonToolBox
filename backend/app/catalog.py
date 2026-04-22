@@ -87,7 +87,7 @@ TOOL_DEFINITIONS = [
         secondary_action="选择",
         fields=[
             ToolField(key="thread_url", label="帖子 URL", placeholder="https://mtslash.life/thread-123-1-1.html"),
-            ToolField(key="output_dir", label="输出目录", value="G:/ros_proj/ros_tool/output/mtslash"),
+            ToolField(key="output_dir", label="输出目录", value=""),
             ToolField(key="only_thread_author", label="只导出楼主", value="true"),
             ToolField(key="max_pages", label="最大页数", value="20"),
             ToolField(key="delay_seconds", label="请求间隔秒", value="1.5"),
@@ -98,7 +98,7 @@ TOOL_DEFINITIONS = [
             ToolField(key="login_session_id", label="登录会话 ID", value=""),
             ToolField(key="question_id", label="安全提问编号", value="0"),
             ToolField(key="answer", label="安全提问答案", value=""),
-            ToolField(key="user_agent", label="User-Agent", value="TreeMoonBox/1.0 personal thread exporter"),
+            ToolField(key="user_agent", label="User-Agent", value="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
         ],
     ),
 ]
