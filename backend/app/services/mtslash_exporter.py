@@ -952,7 +952,7 @@ def authenticated_fetch_client(session_id: str) -> Optional[FetchClient]:
     return None
 
 
-def fetch_mtslash_favorites(session_id: str, max_pages: int = 50) -> Dict[str, object]:
+def fetch_mtslash_favorites(session_id: str, max_pages: int = 200) -> Dict[str, object]:
     fetch_client = authenticated_fetch_client(session_id)
     if fetch_client is None:
         raise RuntimeError("尚未登录或登录会话已过期，请先获取验证码并登录")
@@ -988,7 +988,7 @@ def fetch_mtslash_favorites(session_id: str, max_pages: int = 50) -> Dict[str, o
     }
 
 
-def fetch_mtslash_browser_favorites(browser: str = "edge", max_pages: int = 50) -> Dict[str, object]:
+def fetch_mtslash_browser_favorites(browser: str = "edge", max_pages: int = 200) -> Dict[str, object]:
     all_threads: List[FavoriteThread] = []
     seen_urls = set()
     first_html = get_page_html(browser, FAVORITES_URL, wait_seconds=2.0)

@@ -55,12 +55,28 @@ def fetch_json(url: str, timeout: int = 3, method: str = "GET") -> object:
         return json.loads(response.read().decode("utf-8", errors="replace"))
 
 
+def fetch_text(url: str, timeout: int = 3, method: str = "GET") -> str:
+    request = Request(url, method=method)
+    with urlopen(request, timeout=timeout) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
 def devtools_available(browser: str) -> bool:
     try:
         fetch_json(f"{browser_debug_base(browser)}/json/version", timeout=1)
         return True
     except Exception:
         return False
+
+
+def browser_websocket_url(browser: str) -> str:
+    version = fetch_json(f"{browser_debug_base(browser)}/json/version", timeout=2)
+    if not isinstance(version, dict):
+        raise RuntimeError("浏览器调试端口返回信息无效")
+    websocket_url = version.get("webSocketDebuggerUrl", "")
+    if not websocket_url:
+        raise RuntimeError("浏览器调试端口没有 browser WebSocket")
+    return websocket_url
 
 
 def start_browser(browser: str) -> dict:
@@ -148,6 +164,51 @@ def find_or_open_tab(browser: str, url: str) -> dict:
         raise RuntimeError(f"没有可用的 mtslash 浏览器标签页，请先在浏览器模式窗口打开该页面: {exc}") from exc
 
 
+def find_tab_by_id(browser: str, tab_id: str) -> Optional[dict]:
+    tabs = fetch_json(f"{browser_debug_base(browser)}/json", timeout=2)
+    for tab in tabs:
+        if tab.get("id") == tab_id:
+            return tab
+    return None
+
+
+def open_temp_tab(browser: str, url: str) -> dict:
+    """打开后台临时调试标签页。
+
+    浏览器模式导出不复用用户正在看的标签页，避免用户切换窗口、点链接或刷新时
+    把导出流程正在读取的页面内容换掉。这里使用 browser 级 CDP 创建后台 target，
+    避免 /json/new 把临时页切到前台。
+    """
+    try:
+        counter = {"id": 0}
+        with connect(browser_websocket_url(browser), open_timeout=5) as ws:
+            result = cdp_call(ws, counter, "Target.createTarget", {"url": "about:blank", "background": True})
+    except Exception as exc:
+        raise RuntimeError(f"无法打开后台临时浏览器标签页: {exc}") from exc
+
+    target_id = str(result.get("targetId", ""))
+    if not target_id:
+        raise RuntimeError("浏览器没有返回后台临时标签页 ID")
+
+    for _ in range(20):
+        tab = find_tab_by_id(browser, target_id)
+        if tab and tab.get("webSocketDebuggerUrl"):
+            return tab
+        time.sleep(0.1)
+    close_tab(browser, target_id)
+    raise RuntimeError("后台临时标签页没有调试 WebSocket")
+
+
+def close_tab(browser: str, tab_id: str) -> None:
+    if not tab_id:
+        return
+    try:
+        fetch_text(f"{browser_debug_base(browser)}/json/close/{quote(tab_id, safe='')}", timeout=2)
+    except Exception:
+        # 关闭失败只会留下一个临时标签页，不应该影响导出结果。
+        pass
+
+
 def cdp_call(ws, counter: dict, method: str, params: Optional[dict] = None) -> dict:
     """发送一次 Chrome DevTools Protocol 调用并等待对应响应。"""
     counter["id"] += 1
@@ -161,37 +222,42 @@ def cdp_call(ws, counter: dict, method: str, params: Optional[dict] = None) -> d
             return message.get("result", {})
 
 
-def get_page_html(browser: str, url: str, wait_seconds: float = 2.0) -> str:
+def get_page_html(browser: str, url: str, wait_seconds: float = 2.0, reuse_visible_tab: bool = False) -> str:
     """导航到指定 URL 并返回当前页面 HTML。
 
     该函数依赖浏览器真实加载页面，适合处理 Python 请求被重置、但浏览器可访问
-    的场景。调用方仍需要解析返回 HTML 并判断是否为站点中间页。
+    的场景。默认使用临时标签页读取，调用方仍需要解析返回 HTML 并判断是否为
+    站点中间页。
     """
     start_browser(browser)
-    tab = find_or_open_tab(browser, url)
-    websocket_url = tab.get("webSocketDebuggerUrl")
-    if not websocket_url:
-        raise RuntimeError("浏览器标签页没有调试 WebSocket")
+    tab = find_or_open_tab(browser, url) if reuse_visible_tab else open_temp_tab(browser, url)
+    temp_tab_id = "" if reuse_visible_tab else str(tab.get("id", ""))
+    try:
+        websocket_url = tab.get("webSocketDebuggerUrl")
+        if not websocket_url:
+            raise RuntimeError("浏览器标签页没有调试 WebSocket")
 
-    counter = {"id": 0}
-    with connect(websocket_url, open_timeout=5) as ws:
-        cdp_call(ws, counter, "Page.enable")
-        cdp_call(ws, counter, "Runtime.enable")
-        cdp_call(ws, counter, "Page.navigate", {"url": url})
-        deadline = time.time() + max(8.0, wait_seconds + 6.0)
-        while time.time() < deadline:
-            time.sleep(0.4)
-            result = cdp_call(ws, counter, "Runtime.evaluate", {"expression": "document.readyState", "returnByValue": True})
-            if result.get("result", {}).get("value") == "complete":
-                break
-        time.sleep(wait_seconds)
-        result = cdp_call(
-            ws,
-            counter,
-            "Runtime.evaluate",
-            {
-                "expression": "document.documentElement ? document.documentElement.outerHTML : ''",
-                "returnByValue": True,
-            },
-        )
-        return result.get("result", {}).get("value", "")
+        counter = {"id": 0}
+        with connect(websocket_url, open_timeout=5) as ws:
+            cdp_call(ws, counter, "Page.enable")
+            cdp_call(ws, counter, "Runtime.enable")
+            cdp_call(ws, counter, "Page.navigate", {"url": url})
+            deadline = time.time() + max(8.0, wait_seconds + 6.0)
+            while time.time() < deadline:
+                time.sleep(0.4)
+                result = cdp_call(ws, counter, "Runtime.evaluate", {"expression": "document.readyState", "returnByValue": True})
+                if result.get("result", {}).get("value") == "complete":
+                    break
+            time.sleep(wait_seconds)
+            result = cdp_call(
+                ws,
+                counter,
+                "Runtime.evaluate",
+                {
+                    "expression": "document.documentElement ? document.documentElement.outerHTML : ''",
+                    "returnByValue": True,
+                },
+            )
+            return result.get("result", {}).get("value", "")
+    finally:
+        close_tab(browser, temp_tab_id)

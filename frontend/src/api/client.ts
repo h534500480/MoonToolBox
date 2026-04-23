@@ -183,7 +183,7 @@ export interface MtslashFavoritesResponse {
 export async function fetchMtslashFavorites(sessionId: string): Promise<MtslashFavoritesResponse> {
   const query = new URLSearchParams({
     session_id: sessionId,
-    max_pages: "50"
+    max_pages: "200"
   });
   const response = await fetch(`${API_BASE}/tools/mtslash_export/favorites?${query.toString()}`);
   if (!response.ok) {
@@ -202,7 +202,7 @@ export async function fetchMtslashFavorites(sessionId: string): Promise<MtslashF
 export async function fetchMtslashBrowserFavorites(browser: string): Promise<MtslashFavoritesResponse> {
   const query = new URLSearchParams({
     browser,
-    max_pages: "50"
+    max_pages: "200"
   });
   const response = await fetch(`${API_BASE}/tools/mtslash_export/browser/favorites?${query.toString()}`);
   if (!response.ok) {

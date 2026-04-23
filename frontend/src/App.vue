@@ -258,9 +258,9 @@ onMounted(async () => {
           <label class="theme-switcher">
             <span>主题</span>
             <select v-model="themeKey" class="theme-select">
-              <option value="blue">深海蓝</option>
-              <option value="emerald">青绿色</option>
-              <option value="amber">琥珀色</option>
+              <option value="blue">深蓝黑</option>
+              <option value="emerald">墨绿白</option>
+              <option value="platinum">白金</option>
             </select>
           </label>
           <div class="topbar-status">{{ selectedTool ? "功能页" : "总览页" }}</div>
@@ -274,6 +274,9 @@ onMounted(async () => {
         :section-assignments="sectionAssignments"
         :favorite-keys="favoriteKeys"
         :expanded-sections="expandedSections"
+        :logs="logs"
+        :summary="summary"
+        :local-ip="localIp"
         @select-tool="handleSelectTool"
         @assign-section="handleAssignSection"
         @create-section="handleCreateSection"

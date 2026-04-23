@@ -100,16 +100,18 @@ def post_mtslash_login(payload: dict):
 
 
 @router.get("/tools/mtslash_export/favorites")
-def get_mtslash_favorites(session_id: str, max_pages: int = 50):
+def get_mtslash_favorites(session_id: str, max_pages: int = 200):
     try:
+        max_pages = max(1, min(max_pages, 200))
         return fetch_mtslash_favorites(session_id=session_id, max_pages=max_pages)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/tools/mtslash_export/browser/favorites")
-def get_mtslash_browser_favorites(browser: str = "edge", max_pages: int = 50):
+def get_mtslash_browser_favorites(browser: str = "edge", max_pages: int = 200):
     try:
+        max_pages = max(1, min(max_pages, 200))
         return fetch_mtslash_browser_favorites(browser=browser, max_pages=max_pages)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
