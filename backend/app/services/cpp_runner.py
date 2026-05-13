@@ -1,5 +1,6 @@
 from pathlib import Path
 import subprocess
+from datetime import datetime
 from typing import Dict, List, Tuple
 
 from fastapi import HTTPException
@@ -102,7 +103,24 @@ def run_pcd_map(values: Dict[str, str]) -> ToolRunResponse:
         f"可行走格={parsed.get('walkable_cells', 'n/a')} | "
         f"障碍格={parsed.get('obstacle_cells', 'n/a')}"
     )
-    return ToolRunResponse(tool="pcd_map", status="success", summary=summary, logs=logs)
+    data = {
+        "pgm_path": parsed.get("pgm_path", ""),
+        "yaml_path": parsed.get("yaml_path", ""),
+        "color_path": parsed.get("color_path", ""),
+        "preview_path": parsed.get("preview_path", ""),
+        "width": parsed.get("width", ""),
+        "height": parsed.get("height", ""),
+        "origin_x": parsed.get("origin_x", ""),
+        "origin_y": parsed.get("origin_y", ""),
+        "point_count": parsed.get("point_count", ""),
+        "walkable_cells": parsed.get("walkable_cells", ""),
+        "obstacle_cells": parsed.get("obstacle_cells", ""),
+        "unknown_cells": parsed.get("unknown_cells", ""),
+        "output_dir": output_dir,
+        "base_name": base_name,
+        "generated_at": datetime.utcnow().isoformat(),
+    }
+    return ToolRunResponse(tool="pcd_map", status="success", summary=summary, logs=logs, data=data)
 
 
 def run_pcd_tile(values: Dict[str, str]) -> ToolRunResponse:

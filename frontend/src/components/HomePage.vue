@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 
+import CollapsePanel from "./CollapsePanel.vue";
 import type { ToolDefinition, ToolSection } from "../types";
 
 const props = defineProps<{
@@ -53,6 +54,12 @@ const previewTools = computed(() => {
 const activePreviewTool = computed(() => {
   return previewTools.value.find((tool) => tool.key === previewToolKey.value) ?? previewTools.value[0] ?? null;
 });
+
+const quickActionTools = computed(() =>
+  ["pcd_map", "network_scan", "mtslash_export"]
+    .map((key) => props.tools.find((tool) => tool.key === key))
+    .filter((tool): tool is ToolDefinition => Boolean(tool))
+);
 
 const recentLogs = computed(() => {
   const lines = props.logs.length > 0 ? props.logs : ["[INFO] 系统启动成功", "[INFO] 等待任务..."];
@@ -177,7 +184,10 @@ function deleteSection(section: ToolSection) {
           >
             <div class="section-card-header">
               <button class="section-card-toggle" @click="emit('toggleSection', section.key)">
-                <span>{{ section.label }}</span>
+                <span class="collapse-trigger-label">
+                  <span class="collapse-caret" :class="{ expanded: expandedSections.includes(section.key) }">▸</span>
+                  <span>{{ section.label }}</span>
+                </span>
                 <span class="section-card-meta">{{ toolsForSection(section.key).length }}</span>
               </button>
               <div class="section-card-actions">
@@ -200,20 +210,22 @@ function deleteSection(section: ToolSection) {
 
             <div class="section-card-drop">{{ section.key === "all" ? "这里展示全部工具" : "可将左侧小功能拖到这里" }}</div>
 
-            <div v-if="expandedSections.includes(section.key)" class="section-card-tools">
-              <button
-                v-for="tool in toolsForSection(section.key)"
-                :key="tool.key"
-                class="section-tool-chip"
-                @click="emit('selectTool', tool.key)"
-              >
-                <span class="section-tool-title">{{ tool.title }}</span>
-                <span class="section-tool-subtitle">{{ tool.subtitle }}</span>
-              </button>
-              <div v-if="toolsForSection(section.key).length === 0" class="section-empty">
-                当前分区下还没有小功能
+            <CollapsePanel :open="expandedSections.includes(section.key)">
+              <div class="section-card-tools">
+                <button
+                  v-for="tool in toolsForSection(section.key)"
+                  :key="tool.key"
+                  class="section-tool-chip"
+                  @click="emit('selectTool', tool.key)"
+                >
+                  <span class="section-tool-title">{{ tool.title }}</span>
+                  <span class="section-tool-subtitle">{{ tool.subtitle }}</span>
+                </button>
+                <div v-if="toolsForSection(section.key).length === 0" class="section-empty">
+                  当前分区下还没有小功能
+                </div>
               </div>
-            </div>
+            </CollapsePanel>
           </article>
         </section>
 
@@ -264,9 +276,15 @@ function deleteSection(section: ToolSection) {
 
         <section class="panel side-card">
           <div class="result-title">快捷操作</div>
-          <button class="secondary-btn side-action" type="button" @click="emit('selectTool', 'pcd_map')">打开地图工具</button>
-          <button class="secondary-btn side-action" type="button" @click="emit('selectTool', 'network_scan')">网络扫描</button>
-          <button class="secondary-btn side-action" type="button" @click="emit('selectTool', 'mtslash_export')">MTSlash 导出</button>
+          <button
+            v-for="tool in quickActionTools"
+            :key="tool.key"
+            class="secondary-btn side-action"
+            type="button"
+            @click="emit('selectTool', tool.key)"
+          >
+            {{ tool.title }}
+          </button>
         </section>
 
         <section class="panel side-card side-log-card">

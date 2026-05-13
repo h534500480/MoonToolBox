@@ -1,7 +1,16 @@
+import json
+from pathlib import Path
+from typing import Dict, List
+
 from app.models import ToolDefinition, ToolField
 
 
-TOOL_DEFINITIONS = [
+ROOT_DIR = Path(__file__).resolve().parents[2]
+CONFIG_DIR = ROOT_DIR / "data"
+MODULE_CONFIG_PATH = CONFIG_DIR / "tool_modules.json"
+
+
+ALL_TOOL_DEFINITIONS = [
     ToolDefinition(
         key="pcd_map",
         title="PCD 转 PGM",
@@ -79,6 +88,26 @@ TOOL_DEFINITIONS = [
         ],
     ),
     ToolDefinition(
+        key="ros_nav_test",
+        title="ROS 定位导航测试",
+        subtitle="定位导航可视化工作台",
+        description="用于搭建 ROS 定位导航测试页，包含三维主视图、话题选择区和可折叠的可视化小窗列表。",
+        primary_action="启动测试布局",
+        secondary_action="选择",
+        fields=[
+            ToolField(key="ros_provider", label="接入方式", value="rosbridge"),
+            ToolField(key="ros_bridge_url", label="Bridge 地址", value="ws://127.0.0.1:9090"),
+            ToolField(key="ros_api_service", label="Topic 查询服务", value="/rosapi/topics_and_raw_types"),
+            ToolField(key="fixed_frame", label="固定坐标系", value="map"),
+            ToolField(key="map_topic", label="地图 Topic", value="/map"),
+            ToolField(key="pose_topic", label="定位 Topic", value="/ndt_pose"),
+            ToolField(key="path_topic", label="路径 Topic", value="/plan"),
+            ToolField(key="refresh_hz", label="刷新频率 Hz", value="10"),
+            ToolField(key="timeout_ms", label="连接超时 ms", value="2500"),
+            ToolField(key="output_dir", label="快照输出目录", value="G:/ros_proj/ros_tool/output_nav"),
+        ],
+    ),
+    ToolDefinition(
         key="mtslash_export",
         title="MTSlash 导出",
         subtitle="帖子转章节 TXT",
@@ -104,3 +133,54 @@ TOOL_DEFINITIONS = [
         ],
     ),
 ]
+
+
+def _default_enabled_map() -> Dict[str, bool]:
+    return {tool.key: True for tool in ALL_TOOL_DEFINITIONS}
+
+
+def load_tool_module_config() -> Dict[str, bool]:
+    defaults = _default_enabled_map()
+    if not MODULE_CONFIG_PATH.exists():
+        return defaults
+
+    try:
+        raw = json.loads(MODULE_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return defaults
+
+    enabled_tools = raw.get("enabled_tools", {})
+    if not isinstance(enabled_tools, dict):
+        return defaults
+
+    normalized = defaults.copy()
+    for key, value in enabled_tools.items():
+        if key in normalized:
+            normalized[key] = bool(value)
+    return normalized
+
+
+def save_default_tool_module_config() -> None:
+    if MODULE_CONFIG_PATH.exists():
+        return
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "enabled_tools": _default_enabled_map(),
+    }
+    MODULE_CONFIG_PATH.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def get_tool_definitions() -> List[ToolDefinition]:
+    enabled_map = load_tool_module_config()
+    return [tool for tool in ALL_TOOL_DEFINITIONS if enabled_map.get(tool.key, True)]
+
+
+def is_tool_enabled(tool_key: str) -> bool:
+    enabled_map = load_tool_module_config()
+    return enabled_map.get(tool_key, False)
+
+
+save_default_tool_module_config()

@@ -51,6 +51,9 @@ function defaultSectionForTool(tool: ToolDefinition) {
   if (tool.key.includes("costmap")) {
     return "perception";
   }
+  if (tool.key.includes("nav")) {
+    return "perception";
+  }
   if (tool.key.includes("pcd")) {
     return "mapping";
   }

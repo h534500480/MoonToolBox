@@ -1,6 +1,25 @@
-import type { BrowseDialogPayload, ToolDefinition, ToolRunResponse, PreferencesPayload, SystemInfoResponse } from "../types";
+import type {
+  BrowseDialogPayload,
+  ToolDefinition,
+  ToolRunResponse,
+  PreferencesPayload,
+  SystemInfoResponse,
+  RosDataSourceConfig,
+  RosInspectionResponse,
+  NavRecordingFileListResponse,
+  NavRecordingSavePayload,
+  RosTopicListResponse,
+} from "../types";
 
 const API_BASE = "http://127.0.0.1:8000/api";
+
+export function buildBackendImageUrl(path: string, cacheKey = ""): string {
+  const query = new URLSearchParams({ path });
+  if (cacheKey) {
+    query.set("t", cacheKey);
+  }
+  return `${API_BASE}/files/image?${query.toString()}`;
+}
 
 export async function fetchTools(): Promise<ToolDefinition[]> {
   const response = await fetch(`${API_BASE}/tools`);
@@ -43,6 +62,70 @@ export async function fetchSystemInfo(): Promise<SystemInfoResponse> {
   const response = await fetch(`${API_BASE}/system/info`);
   if (!response.ok) {
     throw new Error("Failed to load system info");
+  }
+  return response.json();
+}
+
+export async function fetchRosDataSourceConfig(): Promise<RosDataSourceConfig> {
+  const response = await fetch(`${API_BASE}/ros/data-source`);
+  if (!response.ok) {
+    throw new Error("Failed to load ROS data source config");
+  }
+  return response.json();
+}
+
+export async function saveRosDataSourceConfig(payload: RosDataSourceConfig): Promise<RosDataSourceConfig> {
+  const response = await fetch(`${API_BASE}/ros/data-source`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    throw new Error("Failed to save ROS data source config");
+  }
+  return response.json();
+}
+
+export async function inspectRosDataSource(payload: RosDataSourceConfig): Promise<RosInspectionResponse> {
+  const response = await fetch(`${API_BASE}/ros/data-source/inspect`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    let detail = "Failed to inspect ROS data source";
+    try {
+      const data = await response.json();
+      detail = data.detail ?? detail;
+    } catch {
+      // Keep fallback message.
+    }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+export async function fetchRosTopics(payload: RosDataSourceConfig): Promise<RosTopicListResponse> {
+  const response = await fetch(`${API_BASE}/ros/topics`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    let detail = "Failed to load ROS topics";
+    try {
+      const data = await response.json();
+      detail = data.detail ?? detail;
+    } catch {
+      // Keep fallback message.
+    }
+    throw new Error(detail);
   }
   return response.json();
 }
@@ -94,6 +177,73 @@ export async function openLocalPath(path: string): Promise<void> {
     }
     throw new Error(detail);
   }
+}
+
+export async function fetchNavRecordingFiles(): Promise<NavRecordingFileListResponse> {
+  const response = await fetch(`${API_BASE}/nav-recordings`);
+  if (!response.ok) {
+    throw new Error("Failed to load nav recordings");
+  }
+  return response.json();
+}
+
+export async function saveNavRecording(payload: NavRecordingSavePayload): Promise<NavRecordingFileListResponse> {
+  const response = await fetch(`${API_BASE}/nav-recordings`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    let detail = "Failed to save nav recording";
+    try {
+      const data = await response.json();
+      detail = data.detail ?? detail;
+    } catch {
+      // Keep fallback message.
+    }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+export async function deleteNavRecording(path: string): Promise<NavRecordingFileListResponse> {
+  const response = await fetch(`${API_BASE}/nav-recordings`, {
+    method: "DELETE",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ path })
+  });
+  if (!response.ok) {
+    let detail = "Failed to delete nav recording";
+    try {
+      const data = await response.json();
+      detail = data.detail ?? detail;
+    } catch {
+      // Keep fallback message.
+    }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+export async function fetchLocalTextFile(path: string): Promise<string> {
+  const query = new URLSearchParams({ path });
+  const response = await fetch(`${API_BASE}/files/text?${query.toString()}`);
+  if (!response.ok) {
+    let detail = "Failed to read text file";
+    try {
+      const data = await response.json();
+      detail = data.detail ?? detail;
+    } catch {
+      // Keep fallback message.
+    }
+    throw new Error(detail);
+  }
+  const data = await response.json();
+  return data.content ?? "";
 }
 
 export interface TilePreviewResponse {

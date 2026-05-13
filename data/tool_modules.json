@@ -1,0 +1,9 @@
+{
+  "enabled_tools": {
+    "pcd_map": true,
+    "pcd_tile": true,
+    "network_scan": true,
+    "costmap": true,
+    "mtslash_export": true
+  }
+}

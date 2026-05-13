@@ -1,5 +1,36 @@
 # ROS Tool Suite
 
+## 功能模块开关
+
+当前支持通过配置文件控制哪些功能模块在界面和后端中启用：
+
+- 配置文件：`backend/data/tool_modules.json`
+
+示例：
+
+```json
+{
+  "enabled_tools": {
+    "pcd_map": true,
+    "pcd_tile": true,
+    "network_scan": false,
+    "costmap": true,
+    "mtslash_export": false
+  }
+}
+```
+
+说明：
+
+- `true`：启用该模块
+- `false`：禁用该模块
+- 禁用后：
+  - 前端 `/api/tools` 不再返回该工具
+  - 首页、侧边栏、快捷入口不再显示该工具
+  - 对应执行接口会返回 `404 Tool not enabled`
+
+建议在打包前修改这个配置，以裁剪发布版功能范围。
+
 当前项目已经整理成一个可继续扩展的个人工具箱，而不是单一脚本。
 
 ## 当前结构

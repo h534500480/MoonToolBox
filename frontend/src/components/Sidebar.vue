@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 
+import CollapsePanel from "./CollapsePanel.vue";
 import type { ToolDefinition, ToolSection } from "../types";
 
 const props = defineProps<{
@@ -108,37 +109,42 @@ function dropToSection(sectionKey: string, event: DragEvent) {
         @dragover.prevent
         @drop.prevent="dropToSection(section.key, $event)"
       >
-        <span>{{ props.expandedSections.includes(section.key) ? "▾" : "▸" }} {{ section.label }}</span>
+        <span class="collapse-trigger-label">
+          <span class="collapse-caret" :class="{ expanded: props.expandedSections.includes(section.key) }">▸</span>
+          <span>{{ section.label }}</span>
+        </span>
         <span class="nav-group-count">{{ section.tools.length }}</span>
       </div>
 
-      <div v-if="props.expandedSections.includes(section.key)" class="nav-items">
-        <div
-          v-for="tool in section.tools"
-          :key="tool.key"
-          class="nav-button"
-          :class="{ active: tool.key === selectedKey }"
-          role="button"
-          tabindex="0"
-          draggable="true"
-          @click="emit('select', tool.key)"
-          @keydown.enter.prevent="emit('select', tool.key)"
-          @dragstart="startDrag(tool.key, $event)"
-          @dragend="clearDrag"
-        >
-          <span class="nav-header-row">
-            <span class="nav-title">{{ tool.title }}</span>
-            <button
-              class="favorite-btn"
-              :class="{ active: favoriteKeys.includes(tool.key) }"
-              @click.stop="emit('toggleFavorite', tool.key)"
-            >
-              ★
-            </button>
-          </span>
-          <span class="nav-subtitle">{{ tool.subtitle }}</span>
+      <CollapsePanel :open="props.expandedSections.includes(section.key)">
+        <div class="nav-items">
+          <div
+            v-for="tool in section.tools"
+            :key="tool.key"
+            class="nav-button"
+            :class="{ active: tool.key === selectedKey }"
+            role="button"
+            tabindex="0"
+            draggable="true"
+            @click="emit('select', tool.key)"
+            @keydown.enter.prevent="emit('select', tool.key)"
+            @dragstart="startDrag(tool.key, $event)"
+            @dragend="clearDrag"
+          >
+            <span class="nav-header-row">
+              <span class="nav-title">{{ tool.title }}</span>
+              <button
+                class="favorite-btn"
+                :class="{ active: favoriteKeys.includes(tool.key) }"
+                @click.stop="emit('toggleFavorite', tool.key)"
+              >
+                ★
+              </button>
+            </span>
+            <span class="nav-subtitle">{{ tool.subtitle }}</span>
+          </div>
         </div>
-      </div>
+      </CollapsePanel>
     </div>
   </aside>
 </template>

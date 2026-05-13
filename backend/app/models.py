@@ -72,3 +72,71 @@ class SystemInfoResponse(BaseModel):
     local_ip: str = ""
     subnet_prefix: str = ""
     app_root: str = ""
+
+
+class RosDataSourceConfig(BaseModel):
+    provider: str = "rosbridge"
+    options: Dict[str, str] = Field(default_factory=dict)
+
+
+class RosInspectionResponse(BaseModel):
+    provider: str = ""
+    status: str = "unknown"
+    message: str = ""
+    capabilities: List[str] = Field(default_factory=list)
+    detected_hints: List[str] = Field(default_factory=list)
+    topics_count: int = 0
+
+
+class RosTopicItem(BaseModel):
+    name: str = ""
+    type: str = ""
+
+
+class RosTopicListResponse(BaseModel):
+    provider: str = ""
+    status: str = "unknown"
+    message: str = ""
+    topics: List[RosTopicItem] = Field(default_factory=list)
+
+
+class NavRecordingMetricSample(BaseModel):
+    offset_ms: int = 0
+    value: float = 0.0
+
+
+class NavRecordingMetricSeries(BaseModel):
+    label: str = ""
+    unit: str = ""
+    color: str = "#2f8cff"
+    samples: List[NavRecordingMetricSample] = Field(default_factory=list)
+
+
+class NavRecordingSaveRequest(BaseModel):
+    panel_id: str = ""
+    title: str = ""
+    topic: str = ""
+    message_type: str = ""
+    started_at_ms: int = 0
+    started_at: str = ""
+    stopped_at: str = ""
+    duration_ms: int = 0
+    entries: List[str] = Field(default_factory=list)
+    metric_series: List[NavRecordingMetricSeries] = Field(default_factory=list)
+
+
+class NavRecordingFileItem(BaseModel):
+    name: str = ""
+    path: str = ""
+    kind: str = "text"
+    size_bytes: int = 0
+    modified_at: str = ""
+
+
+class NavRecordingFileListResponse(BaseModel):
+    directory: str = ""
+    items: List[NavRecordingFileItem] = Field(default_factory=list)
+
+
+class DeletePathRequest(BaseModel):
+    path: str = ""
