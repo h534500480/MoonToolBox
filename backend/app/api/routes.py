@@ -15,6 +15,7 @@ from app.models import (
     PreferencesPayload,
     RosDataSourceConfig,
     RosInspectionResponse,
+    RosRuntimeParamsResponse,
     RosTopicListResponse,
     SystemInfoResponse,
     TilePreviewResponse,
@@ -47,6 +48,7 @@ from app.services.ros_data_source import (
     load_ros_data_source_config,
     save_ros_data_source_config,
 )
+from app.services.ros_runtime_params import list_ros_runtime_params
 from app.services.system_info import get_system_info
 from app.services.system_actions import open_path_in_system
 
@@ -101,6 +103,14 @@ def post_ros_data_source_inspect(payload: RosDataSourceConfig):
 def post_ros_topics(payload: RosDataSourceConfig):
     try:
         return list_ros_topics(payload)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/ros/runtime-params", response_model=RosRuntimeParamsResponse)
+def post_ros_runtime_params(payload: RosDataSourceConfig):
+    try:
+        return list_ros_runtime_params(payload)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -255,7 +265,7 @@ def run_tool(tool_key: str, request: ToolRunRequest):
         if tool_key == "ros_nav_test":
             logs = [
                 "[INFO] ROS 定位导航测试布局已启动",
-                f"[INFO] bridge: {values.get('ros_bridge_url', 'ws://127.0.0.1:9090')}",
+                f"[INFO] bridge: {values.get('ros_bridge_url', '')}",
                 f"[INFO] fixed frame: {values.get('fixed_frame', 'map')}",
                 "[NEXT] 后续在这里接入 ROS topic 订阅、3D 渲染和小窗数据生命周期控制",
             ]
@@ -265,7 +275,7 @@ def run_tool(tool_key: str, request: ToolRunRequest):
                 summary="导航测试工作台布局已就绪，当前版本用于确认三维主视图、话题选择和可折叠小窗区结构。",
                 logs=logs,
                 data={
-                    "bridge_url": values.get("ros_bridge_url", "ws://127.0.0.1:9090"),
+                    "bridge_url": values.get("ros_bridge_url", ""),
                     "fixed_frame": values.get("fixed_frame", "map"),
                 },
             )

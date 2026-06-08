@@ -90,7 +90,7 @@ function Install-EmbeddedPython($Destination) {
   Invoke-Checked $RuntimePython @($GetPip, "--no-warn-script-location")
   Invoke-Checked $RuntimePython @("-m", "pip", "install", "--no-warn-script-location", "--upgrade", "pip")
   Invoke-Checked $RuntimePython @("-m", "pip", "install", "--no-warn-script-location", "-r", "backend\requirements.txt")
-  Invoke-Checked $RuntimePython @("-c", "import fastapi, uvicorn, yaml, PIL, websockets")
+  Invoke-Checked $RuntimePython @("-c", "import fastapi, uvicorn, yaml, PIL, websockets, pystray")
 }
 
 function Build-Frontend {
@@ -116,7 +116,7 @@ function Build-Frontend {
 Write-Host "[1/7] Checking local runtime outputs..."
 Require-Path ".venv\Scripts\python.exe" "Run .\scripts\install_local.cmd first."
 
-& ".venv\Scripts\python.exe" -c "import fastapi, uvicorn, yaml, PIL, websockets"
+& ".venv\Scripts\python.exe" -c "import fastapi, uvicorn, yaml, PIL, websockets, pystray"
 if ($LASTEXITCODE -ne 0) {
   throw ".venv is missing runtime Python dependencies. Run .\scripts\install_local.cmd and fix any pip errors first."
 }
@@ -138,17 +138,29 @@ New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
 
 Write-Host "[4/7] Copying app runtime files..."
 Copy-Directory "backend" (Join-Path $DistDir "backend")
+Copy-Directory "data" (Join-Path $DistDir "data")
 Copy-Directory "frontend\dist" (Join-Path $DistDir "frontend\dist")
 New-Item -ItemType Directory -Force -Path (Join-Path $DistDir "cpp\build") | Out-Null
 foreach ($ExeName in $RequiredExes) {
   Copy-Item (Join-Path "cpp\build" $ExeName) (Join-Path $DistDir "cpp\build") -Force
 }
+New-Item -ItemType Directory -Force -Path (Join-Path $DistDir "output_nav\recordings") | Out-Null
 
 New-Item -ItemType Directory -Force -Path (Join-Path $DistDir "scripts") | Out-Null
 Copy-Item "scripts\start_local.ps1" (Join-Path $DistDir "scripts") -Force
 Copy-Item "scripts\start_local.cmd" (Join-Path $DistDir "scripts") -Force
+Copy-Item "scripts\start_local.vbs" (Join-Path $DistDir "scripts") -Force
+Copy-Item "scripts\stop_local.ps1" (Join-Path $DistDir "scripts") -Force
+Copy-Item "scripts\stop_local.cmd" (Join-Path $DistDir "scripts") -Force
+Copy-Item "scripts\tray_launcher.py" (Join-Path $DistDir "scripts") -Force
 Copy-Item "scripts\diagnose_mtslash.py" (Join-Path $DistDir "scripts") -Force
 Copy-Item "scripts\diagnose_mtslash.cmd" (Join-Path $DistDir "scripts") -Force
+if (Test-Path "assets\icons\runtime\setup.ico") {
+  Copy-Item "assets\icons\runtime\setup.ico" (Join-Path $DistDir "MoonToolBox.ico") -Force
+  Copy-Item "assets\icons\runtime\setup.ico" (Join-Path $ReleaseRoot "MoonToolBoxSetup.ico") -Force
+} elseif (Test-Path "assets\icons\runtime\moontoolbox.ico") {
+  Copy-Item "assets\icons\runtime\moontoolbox.ico" (Join-Path $DistDir "MoonToolBox.ico") -Force
+}
 Copy-Item "requirements.txt" $DistDir -Force
 Copy-Item "README.md" $DistDir -Force
 Copy-Item "LICENSE" $DistDir -Force
@@ -182,4 +194,4 @@ Compress-Archive -Path $DistDir -DestinationPath $ZipPath -Force
 Write-Host ""
 Write-Host "Release folder: $DistDir"
 Write-Host "Release zip:    $ZipPath"
-Write-Host "Start with:     $DistName\scripts\start_local.cmd"
+Write-Host "Start with:     $DistName\scripts\start_local.vbs"

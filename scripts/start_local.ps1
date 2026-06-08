@@ -10,6 +10,8 @@ $BackendDir = Join-Path $Root "backend"
 $LogDir = Join-Path $Root "logs"
 $BackendOutLog = Join-Path $LogDir "backend.out.log"
 $BackendErrLog = Join-Path $LogDir "backend.err.log"
+$TrayOutLog = Join-Path $LogDir "tray.out.log"
+$TrayErrLog = Join-Path $LogDir "tray.err.log"
 $BackendUrl = "http://127.0.0.1:8000"
 $HealthUrl = "$BackendUrl/api/health"
 
@@ -61,7 +63,7 @@ function Test-BackendDependencies {
     return $false
   }
 
-  & $VenvPython -c "import fastapi, uvicorn, yaml, PIL; raise SystemExit(0)" *> $null
+  & $VenvPython -c "import fastapi, uvicorn, yaml, PIL, websockets, pystray; raise SystemExit(0)" *> $null
   return $LASTEXITCODE -eq 0
 }
 
@@ -70,7 +72,7 @@ function Test-EmbeddedPython {
     return $false
   }
 
-  & $EmbeddedPython -c "import fastapi, uvicorn, yaml, PIL; raise SystemExit(0)" *> $null
+  & $EmbeddedPython -c "import fastapi, uvicorn, yaml, PIL, websockets, pystray; raise SystemExit(0)" *> $null
   return $LASTEXITCODE -eq 0
 }
 
@@ -149,38 +151,33 @@ if (-not (Test-Path "frontend\dist\index.html")) {
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $env:ROS_TOOL_RELOAD = "0"
 
-Write-Host "Starting backend..."
-$BackendProcess = Start-Process `
-  -FilePath $Python `
-  -ArgumentList "run.py" `
-  -WorkingDirectory $BackendDir `
-  -RedirectStandardOutput $BackendOutLog `
-  -RedirectStandardError $BackendErrLog `
-  -PassThru
-
-for ($Attempt = 1; $Attempt -le 30; $Attempt++) {
-  if ($BackendProcess.HasExited) {
-    Write-Host "Backend exited early. Log:"
-    Get-Content $BackendOutLog -ErrorAction SilentlyContinue
-    Get-Content $BackendErrLog -ErrorAction SilentlyContinue
-    exit $BackendProcess.ExitCode
-  }
-
-  try {
-    $Response = Invoke-WebRequest -UseBasicParsing $HealthUrl -TimeoutSec 1
-    if ($Response.StatusCode -eq 200) {
-      Write-Host "Backend ready: $BackendUrl"
-      Start-Process $BackendUrl
-      Write-Host "Keep this window open while using MoonToolBox."
-      Wait-Process -Id $BackendProcess.Id
-      exit $LASTEXITCODE
-    }
-  } catch {
-    Start-Sleep -Milliseconds 500
-  }
+$TrayScript = Join-Path $Root "scripts\tray_launcher.py"
+if (-not (Test-Path $TrayScript)) {
+  throw "Tray launcher not found: $TrayScript"
 }
 
-Write-Host "Backend did not become ready. Log:"
-Get-Content $BackendOutLog -ErrorAction SilentlyContinue
-Get-Content $BackendErrLog -ErrorAction SilentlyContinue
-exit 1
+$PythonGui = Join-Path (Split-Path $Python -Parent) "pythonw.exe"
+$LauncherExecutable = if (Test-Path $PythonGui) { $PythonGui } else { $Python }
+
+Write-Host "Starting MoonToolBox tray..."
+$TrayProcess = Start-Process `
+  -FilePath $LauncherExecutable `
+  -ArgumentList $TrayScript `
+  -WorkingDirectory $Root `
+  -RedirectStandardOutput $TrayOutLog `
+  -RedirectStandardError $TrayErrLog `
+  -WindowStyle Hidden `
+  -PassThru
+
+Start-Sleep -Seconds 2
+if ($TrayProcess.HasExited) {
+  Write-Host "Tray launcher exited early. Logs:"
+  Get-Content $TrayOutLog -ErrorAction SilentlyContinue
+  Get-Content $TrayErrLog -ErrorAction SilentlyContinue
+  Get-Content $BackendOutLog -ErrorAction SilentlyContinue
+  Get-Content $BackendErrLog -ErrorAction SilentlyContinue
+  exit $TrayProcess.ExitCode
+}
+
+Write-Host "MoonToolBox is running in the system tray."
+Write-Host "Use the tray icon to open the interface or fully exit the program."

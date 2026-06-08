@@ -6,12 +6,13 @@ import type {
   SystemInfoResponse,
   RosDataSourceConfig,
   RosInspectionResponse,
+  RosRuntimeParamsResponse,
   NavRecordingFileListResponse,
   NavRecordingSavePayload,
   RosTopicListResponse,
 } from "../types";
 
-const API_BASE = "http://127.0.0.1:8000/api";
+const API_BASE = "/api";
 
 export function buildBackendImageUrl(path: string, cacheKey = ""): string {
   const query = new URLSearchParams({ path });
@@ -119,6 +120,27 @@ export async function fetchRosTopics(payload: RosDataSourceConfig): Promise<RosT
   });
   if (!response.ok) {
     let detail = "Failed to load ROS topics";
+    try {
+      const data = await response.json();
+      detail = data.detail ?? detail;
+    } catch {
+      // Keep fallback message.
+    }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+export async function fetchRosRuntimeParams(payload: RosDataSourceConfig): Promise<RosRuntimeParamsResponse> {
+  const response = await fetch(`${API_BASE}/ros/runtime-params`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    let detail = "Failed to load ROS runtime params";
     try {
       const data = await response.json();
       detail = data.detail ?? detail;

@@ -8,6 +8,7 @@ import {
   fetchLocalTextFile,
   fetchNavRecordingFiles,
   fetchRosDataSourceConfig,
+  fetchRosRuntimeParams,
   fetchRosTopics,
   fetchMtslashBrowserFavorites,
   fetchMtslashBrowserTabs,
@@ -17,13 +18,22 @@ import {
   inspectRosDataSource,
   loginMtslash,
   openLocalPath,
+  saveNavRecording,
   saveRosDataSourceConfig,
   startMtslashBrowser,
 } from "../api/client";
 import type { MtslashBrowserTab, MtslashFavoriteItem } from "../api/client";
-import type { BrowseDialogPayload, NavRecordingFileItem, NavRecordingSavePayload, RosInspectionResponse, RosTopicItem, ToolDefinition } from "../types";
+import type {
+  BrowseDialogPayload,
+  NavRecordingFileItem,
+  NavRecordingSavePayload,
+  RosInspectionResponse,
+  RosRuntimeParamsResponse,
+  RosTopicItem,
+  ToolDefinition,
+} from "../types";
 import { buildDisplayLabel, inferDisplayKind, type NavViewerDisplay } from "../lib/ros/displayRegistry";
-import { createRosLiveAdapter } from "../lib/ros/liveAdapter";
+import { createRosLiveAdapter, createSharedRosLiveAdapter, getSharedRosSessionStats, type SharedRosSessionStats } from "../lib/ros/liveAdapter";
 
 const Nav3DViewer = defineAsyncComponent(() => import("./Nav3DViewer.vue"));
 const NavTopicPanelList = defineAsyncComponent(() => import("./NavTopicPanelList.vue"));
@@ -95,9 +105,93 @@ interface SavedNavPanelLayout {
   sidePanels: NavPanelItem[];
   fullPanels: NavPanelItem[];
   mainDisplays: NavViewerDisplay[];
+  hasSidePanels: boolean;
+  hasFullPanels: boolean;
+  hasMainDisplays: boolean;
 }
 
-function defaultPointCloudColor(topic: string) {
+interface NavDelayTopicDefinition {
+  topic: string;
+  messageType: string;
+  label: string;
+  color: string;
+  resolved: boolean;
+}
+
+interface NavDelaySample {
+  recvMs: number;
+  stampMs: number;
+  ageMs: number;
+}
+
+interface NavDelayTopicState {
+  topic: string;
+  label: string;
+  messageType: string;
+  color: string;
+  lastStampMs: number | null;
+  lastRecvMs: number | null;
+  ageMs: number | null;
+  hz: number;
+  avgAgeMs10s: number | null;
+  maxAgeMs10s: number | null;
+  stampSecText: string;
+  recvWallTimeText: string;
+  points: string;
+  sampleCount: number;
+}
+
+interface NavDelayAggregateLine {
+  topic: string;
+  label: string;
+  color: string;
+  points: string;
+  ageMs: number | null;
+  latestStampMs: number | null;
+}
+
+interface NavDelayRecordedMetricPoint {
+  offsetMs: number;
+  value: number;
+}
+
+interface NavDelayRecordedMetricSeries {
+  label: string;
+  unit: string;
+  color: string;
+  samples: NavDelayRecordedMetricPoint[];
+}
+
+interface NavDelayRecordingState {
+  isRecording: boolean;
+  startedAtMs: number;
+  startedAtText: string;
+  stoppedAtText: string;
+  durationMs: number;
+  entries: string[];
+  metricSeries: NavDelayRecordedMetricSeries[];
+}
+
+interface NavDelayAxisInfo {
+  xLabel: string;
+  yLabel: string;
+  minText: string;
+  maxText: string;
+}
+
+function defaultMainDisplayColor(topic: string, kind: NavViewerDisplay["kind"]) {
+  if (kind === "path") {
+    return "#f6a237";
+  }
+  if (kind === "pose") {
+    if (topic.includes("ekf")) {
+      return "#7bdff2";
+    }
+    if (topic.includes("ndt")) {
+      return "#ffd166";
+    }
+    return "#2f8cff";
+  }
   if (topic.includes("loaded_pointcloud_map")) {
     return "#d7dee8";
   }
@@ -113,8 +207,60 @@ function defaultPointCloudColor(topic: string) {
   return "#ffffff";
 }
 
+function defaultNavDelayTopicsText() {
+  return NAV_DELAY_DEFAULT_TOPICS.join("\n");
+}
+
+function normalizeNavDelayTopicsInput(value: string) {
+  const seen = new Set<string>();
+  return value
+    .split(/[\n,，;；]+/)
+    .map((item) => item.trim())
+    .filter((item) => item.startsWith("/"))
+    .filter((item) => {
+      if (seen.has(item)) {
+        return false;
+      }
+      seen.add(item);
+      return true;
+    });
+}
+
+function fallbackNavDelayLabel(topic: string) {
+  return topic.split("/").filter(Boolean).pop() || topic;
+}
+
 const NAV_RECORDING_JSON_BEGIN = "--- NAV_RECORDING_JSON BEGIN ---";
 const NAV_RECORDING_JSON_END = "--- NAV_RECORDING_JSON END ---";
+const NAV_RECORDING_PREVIEW_MAX_CHARS = 24000;
+const NAV_RECORDING_PREVIEW_MAX_LINES = 320;
+const NAV_RECORDING_CHART_MAX_SAMPLES = 4000;
+const NAV_DELAY_WINDOW_MS = 10_000;
+const NAV_DELAY_MAX_SAMPLES = 180;
+const ROSBRIDGE_TIMEOUT_MIN_MS = 8000;
+const NAV_DELAY_DEFAULT_TOPICS = [
+  "/cloud_registered_body",
+  "/cloud_registered_bl",
+  "/points_aligned",
+  "/fastlio/odom",
+  "/odometry/filtered",
+  "/ndt_pose",
+  "/ekf_pose_with_covariance",
+];
+const NAV_DELAY_TOPIC_COLORS = [
+  "#2f8cff",
+  "#31d28a",
+  "#f6a237",
+  "#8a63ff",
+  "#f15d78",
+  "#ffd166",
+  "#7bdff2",
+  "#4cc9f0",
+  "#ff8fab",
+  "#c7f464",
+  "#ffa94d",
+  "#9b8cff",
+];
 
 const defaultNavTopicOptions: NavTopicOption[] = [
   { key: "/map", label: "二维地图", type: "nav_msgs/OccupancyGrid", note: "Nav2 常用二维栅格地图话题，适合直接叠加到主视图。" },
@@ -127,6 +273,7 @@ const defaultNavTopicOptions: NavTopicOption[] = [
   { key: "/plan", label: "当前路径", type: "nav_msgs/msg/Path", note: "文档建议作为几何验证主视图的常规叠加项。" },
   { key: "/tf", label: "TF 树", type: "tf2_msgs/msg/TFMessage", note: "查看 base_link 与地图坐标系链路。" },
   { key: "/scan", label: "LaserScan", type: "sensor_msgs/msg/LaserScan", note: "文档建议用于查看 Nav2 局部避障输入。" },
+  { key: "/geneox_mid360_obstacle", label: "冷静区/危险区", type: "std_msgs/msg/UInt8", note: "按文档推荐在主视图中绑定定位位姿绘制冷静区、危险区和忽略区。" },
   { key: "/ndt_status", label: "NDT 状态", type: "std_msgs/msg/UInt8", note: "0 unknown / 1 healthy / 2 degraded / 3 lost。" },
   { key: "/iteration_num", label: "NDT 迭代数", type: "autoware_internal_debug_msgs/msg/Int32Stamped", note: "判断是否接近失配或吃满迭代。" },
   { key: "/exe_time_ms", label: "NDT 耗时", type: "autoware_internal_debug_msgs/msg/Float32Stamped", note: "判断环境复杂度和性能抖动。" },
@@ -244,10 +391,44 @@ const navMainDisplays = ref<NavViewerDisplay[]>([]);
 const rosInspectLoading = ref(false);
 const rosTopicsLoading = ref(false);
 const rosDataSourceSaving = ref(false);
+const rosRuntimeParamsLoading = ref(false);
 const rosTopicQuery = ref("");
 const rosTopicOptions = ref<NavTopicOption[]>(defaultNavTopicOptions);
 const rosInspectResult = ref<RosInspectionResponse | null>(null);
 const rosTopicsMessage = ref("");
+const rosRuntimeLogs = ref<string[]>([]);
+const rosReconnectToken = ref(0);
+const rosDataSourceConfigLoaded = ref(false);
+const rosRuntimeParams = ref<RosRuntimeParamsResponse | null>(null);
+const rosRuntimeParamsMessage = ref("");
+const rosSharedSessionStats = ref<SharedRosSessionStats>({
+  sharedKey: "",
+  exists: false,
+  clientCount: 0,
+  subscriptionCount: 0,
+  connected: false,
+  reconnecting: false,
+  message: "当前页面还没有建立共享连接",
+});
+const navDelayPanelCollapsed = ref(false);
+const navDelayTopicsInput = ref(NAV_DELAY_DEFAULT_TOPICS.join("\n"));
+const navDelayTopicsApplied = ref(NAV_DELAY_DEFAULT_TOPICS.join("\n"));
+const navDelayStateMap = ref<Record<string, NavDelayTopicState>>({});
+const navDelayAggregateLines = ref<NavDelayAggregateLine[]>([]);
+const navDelayOverviewSelectionMap = ref<Record<string, boolean>>({});
+const navDelayOverviewRecording = ref<NavDelayRecordingState>({
+  isRecording: false,
+  startedAtMs: 0,
+  startedAtText: "-",
+  stoppedAtText: "-",
+  durationMs: 0,
+  entries: [],
+  metricSeries: [],
+});
+const navDelayMessage = ref("等待链路延迟数据。");
+const navRuntimeParamsPanelCollapsed = ref(true);
+const navRuntimeGroupCollapsedMap = ref<Record<string, boolean>>({});
+const navRuntimeNodeCollapsedMap = ref<Record<string, boolean>>({});
 const navDisplayManagerCollapsed = ref(false);
 const navTfFrameOptions = ref<Record<string, string[]>>({});
 const navRecordingFiles = ref<NavRecordingFileItem[]>([]);
@@ -271,6 +452,10 @@ const navControlLoading = ref(false);
 const navControlMessage = ref("");
 const navGoalSequence = ref(1);
 let costmapTimer: number | undefined;
+let rosSharedStatsTimer: number | undefined;
+let navDelayAdapter: ReturnType<typeof createSharedRosLiveAdapter> | null = null;
+const navDelayUnsubscribeMap = new Map<string, () => void>();
+const navDelaySampleMap = new Map<string, NavDelaySample[]>();
 
 watch(
   () => props.tool,
@@ -298,6 +483,38 @@ watch(
     navMainDisplays.value = [];
     rosInspectResult.value = null;
     rosTopicsMessage.value = "";
+    rosRuntimeLogs.value = [];
+    rosReconnectToken.value = 0;
+    rosDataSourceConfigLoaded.value = false;
+    rosRuntimeParams.value = null;
+    rosRuntimeParamsMessage.value = "";
+    navDelayPanelCollapsed.value = false;
+    navDelayTopicsInput.value = defaultNavDelayTopicsText();
+    navDelayTopicsApplied.value = defaultNavDelayTopicsText();
+    navDelayStateMap.value = {};
+    navDelayOverviewSelectionMap.value = {};
+    navDelayOverviewRecording.value = {
+      isRecording: false,
+      startedAtMs: 0,
+      startedAtText: "-",
+      stoppedAtText: "-",
+      durationMs: 0,
+      entries: [],
+      metricSeries: [],
+    };
+    navDelayMessage.value = "等待链路延迟数据。";
+    rosSharedSessionStats.value = {
+      sharedKey: "",
+      exists: false,
+      clientCount: 0,
+      subscriptionCount: 0,
+      connected: false,
+      reconnecting: false,
+      message: "当前页面还没有建立共享连接",
+    };
+    navRuntimeParamsPanelCollapsed.value = true;
+    navRuntimeGroupCollapsedMap.value = {};
+    navRuntimeNodeCollapsedMap.value = {};
     rosTopicQuery.value = "";
     rosTopicOptions.value = defaultNavTopicOptions;
     navDisplayManagerCollapsed.value = false;
@@ -313,6 +530,12 @@ watch(
     if (tool.key === "ros_nav_test") {
       void loadRosDataSourceConfigForNav();
       void loadNavRecordingFiles();
+      void loadRosRuntimeParamsPanel();
+      void reconnectNavDelayPanel();
+      startRosSharedStatsPolling();
+    } else {
+      disconnectNavDelayPanel();
+      stopRosSharedStatsPolling();
     }
     stopCostmapPlayback();
     costmapFrameIndex.value = 0;
@@ -348,6 +571,17 @@ watch(
     if (currentOutput.endsWith("_tiles")) {
       formValues.output_dir = suggested;
     }
+  }
+);
+
+watch(
+  () => [props.tool.key, formValues.ros_provider, formValues.ros_bridge_url, formValues.timeout_ms],
+  () => {
+    if (props.tool.key !== "ros_nav_test") {
+      return;
+    }
+    refreshRosSharedStats();
+    void reconnectNavDelayPanel();
   }
 );
 
@@ -407,6 +641,7 @@ const pcdMapImageUrl = computed(() => {
 const selectedNavTopicOptions = computed(() =>
   rosTopicOptions.value.filter((item) => selectedNavTopics.value.includes(item.key))
 );
+const mergedToolLogs = computed(() => [...props.logs, ...rosRuntimeLogs.value]);
 
 const navActiveSidePanelCount = computed(() => navSidePanels.value.filter((panel) => !panel.paused).length);
 const navActiveFullPanelCount = computed(() => navFullPanels.value.filter((panel) => !panel.paused).length);
@@ -420,6 +655,20 @@ const filteredRosTopicOptions = computed(() => {
   }
   return rosTopicOptions.value.filter((item) => `${item.key} ${item.label} ${item.type} ${item.note}`.toLowerCase().includes(keyword));
 });
+const navDelayTopicDefinitions = computed<NavDelayTopicDefinition[]>(() => {
+  const optionMap = new Map(rosTopicOptions.value.map((item) => [item.key, item]));
+  return normalizeNavDelayTopicsInput(navDelayTopicsApplied.value).map((topic, index) => {
+    const option = optionMap.get(topic);
+    return {
+      topic,
+      messageType: option?.type || "",
+      label: option?.label || fallbackNavDelayLabel(topic),
+      color: NAV_DELAY_TOPIC_COLORS[index % NAV_DELAY_TOPIC_COLORS.length],
+      resolved: Boolean(option?.type),
+    };
+  });
+});
+const navDelayOverviewAxisInfo = computed(() => buildOverviewAxisInfo(navDelayAggregateLines.value));
 
 const mtslashFavoriteTotalPages = computed(() => Math.max(1, Math.ceil(mtslashFavorites.value.length / mtslashPageSize)));
 const filteredMtslashFavorites = computed(() => {
@@ -457,6 +706,16 @@ const mtslashProgressText = computed(() => {
   }
   return props.summary || "等待导出任务";
 });
+
+watch(
+  () => navDelayTopicDefinitions.value.map((definition) => `${definition.topic}:${definition.messageType}`).join("|"),
+  () => {
+    if (props.tool.key !== "ros_nav_test" || navDelayPanelCollapsed.value) {
+      return;
+    }
+    void reconnectNavDelayPanel();
+  }
+);
 
 watch(mtslashFavoritesKeyword, () => {
   mtslashFavoritesPage.value = 1;
@@ -508,6 +767,574 @@ function submit() {
     persistMtslashCachedFields();
   }
   emit("run", { ...formValues });
+}
+
+function normalizeRosBridgeTimeoutMs(value: string | number | undefined) {
+  const parsed = Number(value ?? "");
+  if (!Number.isFinite(parsed)) {
+    return String(ROSBRIDGE_TIMEOUT_MIN_MS);
+  }
+  return String(Math.max(ROSBRIDGE_TIMEOUT_MIN_MS, Math.round(parsed)));
+}
+
+function clearToolLogs() {
+  rosRuntimeLogs.value = [];
+  emit("clearLogs");
+}
+
+function appendRosRuntimeLog(level: "info" | "warning" | "error", message: string) {
+  const prefix = level === "error" ? "[ROS][ERROR]" : level === "warning" ? "[ROS][WARN]" : "[ROS][INFO]";
+  const line = `${prefix} ${new Date().toLocaleTimeString("zh-CN", { hour12: false })} ${message}`;
+  rosRuntimeLogs.value = [...rosRuntimeLogs.value.slice(-159), line];
+}
+
+function handleRosRuntimeLog(payload: { source: string; level: "info" | "warning" | "error"; message: string }) {
+  appendRosRuntimeLog(payload.level, `${payload.source}: ${payload.message}`);
+  refreshRosSharedStats();
+}
+
+function triggerRosReconnect() {
+  rosReconnectToken.value += 1;
+  appendRosRuntimeLog("warning", "测试工作台: 手动触发 ROS 重连。");
+  refreshRosSharedStats();
+  void reconnectNavDelayPanel();
+  void loadRosRuntimeParamsPanel();
+}
+
+function buildRosSharedSessionKey() {
+  return `ros-nav-test:${formValues.ros_provider || "rosbridge"}:${formValues.ros_bridge_url || ""}:${normalizeRosBridgeTimeoutMs(formValues.timeout_ms)}`;
+}
+
+function refreshRosSharedStats() {
+  if (props.tool.key !== "ros_nav_test") {
+    return;
+  }
+  rosSharedSessionStats.value = getSharedRosSessionStats(buildRosSharedSessionKey());
+}
+
+function stopRosSharedStatsPolling() {
+  if (rosSharedStatsTimer) {
+    window.clearInterval(rosSharedStatsTimer);
+    rosSharedStatsTimer = undefined;
+  }
+}
+
+function startRosSharedStatsPolling() {
+  stopRosSharedStatsPolling();
+  refreshRosSharedStats();
+  rosSharedStatsTimer = window.setInterval(() => {
+    refreshRosSharedStats();
+  }, 1000);
+}
+
+function formatDelayWallTime(timeMs: number | null) {
+  if (!timeMs || !Number.isFinite(timeMs)) {
+    return "-";
+  }
+  return new Date(timeMs).toLocaleTimeString("zh-CN", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    fractionalSecondDigits: 3,
+  });
+}
+
+function formatTimestampWithMs(timeMs: number) {
+  return new Date(timeMs).toLocaleTimeString("zh-CN", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    fractionalSecondDigits: 3,
+  });
+}
+
+function formatDelayStampSec(stampMs: number | null) {
+  if (!stampMs || !Number.isFinite(stampMs)) {
+    return "-";
+  }
+  return (stampMs / 1000).toFixed(3);
+}
+
+function formatDelayMs(value: number | null, digits = 1) {
+  if (value === null || !Number.isFinite(value)) {
+    return "-";
+  }
+  return value.toFixed(digits);
+}
+
+function formatDelayDuration(durationMs: number) {
+  return `${(Math.max(0, durationMs) / 1000).toFixed(2)} s`;
+}
+
+function delaySparklinePoints(samples: NavDelaySample[], minStampMs: number, maxStampMs: number) {
+  if (samples.length === 0) {
+    return "";
+  }
+  const range = Math.max(1, maxStampMs - minStampMs);
+  return samples.map((sample, index) => {
+    const x = samples.length === 1 ? 0 : (index / (samples.length - 1)) * 100;
+    const y = 46 - ((sample.stampMs - minStampMs) / range) * 42;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(" ");
+}
+
+function delayAggregateLinePoints(samples: NavDelaySample[], minRecvMs: number, maxRecvMs: number, minAgeMs: number, maxAgeMs: number) {
+  if (samples.length === 0) {
+    return "";
+  }
+  const recvRange = Math.max(1, maxRecvMs - minRecvMs);
+  const ageRange = Math.max(1, maxAgeMs - minAgeMs);
+  return samples.map((sample) => {
+    const x = ((sample.recvMs - minRecvMs) / recvRange) * 100;
+    const y = 46 - ((sample.ageMs - minAgeMs) / ageRange) * 42;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(" ");
+}
+
+function delayAggregateDisplayValue(sample: NavDelaySample, baselineRecvMs: number, baselineStampMs: number) {
+  return (sample.stampMs - baselineStampMs) - (sample.recvMs - baselineRecvMs);
+}
+
+function delayAggregateAbsoluteStampSec(sample: NavDelaySample) {
+  return sample.stampMs / 1000;
+}
+
+function delayAggregateEnhancedLinePoints(
+  samples: NavDelaySample[],
+  minRecvMs: number,
+  maxRecvMs: number,
+  baselineRecvMs: number,
+  baselineStampMs: number,
+  minDisplayMs: number,
+  maxDisplayMs: number,
+) {
+  if (samples.length === 0) {
+    return "";
+  }
+  const recvRange = Math.max(1, maxRecvMs - minRecvMs);
+  const displayRange = Math.max(1, maxDisplayMs - minDisplayMs);
+  return samples.map((sample) => {
+    const x = ((sample.recvMs - minRecvMs) / recvRange) * 100;
+    const displayMs = delayAggregateDisplayValue(sample, baselineRecvMs, baselineStampMs);
+    const y = 46 - ((displayMs - minDisplayMs) / displayRange) * 42;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(" ");
+}
+
+function buildOverviewAxisInfo(lines: NavDelayAggregateLine[]): NavDelayAxisInfo {
+  const visibleTopics = new Set(lines.map((item) => item.topic));
+  const visibleSamples = navDelayTopicDefinitions.value.flatMap((definition) =>
+    visibleTopics.has(definition.topic) ? (navDelaySampleMap.get(definition.topic) ?? []) : []
+  );
+  if (visibleSamples.length === 0) {
+    return {
+      xLabel: "X: recv_time (最近10s)",
+      yLabel: "Y: stamp_offset_ms(绝对时间戳去趋势)",
+      minText: "-",
+      maxText: "-",
+    };
+  }
+  const baselineRecvMs = Math.min(...visibleSamples.map((item) => item.recvMs));
+  const baselineStampMs = Math.min(...visibleSamples.map((item) => item.stampMs));
+  const displayValues = visibleSamples.map((item) => delayAggregateDisplayValue(item, baselineRecvMs, baselineStampMs));
+  return {
+    xLabel: "X: recv_time (最近10s)",
+    yLabel: "Y: stamp_offset_ms(绝对时间戳去趋势)",
+    minText: Math.min(...displayValues).toFixed(1),
+    maxText: Math.max(...displayValues).toFixed(1),
+  };
+}
+
+function rebuildNavDelayStates() {
+  const topicStates: Record<string, NavDelayTopicState> = {};
+  const now = Date.now();
+  let minRecvMs = Number.POSITIVE_INFINITY;
+  let maxRecvMs = Number.NEGATIVE_INFINITY;
+  let minStampMs = Number.POSITIVE_INFINITY;
+  let minDisplayMs = Number.POSITIVE_INFINITY;
+  let maxDisplayMs = Number.NEGATIVE_INFINITY;
+
+  navDelayTopicDefinitions.value.forEach((definition) => {
+    const samples = (navDelaySampleMap.get(definition.topic) ?? []).filter((item) => now - item.recvMs <= NAV_DELAY_WINDOW_MS);
+    navDelaySampleMap.set(definition.topic, samples);
+    samples.forEach((sample) => {
+      minRecvMs = Math.min(minRecvMs, sample.recvMs);
+      maxRecvMs = Math.max(maxRecvMs, sample.recvMs);
+      minStampMs = Math.min(minStampMs, sample.stampMs);
+    });
+  });
+
+  const safeMinRecvMs = Number.isFinite(minRecvMs) ? minRecvMs : now - NAV_DELAY_WINDOW_MS;
+  const safeMaxRecvMs = Number.isFinite(maxRecvMs) ? maxRecvMs : now;
+  const safeMinStampMs = Number.isFinite(minStampMs) ? minStampMs : safeMinRecvMs;
+
+  navDelayTopicDefinitions.value.forEach((definition) => {
+    const samples = navDelaySampleMap.get(definition.topic) ?? [];
+    samples.forEach((sample) => {
+      const displayMs = delayAggregateDisplayValue(sample, safeMinRecvMs, safeMinStampMs);
+      minDisplayMs = Math.min(minDisplayMs, displayMs);
+      maxDisplayMs = Math.max(maxDisplayMs, displayMs);
+    });
+  });
+
+  const safeMinDisplayMs = Number.isFinite(minDisplayMs) ? minDisplayMs : 0;
+  const safeMaxDisplayMs = Number.isFinite(maxDisplayMs) ? maxDisplayMs : safeMinDisplayMs + 1;
+
+  navDelayAggregateLines.value = navDelayTopicDefinitions.value.map((definition) => {
+    const samples = navDelaySampleMap.get(definition.topic) ?? [];
+    const latest = samples[samples.length - 1] ?? null;
+    return {
+      topic: definition.topic,
+      label: definition.label,
+      color: definition.color,
+      points: delayAggregateEnhancedLinePoints(
+        samples,
+        safeMinRecvMs,
+        safeMaxRecvMs,
+        safeMinRecvMs,
+        safeMinStampMs,
+        safeMinDisplayMs,
+        safeMaxDisplayMs,
+      ),
+      ageMs: latest?.ageMs ?? null,
+      latestStampMs: latest?.stampMs ?? null,
+    };
+  }).filter((line) => line.points && isNavDelayOverviewTopicSelected(line.topic));
+
+  navDelayTopicDefinitions.value.forEach((definition) => {
+    const samples = navDelaySampleMap.get(definition.topic) ?? [];
+    const latest = samples[samples.length - 1] ?? null;
+    const ageValues = samples.map((item) => item.ageMs);
+    const avgAge = ageValues.length > 0 ? ageValues.reduce((sum, item) => sum + item, 0) / ageValues.length : null;
+    const maxAge = ageValues.length > 0 ? Math.max(...ageValues) : null;
+    const lastRecvMs = latest?.recvMs ?? null;
+    const lastStampMs = latest?.stampMs ?? null;
+    const hz = samples.length >= 2 && samples[0] && samples[samples.length - 1]
+      ? ((samples.length - 1) * 1000) / Math.max(1, samples[samples.length - 1].recvMs - samples[0].recvMs)
+      : 0;
+
+    topicStates[definition.topic] = {
+      topic: definition.topic,
+      label: definition.label,
+      messageType: definition.messageType,
+      color: definition.color,
+      lastStampMs,
+      lastRecvMs,
+      ageMs: latest?.ageMs ?? null,
+      hz,
+      avgAgeMs10s: avgAge,
+      maxAgeMs10s: maxAge,
+      stampSecText: formatDelayStampSec(lastStampMs),
+      recvWallTimeText: formatDelayWallTime(lastRecvMs),
+      points: delaySparklinePoints(samples, Number.isFinite(Math.min(...samples.map((item) => item.stampMs))) ? Math.min(...samples.map((item) => item.stampMs)) : 0, Number.isFinite(Math.max(...samples.map((item) => item.stampMs))) ? Math.max(...samples.map((item) => item.stampMs)) : 1),
+      sampleCount: samples.length,
+    };
+  });
+
+  navDelayStateMap.value = topicStates;
+}
+
+function extractMessageStampMs(message: unknown) {
+  const header = (message as Record<string, any> | null)?.header;
+  const sec = Number(header?.stamp?.sec ?? Number.NaN);
+  const nanosec = Number(header?.stamp?.nanosec ?? Number.NaN);
+  if (!Number.isFinite(sec) || !Number.isFinite(nanosec)) {
+    return null;
+  }
+  return sec * 1000 + nanosec / 1e6;
+}
+
+function handleNavDelayMessage(definition: NavDelayTopicDefinition, message: unknown) {
+  const recvMs = Date.now();
+  const stampMs = extractMessageStampMs(message);
+  if (stampMs === null) {
+    return;
+  }
+  const nextSamples = [...(navDelaySampleMap.get(definition.topic) ?? []), {
+    recvMs,
+    stampMs,
+    ageMs: recvMs - stampMs,
+  }];
+  const trimmed = nextSamples
+    .filter((item) => recvMs - item.recvMs <= NAV_DELAY_WINDOW_MS)
+    .slice(-NAV_DELAY_MAX_SAMPLES);
+  navDelaySampleMap.set(definition.topic, trimmed);
+  rebuildNavDelayStates();
+  updateNavDelayOverviewRecording(recvMs);
+}
+
+function ensureDelayRecordingState(current?: NavDelayRecordingState): NavDelayRecordingState {
+  return current ?? {
+    isRecording: false,
+    startedAtMs: 0,
+    startedAtText: "-",
+    stoppedAtText: "-",
+    durationMs: 0,
+    entries: [],
+    metricSeries: [],
+  };
+}
+
+function mergeDelayRecordedMetricSeries(
+  recording: NavDelayRecordingState,
+  metrics: Array<{ label: string; unit: string; color: string; value: number | null }>,
+  offsetMs: number,
+) {
+  const previousSeries = new Map(recording.metricSeries.map((item) => [item.label, item]));
+  return metrics.map((metric) => {
+    const previousMetric = previousSeries.get(metric.label);
+    return {
+      label: metric.label,
+      unit: metric.unit,
+      color: metric.color,
+      samples: metric.value === null
+        ? previousMetric?.samples ?? []
+        : [...(previousMetric?.samples ?? []), { offsetMs, value: metric.value }],
+    };
+  });
+}
+
+function appendDelayRecordedEntry(recording: NavDelayRecordingState, timeMs: number, content: string) {
+  return [`[${formatTimestampWithMs(timeMs)}] ${content}`, ...recording.entries];
+}
+
+function navDelayRecordingDurationText(recording: NavDelayRecordingState) {
+  const durationMs = recording.durationMs || (recording.isRecording ? Math.max(0, Date.now() - recording.startedAtMs) : 0);
+  return formatDelayDuration(durationMs);
+}
+
+function overviewRecordingEntriesText() {
+  return navDelayAggregateLines.value.map((line) => {
+    const stampText = line.latestStampMs === null ? "-" : formatDelayStampSec(line.latestStampMs);
+    const ageText = line.ageMs === null ? "-" : `${formatDelayMs(line.ageMs)} ms`;
+    return `${line.label}: stamp=${stampText}, age=${ageText}`;
+  }).join(" | ");
+}
+
+function updateNavDelayOverviewRecording(now: number) {
+  const recording = navDelayOverviewRecording.value;
+  if (!recording.isRecording) {
+    return;
+  }
+  const offsetMs = Math.max(0, now - recording.startedAtMs);
+  const metrics = navDelayAggregateLines.value.flatMap((line) => {
+    const samples = navDelaySampleMap.get(line.topic) ?? [];
+    const latest = samples[samples.length - 1] ?? null;
+    if (!latest) {
+      return [];
+    }
+    return [{
+      label: `${line.label} stamp_sec`,
+      unit: "sec",
+      color: line.color,
+      value: delayAggregateAbsoluteStampSec(latest),
+    }, {
+      label: `${line.label} age_ms`,
+      unit: "ms",
+      color: line.color,
+      value: line.ageMs,
+    }];
+  });
+  if (metrics.length === 0) {
+    return;
+  }
+  navDelayOverviewRecording.value = {
+    ...recording,
+    durationMs: offsetMs,
+    entries: appendDelayRecordedEntry(recording, now, overviewRecordingEntriesText()),
+    metricSeries: mergeDelayRecordedMetricSeries(recording, metrics, offsetMs),
+  };
+}
+
+function applyNavRecordingFileList(response: Awaited<ReturnType<typeof fetchNavRecordingFiles>>, message: string) {
+  navRecordingFiles.value = response.items;
+  navRecordingFilesDirectory.value = response.directory;
+  navRecordingFilesMessage.value = message;
+}
+
+function handleNavDelayRecordingSaveError(scope: string, error: unknown) {
+  const message = error instanceof Error ? error.message : "未知错误";
+  navRecordingFilesMessage.value = `${scope}录制保存失败: ${message}`;
+  navDelayMessage.value = `${scope}录制保存失败: ${message}`;
+}
+
+async function finalizeNavDelayRecordingSave(payload: NavRecordingSavePayload, successMessage: string) {
+  const response = await saveNavRecording(payload);
+  applyNavRecordingFileList(response, successMessage);
+  navDelayMessage.value = successMessage;
+}
+
+async function toggleNavDelayOverviewRecording() {
+  const current = navDelayOverviewRecording.value;
+  if (!current.isRecording) {
+    const now = Date.now();
+    navDelayOverviewRecording.value = {
+      isRecording: true,
+      startedAtMs: now,
+      startedAtText: formatTimestampWithMs(now),
+      stoppedAtText: "-",
+      durationMs: 0,
+      entries: [],
+      metricSeries: [],
+    };
+    navDelayMessage.value = `链路时间戳总览录制中，开始于 ${formatTimestampWithMs(now)}。`;
+    return;
+  }
+
+  const stopTime = Date.now();
+  const nextRecordingState: NavDelayRecordingState = {
+    ...current,
+    isRecording: false,
+    stoppedAtText: formatTimestampWithMs(stopTime),
+    durationMs: Math.max(0, stopTime - current.startedAtMs),
+  };
+  navDelayOverviewRecording.value = nextRecordingState;
+  try {
+    await finalizeNavDelayRecordingSave({
+      panel_id: "delay-overview",
+      title: "链路时间戳总览",
+      topic: navDelayTopicDefinitions.value.map((item) => item.topic).join(" | "),
+      message_type: "nav_delay_overview",
+      started_at_ms: nextRecordingState.startedAtMs,
+      started_at: nextRecordingState.startedAtText,
+      stopped_at: nextRecordingState.stoppedAtText,
+      duration_ms: nextRecordingState.durationMs,
+      entries: nextRecordingState.entries,
+      metric_series: nextRecordingState.metricSeries.map((metric) => ({
+        label: metric.label,
+        unit: metric.unit,
+        color: metric.color,
+        samples: metric.samples.map((sample) => ({
+          offset_ms: sample.offsetMs,
+          value: sample.value,
+        })),
+      })),
+    }, "已保存录制文件: 链路时间戳总览");
+  } catch (error) {
+    // 保存失败时保留当前录制结果，避免页面中的诊断数据丢失。
+    handleNavDelayRecordingSaveError("链路时间戳总览", error);
+  }
+}
+
+function disconnectNavDelayPanel() {
+  navDelayUnsubscribeMap.forEach((unsubscribe) => unsubscribe());
+  navDelayUnsubscribeMap.clear();
+  navDelayAdapter?.disconnect();
+  navDelayAdapter = null;
+  navDelaySampleMap.clear();
+  navDelayStateMap.value = {};
+  navDelayAggregateLines.value = [];
+}
+
+function applyNavDelayTopics() {
+  navDelayTopicsApplied.value = navDelayTopicsInput.value;
+  navDelayOverviewSelectionMap.value = Object.fromEntries(
+    navDelayTopicDefinitions.value.map((definition) => [definition.topic, isNavDelayOverviewTopicSelected(definition.topic)])
+  );
+  disconnectNavDelayPanel();
+  if (navDelayPanelCollapsed.value || props.tool.key !== "ros_nav_test") {
+    navDelayMessage.value = "已应用总览话题，展开窗口后会开始订阅。";
+    return;
+  }
+  void reconnectNavDelayPanel();
+}
+
+async function reconnectNavDelayPanel() {
+  disconnectNavDelayPanel();
+  if (props.tool.key !== "ros_nav_test") {
+    return;
+  }
+  if (!rosDataSourceConfigLoaded.value) {
+    navDelayMessage.value = "等待 ROS 数据源配置加载完成。";
+    return;
+  }
+  if (navDelayPanelCollapsed.value) {
+    navDelayMessage.value = "链路延迟窗口已折叠，已暂停订阅与计算。";
+    refreshRosSharedStats();
+    return;
+  }
+  if (!formValues.ros_bridge_url && formValues.ros_provider !== "mock") {
+    navDelayMessage.value = "未配置 rosbridge 地址，链路延迟窗口未启动。";
+    return;
+  }
+  navDelayMessage.value = "链路延迟窗口连接中...";
+  const activeDefinitions = navDelayTopicDefinitions.value;
+  if (activeDefinitions.length === 0) {
+    navDelayMessage.value = "当前没有配置要监控的话题。";
+    return;
+  }
+  navDelayAdapter = createSharedRosLiveAdapter({
+    provider: formValues.ros_provider || "rosbridge",
+    url: formValues.ros_bridge_url || "",
+    timeoutMs: Number(normalizeRosBridgeTimeoutMs(formValues.timeout_ms)),
+    sharedKey: buildRosSharedSessionKey(),
+    adapterName: "链路延迟窗口",
+    onStatusChange: (snapshot) => {
+      navDelayMessage.value = snapshot.message;
+      refreshRosSharedStats();
+    },
+    onError: (event) => {
+      appendRosRuntimeLog(
+        event.recoverable ? "warning" : "error",
+        `链路延迟窗口: ${event.scope}: ${event.message}${event.detail ? ` (${event.detail})` : ""}`
+      );
+    },
+  });
+
+  try {
+    await navDelayAdapter.connect();
+    const subscribedTopics: string[] = [];
+    const unresolvedTopics: string[] = [];
+    activeDefinitions.forEach((definition) => {
+      if (!definition.resolved || !definition.messageType) {
+        unresolvedTopics.push(definition.topic);
+        return;
+      }
+      const unsubscribe = navDelayAdapter?.subscribe(definition.topic, definition.messageType, (message) => {
+        handleNavDelayMessage(definition, message);
+      });
+      if (unsubscribe) {
+        navDelayUnsubscribeMap.set(definition.topic, unsubscribe);
+        subscribedTopics.push(definition.topic);
+      }
+    });
+    if (subscribedTopics.length === 0) {
+      navDelayMessage.value = "没有可订阅的话题，请先刷新 ROS 话题或检查输入的话题名。";
+    } else if (unresolvedTopics.length > 0) {
+      navDelayMessage.value = `已连接并订阅 ${subscribedTopics.length} 个话题，另有 ${unresolvedTopics.length} 个话题未识别到消息类型。`;
+    } else {
+      navDelayMessage.value = "链路延迟窗口已连接，等待首批时间戳。";
+    }
+    refreshRosSharedStats();
+  } catch (error) {
+    navDelayMessage.value = `链路延迟窗口连接失败: ${(error as Error).message}`;
+  }
+}
+
+function toggleNavDelayPanel() {
+  const nextCollapsed = !navDelayPanelCollapsed.value;
+  navDelayPanelCollapsed.value = nextCollapsed;
+  if (nextCollapsed) {
+    disconnectNavDelayPanel();
+    navDelayMessage.value = "链路延迟窗口已折叠，已暂停订阅与计算。";
+    refreshRosSharedStats();
+    return;
+  }
+  void reconnectNavDelayPanel();
+}
+
+function isNavDelayOverviewTopicSelected(topic: string) {
+  return navDelayOverviewSelectionMap.value[topic] !== false;
+}
+
+function toggleNavDelayOverviewTopic(topic: string) {
+  navDelayOverviewSelectionMap.value = {
+    ...navDelayOverviewSelectionMap.value,
+    [topic]: !isNavDelayOverviewTopicSelected(topic),
+  };
+  rebuildNavDelayStates();
 }
 
 function defaultMtslashOutputDir() {
@@ -633,7 +1460,7 @@ function buildRosDataSourceConfig() {
     options: {
       url: (formValues.ros_bridge_url || "").trim(),
       rosapi_service: (formValues.ros_api_service || "/rosapi/topics_and_raw_types").trim(),
-      timeout_ms: (formValues.timeout_ms || "2500").trim(),
+      timeout_ms: normalizeRosBridgeTimeoutMs(formValues.timeout_ms),
       nav_layout_json: JSON.stringify(savedLayout),
     },
   };
@@ -681,6 +1508,7 @@ function sanitizeNavViewerDisplay(raw: unknown): NavViewerDisplay | null {
     messageType,
     kind,
     label: typeof display.label === "string" && display.label.trim() ? display.label.trim() : buildDisplayLabel(topic, kind),
+    mapOpacity: typeof display.mapOpacity === "number" ? display.mapOpacity : undefined,
     pointSize: typeof display.pointSize === "number" ? display.pointSize : undefined,
     hzLimit: typeof display.hzLimit === "number" ? display.hzLimit : undefined,
     color: typeof display.color === "string" && display.color.trim() ? display.color.trim() : undefined,
@@ -698,6 +1526,9 @@ function parseSavedNavLayout(rawValue: string | undefined): SavedNavPanelLayout 
   }
   try {
     const parsed = JSON.parse(rawValue) as Record<string, unknown>;
+    const hasSidePanels = Array.isArray(parsed.sidePanels);
+    const hasFullPanels = Array.isArray(parsed.fullPanels);
+    const hasMainDisplays = Array.isArray(parsed.mainDisplays);
     const sidePanels = Array.isArray(parsed.sidePanels)
       ? parsed.sidePanels
         .map((item, index) => sanitizeNavPanelItem(item, "side-panel", index))
@@ -717,6 +1548,9 @@ function parseSavedNavLayout(rawValue: string | undefined): SavedNavPanelLayout 
       sidePanels,
       fullPanels,
       mainDisplays,
+      hasSidePanels,
+      hasFullPanels,
+      hasMainDisplays,
     };
   } catch {
     return null;
@@ -767,9 +1601,10 @@ function topicOptionToDisplay(option: NavTopicOption): NavViewerDisplay {
     messageType: option.type,
     kind,
     label: buildDisplayLabel(option.key, kind),
+    mapOpacity: kind === "map" ? 0.94 : undefined,
     pointSize: kind === "pointcloud" ? 0.08 : undefined,
     hzLimit: kind === "pointcloud" ? 5 : undefined,
-    color: kind === "pointcloud" ? defaultPointCloudColor(option.key) : undefined,
+    color: kind === "pointcloud" || kind === "path" || kind === "pose" ? defaultMainDisplayColor(option.key, kind) : undefined,
     tfShowNames: kind === "tf" ? true : undefined,
     tfLabelSize: kind === "tf" ? 0.5 : undefined,
     tfVisibleFrames: kind === "tf" ? [] : undefined,
@@ -800,6 +1635,7 @@ function ensureDefaultNavDisplays() {
     { key: "/tf", type: "tf2_msgs/msg/TFMessage", label: "TF 树", note: "" },
     { key: formValues.path_topic || "/plan", type: "nav_msgs/msg/Path", label: "全局路径", note: "" },
     { key: formValues.pose_topic || "/ndt_pose", type: "geometry_msgs/msg/PoseStamped", label: "NDT 位姿", note: "" },
+    { key: "/geneox_mid360_obstacle", type: "std_msgs/msg/UInt8", label: "冷静区/危险区", note: "" },
   ];
 
   navMainDisplays.value = defaults.map(topicOptionToDisplay);
@@ -807,18 +1643,19 @@ function ensureDefaultNavDisplays() {
 
 async function loadRosDataSourceConfigForNav() {
   let shouldApplyDefaultDisplays = true;
+  rosDataSourceConfigLoaded.value = false;
   try {
     const config = await fetchRosDataSourceConfig();
     formValues.ros_provider = config.provider || formValues.ros_provider || "rosbridge";
     formValues.ros_bridge_url = config.options.url || formValues.ros_bridge_url || "";
     formValues.ros_api_service = config.options.rosapi_service || formValues.ros_api_service || "/rosapi/topics_and_raw_types";
-    formValues.timeout_ms = config.options.timeout_ms || formValues.timeout_ms || "2500";
+    formValues.timeout_ms = normalizeRosBridgeTimeoutMs(config.options.timeout_ms || formValues.timeout_ms);
     const savedLayout = parseSavedNavLayout(config.options.nav_layout_json);
     if (savedLayout) {
       shouldApplyDefaultDisplays = false;
-      navSidePanels.value = savedLayout.sidePanels.length > 0 ? savedLayout.sidePanels : createDefaultNavSidePanels();
-      navFullPanels.value = savedLayout.fullPanels.length > 0 ? savedLayout.fullPanels : createDefaultNavFullPanels();
-      navMainDisplays.value = savedLayout.mainDisplays;
+      navSidePanels.value = savedLayout.hasSidePanels ? savedLayout.sidePanels : createDefaultNavSidePanels();
+      navFullPanels.value = savedLayout.hasFullPanels ? savedLayout.fullPanels : createDefaultNavFullPanels();
+      navMainDisplays.value = savedLayout.hasMainDisplays ? savedLayout.mainDisplays : [];
     }
   } catch {
     // 配置读取失败时保留表单默认值，避免阻断页面使用。
@@ -826,6 +1663,8 @@ async function loadRosDataSourceConfigForNav() {
     if (shouldApplyDefaultDisplays) {
       ensureDefaultNavDisplays();
     }
+    rosDataSourceConfigLoaded.value = true;
+    void reconnectNavDelayPanel();
   }
 }
 
@@ -836,7 +1675,7 @@ async function saveRosNavConfig() {
     formValues.ros_provider = saved.provider;
     formValues.ros_bridge_url = saved.options.url || formValues.ros_bridge_url || "";
     formValues.ros_api_service = saved.options.rosapi_service || formValues.ros_api_service || "";
-    formValues.timeout_ms = saved.options.timeout_ms || formValues.timeout_ms || "";
+    formValues.timeout_ms = normalizeRosBridgeTimeoutMs(saved.options.timeout_ms || formValues.timeout_ms);
     rosTopicsMessage.value = "ROS 数据源配置已保存。";
   } catch (error) {
     rosTopicsMessage.value = `ROS 数据源配置保存失败: ${(error as Error).message}`;
@@ -880,11 +1719,82 @@ async function refreshRosTopics() {
   }
 }
 
+async function loadRosRuntimeParamsPanel() {
+  if (props.tool.key !== "ros_nav_test") {
+    return;
+  }
+  rosRuntimeParamsLoading.value = true;
+  try {
+    const previousStatus = rosRuntimeParams.value?.status || "";
+    const response = await fetchRosRuntimeParams(buildRosDataSourceConfig());
+    rosRuntimeParams.value = response;
+    rosRuntimeParamsMessage.value = response.message;
+    if (response.status === "partial") {
+      appendRosRuntimeLog("warning", `运行时参数窗口: ${response.message}`);
+    } else if (response.status === "error") {
+      appendRosRuntimeLog("error", `运行时参数窗口: ${response.message}`);
+    } else if (previousStatus !== "success") {
+      appendRosRuntimeLog("info", `运行时参数窗口: ${response.message}`);
+    }
+  } catch (error) {
+    rosRuntimeParams.value = null;
+    rosRuntimeParamsMessage.value = `读取运行时参数失败: ${(error as Error).message}`;
+    appendRosRuntimeLog("error", rosRuntimeParamsMessage.value);
+  } finally {
+    rosRuntimeParamsLoading.value = false;
+  }
+}
+
+function formatRuntimeParamValue(value: unknown) {
+  if (value === null || value === undefined) {
+    return "-";
+  }
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function toggleNavRuntimeParamsPanel() {
+  navRuntimeParamsPanelCollapsed.value = !navRuntimeParamsPanelCollapsed.value;
+}
+
+function toggleNavRuntimeGroup(groupKey: string) {
+  navRuntimeGroupCollapsedMap.value = {
+    ...navRuntimeGroupCollapsedMap.value,
+    [groupKey]: !isNavRuntimeGroupCollapsed(groupKey),
+  };
+}
+
+function isNavRuntimeGroupCollapsed(groupKey: string) {
+  return navRuntimeGroupCollapsedMap.value[groupKey] !== false;
+}
+
+function navRuntimeNodeKey(groupKey: string, nodeName: string) {
+  return `${groupKey}:${nodeName}`;
+}
+
+function toggleNavRuntimeNode(groupKey: string, nodeName: string) {
+  const key = navRuntimeNodeKey(groupKey, nodeName);
+  navRuntimeNodeCollapsedMap.value = {
+    ...navRuntimeNodeCollapsedMap.value,
+    [key]: !isNavRuntimeNodeCollapsed(groupKey, nodeName),
+  };
+}
+
+function isNavRuntimeNodeCollapsed(groupKey: string, nodeName: string) {
+  return navRuntimeNodeCollapsedMap.value[navRuntimeNodeKey(groupKey, nodeName)] !== false;
+}
+
 function buildRosLiveConfig() {
   return {
     provider: (formValues.ros_provider || "rosbridge").trim() || "rosbridge",
     url: (formValues.ros_bridge_url || "").trim(),
-    timeoutMs: Number(formValues.timeout_ms || "2500"),
+    timeoutMs: Number(normalizeRosBridgeTimeoutMs(formValues.timeout_ms)),
   };
 }
 
@@ -899,10 +1809,21 @@ function yawToQuaternion(yaw: number) {
 }
 
 async function publishRosMessage(topicName: string, messageType: string, message: Record<string, unknown>) {
-  const adapter = createRosLiveAdapter(buildRosLiveConfig());
+  const adapter = createRosLiveAdapter({
+    ...buildRosLiveConfig(),
+    adapterName: `下发 ${topicName}`,
+    autoReconnect: false,
+    onError: (event) => {
+      appendRosRuntimeLog(
+        event.recoverable ? "warning" : "error",
+        `${event.scope}: ${event.message}${event.detail ? ` (${event.detail})` : ""}`
+      );
+    },
+  });
   try {
     await adapter.connect();
     adapter.publish(topicName, messageType, message);
+    appendRosRuntimeLog("info", `消息下发成功: ${topicName} (${messageType})`);
   } finally {
     adapter.disconnect();
   }
@@ -1026,7 +1947,16 @@ function parseNavRecordingPayload(rawText: string) {
     .slice(beginIndex + NAV_RECORDING_JSON_BEGIN.length, endIndex)
     .trim();
   try {
-    return JSON.parse(jsonText) as NavRecordingSavePayload;
+    const normalizedJson = stripRecordingEntriesForPreview(jsonText);
+    const parsed = JSON.parse(normalizedJson) as NavRecordingSavePayload;
+    return {
+      ...parsed,
+      entries: [],
+      metric_series: parsed.metric_series.map((metric) => ({
+        ...metric,
+        samples: downsampleNavRecordingSamples(metric.samples),
+      })),
+    };
   } catch {
     return null;
   }
@@ -1039,6 +1969,80 @@ function stripNavRecordingPayload(rawText: string) {
     return rawText;
   }
   return `${rawText.slice(0, beginIndex).trimEnd()}\n`.trim();
+}
+
+function stripRecordingEntriesForPreview(jsonText: string) {
+  const keyIndex = jsonText.indexOf("\"entries\"");
+  if (keyIndex < 0) {
+    return jsonText;
+  }
+  const arrayStart = jsonText.indexOf("[", keyIndex);
+  if (arrayStart < 0) {
+    return jsonText;
+  }
+  let inString = false;
+  let isEscaped = false;
+  let depth = 0;
+  for (let index = arrayStart; index < jsonText.length; index += 1) {
+    const char = jsonText[index];
+    if (inString) {
+      if (isEscaped) {
+        isEscaped = false;
+      } else if (char === "\\") {
+        isEscaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+    if (char === "[") {
+      depth += 1;
+      continue;
+    }
+    if (char !== "]") {
+      continue;
+    }
+    depth -= 1;
+    if (depth === 0) {
+      return `${jsonText.slice(0, arrayStart)}[]${jsonText.slice(index + 1)}`;
+    }
+  }
+  return jsonText;
+}
+
+function downsampleNavRecordingSamples(samples: Array<{ offset_ms: number; value: number }>) {
+  if (samples.length <= NAV_RECORDING_CHART_MAX_SAMPLES) {
+    return samples;
+  }
+  const nextSamples: Array<{ offset_ms: number; value: number }> = [];
+  const step = samples.length / NAV_RECORDING_CHART_MAX_SAMPLES;
+  for (let index = 0; index < NAV_RECORDING_CHART_MAX_SAMPLES; index += 1) {
+    const sampleIndex = Math.min(samples.length - 1, Math.round(index * step));
+    nextSamples.push(samples[sampleIndex]);
+  }
+  return nextSamples;
+}
+
+function buildNavRecordingPreviewText(rawText: string) {
+  const stripped = stripNavRecordingPayload(rawText);
+  const lines = stripped.split(/\r?\n/);
+  const truncatedLines = lines.length > NAV_RECORDING_PREVIEW_MAX_LINES
+    ? lines.slice(0, NAV_RECORDING_PREVIEW_MAX_LINES)
+    : lines;
+  let previewText = truncatedLines.join("\n");
+  let truncated = truncatedLines.length < lines.length;
+  if (previewText.length > NAV_RECORDING_PREVIEW_MAX_CHARS) {
+    previewText = previewText.slice(0, NAV_RECORDING_PREVIEW_MAX_CHARS);
+    truncated = true;
+  }
+  if (!truncated) {
+    return previewText;
+  }
+  return `${previewText}\n\n[预览已截断：文件较大，这里仅展示前 ${NAV_RECORDING_PREVIEW_MAX_LINES} 行 / ${NAV_RECORDING_PREVIEW_MAX_CHARS} 字符，录制原文件仍完整保留。]`;
 }
 
 function resetNavRecordingChartState(payload: NavRecordingSavePayload | null) {
@@ -1215,7 +2219,7 @@ async function previewNavRecordingFile(item: NavRecordingFileItem) {
   }
   try {
     const rawText = await fetchLocalTextFile(item.path);
-    navRecordingPreviewText.value = stripNavRecordingPayload(rawText);
+    navRecordingPreviewText.value = buildNavRecordingPreviewText(rawText);
     resetNavRecordingChartState(parseNavRecordingPayload(rawText));
   } catch (error) {
     navRecordingPreviewText.value = `读取失败: ${(error as Error).message}`;
@@ -1593,7 +2597,14 @@ function updateMainDisplayHzLimit(topic: string, rawValue: string) {
 }
 
 function updateMainDisplayColor(topic: string, rawValue: string) {
-  updateMainDisplayConfig(topic, { color: rawValue || defaultPointCloudColor(topic) });
+  const display = navMainDisplays.value.find((item) => item.topic === topic);
+  const fallbackColor = defaultMainDisplayColor(topic, display?.kind || "unknown");
+  updateMainDisplayConfig(topic, { color: rawValue || fallbackColor });
+}
+
+function updateMainDisplayMapOpacity(topic: string, rawValue: string) {
+  const mapOpacity = Math.min(1, Math.max(0.05, Number(rawValue || "0.94") || 0.94));
+  updateMainDisplayConfig(topic, { mapOpacity });
 }
 
 function updateMainDisplayTfLabelSize(topic: string, rawValue: string) {
@@ -1736,7 +2747,11 @@ watch(
   () => nextTick(drawCostmapFrame)
 );
 
-onBeforeUnmount(() => stopCostmapPlayback());
+onBeforeUnmount(() => {
+  stopCostmapPlayback();
+  stopRosSharedStatsPolling();
+  disconnectNavDelayPanel();
+});
 </script>
 
 <template>
@@ -1817,16 +2832,16 @@ onBeforeUnmount(() => stopCostmapPlayback());
           </button>
           <template v-if="tool.key === 'pcd_map'">
             <button class="secondary-btn" type="button" @click="openOutputDir">打开输出目录</button>
-            <button class="secondary-btn" type="button" @click="emit('clearLogs')">清空日志</button>
+            <button class="secondary-btn" type="button" @click="clearToolLogs">清空日志</button>
           </template>
           <template v-else-if="tool.key === 'pcd_tile'">
             <button class="secondary-btn" type="button" @click="previewTile">预扫描</button>
             <button class="secondary-btn" type="button" @click="openOutputDir">打开输出目录</button>
-            <button class="secondary-btn" type="button" @click="emit('clearLogs')">清空日志</button>
+            <button class="secondary-btn" type="button" @click="clearToolLogs">清空日志</button>
           </template>
           <template v-else-if="tool.key === 'costmap'">
             <button class="secondary-btn" type="button" @click="openOutputDir">打开导出目录</button>
-            <button class="secondary-btn" type="button" @click="emit('clearLogs')">清空日志</button>
+            <button class="secondary-btn" type="button" @click="clearToolLogs">清空日志</button>
           </template>
           <template v-else-if="tool.key === 'ros_nav_test'">
             <button class="secondary-btn" type="button" :disabled="rosDataSourceSaving" @click="saveRosNavConfig">
@@ -1838,8 +2853,9 @@ onBeforeUnmount(() => stopCostmapPlayback());
             <button class="secondary-btn" type="button" :disabled="rosTopicsLoading" @click="refreshRosTopics">
               {{ rosTopicsLoading ? "刷新中..." : "刷新话题" }}
             </button>
+            <button class="secondary-btn" type="button" @click="triggerRosReconnect">重连 ROS</button>
             <button class="secondary-btn" type="button" @click="openOutputDir">打开快照目录</button>
-            <button class="secondary-btn" type="button" @click="emit('clearLogs')">清空日志</button>
+            <button class="secondary-btn" type="button" @click="clearToolLogs">清空日志</button>
           </template>
           <template v-else-if="tool.key === 'mtslash_export'">
             <button class="secondary-btn" type="button" :disabled="mtslashCaptchaLoading" @click="fetchCaptcha">
@@ -1855,7 +2871,7 @@ onBeforeUnmount(() => stopCostmapPlayback());
               {{ mtslashBrowserLoading ? "处理中..." : "启动浏览器模式" }}
             </button>
             <button class="secondary-btn" type="button" @click="openOutputDir">打开输出目录</button>
-            <button class="secondary-btn" type="button" @click="emit('clearLogs')">清空日志</button>
+            <button class="secondary-btn" type="button" @click="clearToolLogs">清空日志</button>
           </template>
         </div>
       </section>
@@ -2134,7 +3150,16 @@ data: [0, 0, 100, ...]</pre>
               <span class="stat-chip-label">侧边/完整小窗</span>
               <strong>{{ navActiveSidePanelCount }} / {{ navSidePanels.length }} · {{ navActiveFullPanelCount }} / {{ navFullPanels.length }}</strong>
             </div>
+            <div class="stat-chip">
+              <span class="stat-chip-label">共享连接状态</span>
+              <strong>{{ rosSharedSessionStats.reconnecting ? "重连中" : rosSharedSessionStats.connected ? "已连接" : "未连接" }}</strong>
+            </div>
+            <div class="stat-chip">
+              <span class="stat-chip-label">页面连接/合并订阅</span>
+              <strong>{{ rosSharedSessionStats.clientCount }} / {{ rosSharedSessionStats.subscriptionCount }}</strong>
+            </div>
           </div>
+          <p class="section-subtitle">{{ rosSharedSessionStats.message }}</p>
           <div class="nav-control-card">
             <div class="nav-control-card-head">
               <div class="result-title">定位与导航控制</div>
@@ -2162,7 +3187,7 @@ data: [0, 0, 100, ...]</pre>
           <div class="section-head">
             <div>
               <div class="result-title">三维主视图</div>
-              <div class="section-subtitle">当前支持 Map / TF / Path / Pose 四类常用显示项，交互方式按 RViz 的“添加显示项”思路组织。</div>
+              <div class="section-subtitle">当前支持 Map / TF / Path / Pose / ObstacleZone 等常用显示项，交互方式按 RViz 的“添加显示项”思路组织。</div>
             </div>
             <div class="nav-main-view-actions">
               <div class="nav-view-tags">
@@ -2170,6 +3195,7 @@ data: [0, 0, 100, ...]</pre>
                 <span class="status-pill">定位</span>
                 <span class="status-pill">路径</span>
                 <span class="status-pill">TF</span>
+                <span class="status-pill">风险区</span>
               </div>
               <button class="secondary-btn" type="button" @click="toggleNavDisplayManager">
                 {{ navDisplayManagerLabel }}
@@ -2226,6 +3252,31 @@ data: [0, 0, 100, ...]</pre>
                   />
                 </label>
               </div>
+                <div v-else-if="display.kind === 'path' || display.kind === 'pose'" class="nav-display-config-row">
+                  <label class="nav-display-config-item">
+                    <span class="kv-key">颜色</span>
+                    <input
+                      class="nav-display-color-input"
+                      type="color"
+                      :value="display.color ?? defaultMainDisplayColor(display.topic, display.kind)"
+                      @input="updateMainDisplayColor(display.topic, ($event.target as HTMLInputElement).value)"
+                    />
+                  </label>
+                </div>
+              <div v-else-if="display.kind === 'map'" class="nav-display-config-row">
+                <label class="nav-display-config-item">
+                  <span class="kv-key">透明度</span>
+                  <input
+                    class="field-input nav-display-config-input"
+                    type="number"
+                    min="0.05"
+                    max="1"
+                    step="0.05"
+                    :value="display.mapOpacity ?? 0.94"
+                    @input="updateMainDisplayMapOpacity(display.topic, ($event.target as HTMLInputElement).value)"
+                  />
+                </label>
+              </div>
               <div v-else-if="display.kind === 'tf'" class="nav-display-tf-config">
                 <div class="nav-display-config-row tf">
                   <label class="nav-display-config-item nav-display-check-item">
@@ -2269,6 +3320,9 @@ data: [0, 0, 100, ...]</pre>
                   <div v-else class="section-subtitle">连接后读取 TF 节点列表。</div>
                 </div>
               </div>
+              <div v-else-if="display.kind === 'obstacle_zone'" class="section-subtitle">
+                绑定当前主位姿话题绘制检测圈、冷静区、危险区与忽略区，状态来自 {{ display.topic }}。
+              </div>
               <button class="section-card-action danger" type="button" @click="removeMainDisplay(display.topic)">移除</button>
             </div>
             <div v-if="navMainDisplays.length === 0" class="section-empty">当前没有主视图显示项，请从右侧话题列表中添加。</div>
@@ -2276,13 +3330,15 @@ data: [0, 0, 100, ...]</pre>
 
           <Nav3DViewer
             :provider="formValues.ros_provider || 'rosbridge'"
-            :url="formValues.ros_bridge_url || ''"
-            :timeout-ms="Number(formValues.timeout_ms || '2500')"
+            :url="rosDataSourceConfigLoaded ? (formValues.ros_bridge_url || '') : ''"
+            :timeout-ms="Number(normalizeRosBridgeTimeoutMs(formValues.timeout_ms))"
             :fixed-frame="formValues.fixed_frame || 'map'"
             :displays="navMainDisplays"
             :interaction-mode="navInteractionMode"
+            :reconnect-token="rosReconnectToken"
             @interaction-complete="handleNavViewerInteraction"
             @tf-frames-change="handleTfFramesChange"
+            @ros-log="handleRosRuntimeLog"
           />
         </section>
 
@@ -2386,6 +3442,10 @@ data: [0, 0, 100, ...]</pre>
               <span class="kv-key">已选 Topic</span>
               <span class="kv-value">{{ selectedNavTopicOptions.map((item) => item.key).join("、") || "暂未临时选择" }}</span>
             </div>
+            <div class="kv-item">
+              <span class="kv-key">共享连接键</span>
+              <span class="kv-value">{{ rosSharedSessionStats.sharedKey || "未生成" }}</span>
+            </div>
           </div>
 
           <div class="nav-detection-card">
@@ -2414,14 +3474,16 @@ data: [0, 0, 100, ...]</pre>
 
           <NavTopicPanelList
             :provider="formValues.ros_provider || 'rosbridge'"
-            :url="formValues.ros_bridge_url || ''"
-            :timeout-ms="Number(formValues.timeout_ms || '2500')"
+            :url="rosDataSourceConfigLoaded ? (formValues.ros_bridge_url || '') : ''"
+            :timeout-ms="Number(normalizeRosBridgeTimeoutMs(formValues.timeout_ms))"
             :panels="navSidePanels"
             :compact="true"
+            :reconnect-token="rosReconnectToken"
             @toggle="toggleNavSidePanel"
             @remove="removeNavSidePanel"
             @update-config="updateNavSidePanelConfig"
             @recording-saved="loadNavRecordingFiles"
+            @ros-log="handleRosRuntimeLog"
           />
         </section>
 
@@ -2557,14 +3619,175 @@ data: [0, 0, 100, ...]</pre>
 
           <NavTopicPanelList
             :provider="formValues.ros_provider || 'rosbridge'"
-            :url="formValues.ros_bridge_url || ''"
-            :timeout-ms="Number(formValues.timeout_ms || '2500')"
+            :url="rosDataSourceConfigLoaded ? (formValues.ros_bridge_url || '') : ''"
+            :timeout-ms="Number(normalizeRosBridgeTimeoutMs(formValues.timeout_ms))"
             :panels="navFullPanels"
+            :reconnect-token="rosReconnectToken"
             @toggle="toggleNavFullPanel"
             @remove="removeNavFullPanel"
             @update-config="updateNavFullPanelConfig"
             @recording-saved="loadNavRecordingFiles"
+            @ros-log="handleRosRuntimeLog"
           />
+        </section>
+
+        <section class="panel nav-delay-panel">
+          <div class="section-head">
+            <button class="nav-runtime-toggle" type="button" @click="toggleNavDelayPanel">
+              <span class="collapse-trigger-label">
+                <span class="collapse-caret" :class="{ expanded: !navDelayPanelCollapsed }">▸</span>
+                <span>链路延迟窗口</span>
+              </span>
+              <span class="section-card-meta">按文档第一优先级主链路显示各话题时间戳与年龄变化</span>
+            </button>
+            <div class="nav-recordings-actions">
+              <button class="secondary-btn" type="button" @click="reconnectNavDelayPanel">
+                重连延迟窗口
+              </button>
+            </div>
+          </div>
+
+          <div v-if="!navDelayPanelCollapsed" class="section-subtitle nav-topic-feedback">
+            {{ navDelayMessage }}
+          </div>
+
+          <div v-if="!navDelayPanelCollapsed" class="nav-delay-overview-card">
+            <div class="nav-delay-overview-head">
+              <div>
+                <div class="result-title">链路时间戳总览</div>
+                <div class="section-subtitle">同一张图里叠加所有主链路话题的绝对时间戳，并对显示做去趋势处理，方便把话题之间的时间差拉开看清楚；录制文件会同时保留绝对时间戳与 age_ms。</div>
+              </div>
+              <div class="nav-delay-overview-tools">
+                <div class="nav-delay-topic-editor">
+                  <textarea
+                    v-model="navDelayTopicsInput"
+                    class="field-input nav-delay-topic-textarea"
+                    rows="5"
+                    placeholder="/cloud_registered_body&#10;/cloud_registered_bl&#10;/points_aligned"
+                  ></textarea>
+                  <div class="nav-delay-topic-editor-actions">
+                    <button class="secondary-btn small" type="button" @click="applyNavDelayTopics">应用话题</button>
+                  </div>
+                </div>
+                <div class="nav-delay-legend">
+                  <button
+                    v-for="definition in navDelayTopicDefinitions"
+                    :key="`legend-${definition.topic}`"
+                    class="nav-delay-legend-item"
+                    :class="{ active: isNavDelayOverviewTopicSelected(definition.topic) }"
+                    type="button"
+                    @click="toggleNavDelayOverviewTopic(definition.topic)"
+                  >
+                    <span class="nav-delay-legend-dot" :style="{ backgroundColor: definition.color }"></span>
+                    <span>{{ definition.label }}<template v-if="!definition.resolved">（未识别类型）</template></span>
+                  </button>
+                </div>
+                <div class="nav-recording-inline">
+                  <span v-if="navDelayOverviewRecording.isRecording || navDelayOverviewRecording.entries.length" class="nav-recording-pill" :class="{ active: navDelayOverviewRecording.isRecording }">
+                    {{ navDelayOverviewRecording.isRecording ? "录制中" : "已录制" }}
+                  </span>
+                  <span v-if="navDelayOverviewRecording.isRecording || navDelayOverviewRecording.entries.length" class="nav-recording-meta">
+                    {{ navDelayRecordingDurationText(navDelayOverviewRecording) }}
+                  </span>
+                  <button
+                    class="secondary-btn small"
+                    :class="{ recording: navDelayOverviewRecording.isRecording }"
+                    type="button"
+                    @click="toggleNavDelayOverviewRecording"
+                  >
+                    {{ navDelayOverviewRecording.isRecording ? "停止录制" : "录制总览" }}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <svg class="nav-delay-overview-chart" viewBox="0 0 100 48" preserveAspectRatio="none">
+              <line x1="0" y1="46" x2="100" y2="46" class="nav-delay-axis-line" />
+              <polyline
+                v-for="line in navDelayAggregateLines"
+                :key="`line-${line.topic}`"
+                :points="line.points"
+                fill="none"
+                :stroke="line.color"
+                stroke-width="1.6"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                vector-effect="non-scaling-stroke"
+              />
+            </svg>
+            <div class="nav-delay-axis-meta">
+              <span>{{ navDelayOverviewAxisInfo.yLabel }}</span>
+              <span>min {{ navDelayOverviewAxisInfo.minText }}</span>
+              <span>max {{ navDelayOverviewAxisInfo.maxText }}</span>
+              <span>{{ navDelayOverviewAxisInfo.xLabel }}</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel nav-runtime-params-panel">
+          <div class="section-head">
+            <button class="nav-runtime-toggle" type="button" @click="toggleNavRuntimeParamsPanel">
+              <span class="collapse-trigger-label">
+                <span class="collapse-caret" :class="{ expanded: !navRuntimeParamsPanelCollapsed }">▸</span>
+                <span>运行时参数窗口</span>
+              </span>
+              <span class="section-card-meta">按 Nav2 / NDT 分组展示实时参数</span>
+            </button>
+            <div class="nav-recordings-actions">
+              <button class="secondary-btn" type="button" :disabled="rosRuntimeParamsLoading" @click="loadRosRuntimeParamsPanel">
+                {{ rosRuntimeParamsLoading ? "刷新中..." : "刷新参数" }}
+              </button>
+            </div>
+          </div>
+
+          <div v-if="!navRuntimeParamsPanelCollapsed" class="section-subtitle nav-topic-feedback">
+            {{ rosRuntimeParamsMessage || "参数窗口按需手动刷新；你已经展开过的分组和节点会在刷新后保持展开，其余默认收起。" }}
+          </div>
+
+          <div v-if="!navRuntimeParamsPanelCollapsed && rosRuntimeParams?.groups?.length" class="nav-runtime-groups">
+            <section v-for="group in rosRuntimeParams.groups" :key="group.key" class="nav-runtime-group">
+              <div class="nav-runtime-group-head">
+                <button class="nav-runtime-group-toggle" type="button" @click="toggleNavRuntimeGroup(group.key)">
+                  <span class="collapse-trigger-label">
+                    <span class="collapse-caret" :class="{ expanded: !isNavRuntimeGroupCollapsed(group.key) }">▸</span>
+                    <span class="result-title">{{ group.label }}</span>
+                  </span>
+                </button>
+                <span class="status-pill" :class="{ success: rosRuntimeParams.status === 'success' }">{{ rosRuntimeParams.updated_at || "未更新时间" }}</span>
+              </div>
+
+              <template v-if="!isNavRuntimeGroupCollapsed(group.key)">
+                <div v-for="section in group.sections" :key="`${group.key}-${section.title}`" class="nav-runtime-section">
+                  <div class="nav-runtime-section-title">{{ section.title }}</div>
+                  <div v-for="node in section.nodes" :key="node.node" class="nav-runtime-node">
+                    <div class="nav-runtime-node-head">
+                      <button class="nav-runtime-node-toggle" type="button" @click="toggleNavRuntimeNode(group.key, node.node)">
+                        <span class="collapse-trigger-label">
+                          <span class="collapse-caret" :class="{ expanded: !isNavRuntimeNodeCollapsed(group.key, node.node) }">▸</span>
+                          <strong>{{ node.node }}</strong>
+                        </span>
+                      </button>
+                      <span v-if="node.error" class="nav-runtime-node-error">{{ node.error }}</span>
+                      <span v-else class="nav-runtime-node-count">{{ Object.keys(node.params || {}).length }} 个参数</span>
+                    </div>
+                    <div v-if="!isNavRuntimeNodeCollapsed(group.key, node.node) && !node.error && Object.keys(node.params || {}).length" class="nav-runtime-param-grid">
+                      <div v-for="(value, key) in node.params" :key="`${node.node}-${key}`" class="nav-runtime-param-item">
+                        <span class="kv-key">{{ key }}</span>
+                        <span class="kv-value" :title="formatRuntimeParamValue(value)">{{ formatRuntimeParamValue(value) }}</span>
+                      </div>
+                    </div>
+                    <div v-else-if="!isNavRuntimeNodeCollapsed(group.key, node.node) && !node.error" class="section-empty">当前节点没有读取到参数。</div>
+                  </div>
+                </div>
+              </template>
+            </section>
+          </div>
+
+          <div v-else-if="!navRuntimeParamsPanelCollapsed" class="section-empty">当前还没有读取到运行时参数。请确认 rosbridge 连通，且机器人侧参数服务可访问。</div>
+
+          <div v-if="!navRuntimeParamsPanelCollapsed && rosRuntimeParams?.failed_nodes?.length" class="logs nav-runtime-failures">
+            {{ rosRuntimeParams.failed_nodes.join('\n') }}
+          </div>
         </section>
 
       </template>
@@ -2641,7 +3864,7 @@ data: [0, 0, 100, ...]</pre>
                 {{ mtslashBrowserLoading ? "处理中..." : "启动浏览器模式" }}
               </button>
               <button class="secondary-btn" type="button" @click="openOutputDir">打开输出目录</button>
-              <button class="secondary-btn" type="button" @click="emit('clearLogs')">清空日志</button>
+              <button class="secondary-btn" type="button" @click="clearToolLogs">清空日志</button>
             </div>
           </section>
 
@@ -2795,7 +4018,7 @@ data: [0, 0, 100, ...]</pre>
 
       <section class="log-panel tool-log-panel">
         <div class="result-title">执行日志</div>
-        <pre class="logs">{{ logs.join("\n") }}</pre>
+        <pre class="logs">{{ mergedToolLogs.join("\n") }}</pre>
       </section>
     </div>
   </div>

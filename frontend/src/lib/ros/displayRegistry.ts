@@ -7,13 +7,14 @@
  * 2. 根据 topic 名和消息类型推断显示类型，避免模板里堆判断。
  * 3. 后续新增 LaserScan、Marker、PointCloud2 时只扩展这里。
  */
-export type NavDisplayKind = "map" | "path" | "tf" | "pose" | "pointcloud" | "laser" | "unknown";
+export type NavDisplayKind = "map" | "path" | "tf" | "pose" | "pointcloud" | "laser" | "obstacle_zone" | "unknown";
 
 export interface NavViewerDisplay {
   topic: string;
   messageType: string;
   label: string;
   kind: NavDisplayKind;
+  mapOpacity?: number;
   pointSize?: number;
   hzLimit?: number;
   color?: string;
@@ -29,13 +30,13 @@ export function inferDisplayKind(topic: string, messageType: string): NavDisplay
   if (messageType === "sensor_msgs/msg/LaserScan") {
     return "laser";
   }
-  if (messageType === "nav_msgs/OccupancyGrid") {
+  if (messageType === "nav_msgs/OccupancyGrid" || messageType === "nav_msgs/msg/OccupancyGrid") {
     return "map";
   }
   if (topic === "/map" || topic.endsWith("/map")) {
     return "map";
   }
-  if (messageType === "nav_msgs/Path") {
+  if (messageType === "nav_msgs/Path" || messageType === "nav_msgs/msg/Path") {
     return "path";
   }
   if (topic.includes("plan") || topic.endsWith("/path")) {
@@ -44,7 +45,12 @@ export function inferDisplayKind(topic: string, messageType: string): NavDisplay
   if (messageType === "tf2_msgs/TFMessage" || topic === "/tf" || topic === "/tf_static") {
     return "tf";
   }
+  if (topic === "/geneox_mid360_obstacle" || topic.endsWith("/geneox_mid360_obstacle")) {
+    return "obstacle_zone";
+  }
   if (
+    messageType === "geometry_msgs/msg/PoseWithCovarianceStamped" ||
+    messageType === "geometry_msgs/msg/PoseStamped" ||
     messageType === "geometry_msgs/PoseWithCovarianceStamped" ||
     messageType === "geometry_msgs/PoseStamped"
   ) {
@@ -74,6 +80,9 @@ export function buildDisplayLabel(topic: string, kind: NavDisplayKind): string {
   }
   if (kind === "pose") {
     return `Pose: ${topic}`;
+  }
+  if (kind === "obstacle_zone") {
+    return `Obstacle Zone: ${topic}`;
   }
   return `Topic: ${topic}`;
 }

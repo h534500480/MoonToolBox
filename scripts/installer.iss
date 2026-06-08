@@ -1,7 +1,15 @@
 #define MyAppName "MoonToolBox"
 #define MyAppVersion "0.1.0"
 #define MyAppPublisher "TreeMoon"
-#define MyAppExeName "scripts\start_local.cmd"
+#define MyAppExeName "scripts\start_local.vbs"
+
+#ifexist "..\release\MoonToolBox\MoonToolBox.ico"
+  #define MyAppShortcutIconFile "..\release\MoonToolBox\MoonToolBox.ico"
+#endif
+
+#ifexist "..\release\MoonToolBoxSetup.ico"
+  #define MySetupIconFile "..\release\MoonToolBoxSetup.ico"
+#endif
 
 [Setup]
 AppId={{47D9C134-6420-49E3-82DD-D27C5D4B4C46}
@@ -21,6 +29,9 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#MyAppExeName}
 SetupLogging=yes
+#ifdef MySetupIconFile
+SetupIconFile={#MySetupIconFile}
+#endif
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
@@ -29,8 +40,13 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "..\release\MoonToolBox\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
+#ifdef MyAppShortcutIconFile
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\MoonToolBox.ico"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\MoonToolBox.ico"; Tasks: desktopicon
+#else
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
+#endif
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent; WorkingDir: "{app}"

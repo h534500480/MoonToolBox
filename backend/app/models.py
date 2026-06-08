@@ -100,6 +100,32 @@ class RosTopicListResponse(BaseModel):
     topics: List[RosTopicItem] = Field(default_factory=list)
 
 
+class RosRuntimeParamNode(BaseModel):
+    node: str = ""
+    params: Dict[str, Any] = Field(default_factory=dict)
+    error: str = ""
+
+
+class RosRuntimeParamSection(BaseModel):
+    title: str = ""
+    nodes: List[RosRuntimeParamNode] = Field(default_factory=list)
+
+
+class RosRuntimeParamGroup(BaseModel):
+    key: str = ""
+    label: str = ""
+    sections: List[RosRuntimeParamSection] = Field(default_factory=list)
+
+
+class RosRuntimeParamsResponse(BaseModel):
+    provider: str = ""
+    status: str = "unknown"
+    message: str = ""
+    updated_at: str = ""
+    groups: List[RosRuntimeParamGroup] = Field(default_factory=list)
+    failed_nodes: List[str] = Field(default_factory=list)
+
+
 class NavRecordingMetricSample(BaseModel):
     offset_ms: int = 0
     value: float = 0.0

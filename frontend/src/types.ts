@@ -72,6 +72,32 @@ export interface RosTopicListResponse {
   topics: RosTopicItem[];
 }
 
+export interface RosRuntimeParamNode {
+  node: string;
+  params: Record<string, unknown>;
+  error: string;
+}
+
+export interface RosRuntimeParamSection {
+  title: string;
+  nodes: RosRuntimeParamNode[];
+}
+
+export interface RosRuntimeParamGroup {
+  key: string;
+  label: string;
+  sections: RosRuntimeParamSection[];
+}
+
+export interface RosRuntimeParamsResponse {
+  provider: string;
+  status: string;
+  message: string;
+  updated_at: string;
+  groups: RosRuntimeParamGroup[];
+  failed_nodes: string[];
+}
+
 export interface NavRecordingMetricSample {
   offset_ms: number;
   value: number;

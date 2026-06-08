@@ -26,9 +26,9 @@ ROS_DATA_SOURCE_CONFIG_PATH = DATA_DIR / "ros_data_source.json"
 DEFAULT_ROS_DATA_SOURCE_CONFIG = RosDataSourceConfig(
     provider="rosbridge",
     options={
-        "url": "ws://127.0.0.1:9090",
+        "url": "",
         "rosapi_service": "/rosapi/topics_and_raw_types",
-        "timeout_ms": "2500",
+        "timeout_ms": "8000",
     },
 )
 
@@ -101,7 +101,7 @@ class RosbridgeRosDataSourceAdapter(BaseRosDataSourceAdapter):
                 status="error",
                 message="未配置 rosbridge WebSocket 地址。",
                 capabilities=[],
-                detected_hints=["请填写类似 ws://127.0.0.1:9090 的地址。"],
+                detected_hints=["请填写类似 ws://机器人IP:9090 的地址。"],
                 topics_count=0,
             )
 
@@ -174,11 +174,11 @@ class RosbridgeRosDataSourceAdapter(BaseRosDataSourceAdapter):
         )
 
     def _timeout_seconds(self, config: RosDataSourceConfig) -> float:
-        raw = config.options.get("timeout_ms", "2500")
+        raw = config.options.get("timeout_ms", "8000")
         try:
-            timeout_ms = max(300, int(raw))
+            timeout_ms = max(8000, int(raw))
         except ValueError:
-            timeout_ms = 2500
+            timeout_ms = 8000
         return timeout_ms / 1000.0
 
     def _call_topics_service(self, ws, config: RosDataSourceConfig) -> Optional[RosTopicListResponse]:

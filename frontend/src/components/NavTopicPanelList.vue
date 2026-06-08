@@ -3,7 +3,7 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 
 import { saveNavRecording } from "../api/client";
-import { createRosLiveAdapter } from "../lib/ros/liveAdapter";
+import { createSharedRosLiveAdapter, type RosLiveConfig } from "../lib/ros/liveAdapter";
 
 interface NavPanelItem {
   id: string;
@@ -108,6 +108,7 @@ const props = defineProps<{
   timeoutMs: number;
   panels: NavPanelItem[];
   compact?: boolean;
+  reconnectToken?: number;
 }>();
 
 const emit = defineEmits<{
@@ -115,19 +116,58 @@ const emit = defineEmits<{
   remove: [panelId: string];
   updateConfig: [panelId: string, patch: Partial<NavPanelItem>];
   recordingSaved: [];
+  rosLog: [payload: { source: string; level: "info" | "warning" | "error"; message: string }];
 }>();
 
 const panelStateMap = ref<Record<string, PanelState>>({});
 const adapterState = ref("未连接");
 const isAdapterConnected = ref(false);
-let adapter: ReturnType<typeof createRosLiveAdapter> | null = null;
+let adapter: ReturnType<typeof createSharedRosLiveAdapter> | null = null;
+let reconnectTimer: number | undefined;
 const unsubscribeMap = new Map<string, () => void>();
-const lastMessageTimeMap = new Map<string, number>();
+const pointCloudThrottleTimeMap = new Map<string, number>();
+const panelLastArrivalTimeMap = new Map<string, number>();
+const panelUiUpdateTimeMap = new Map<string, number>();
 const panelRecordingMap = ref<Record<string, PanelRecordingState>>({});
 const imuPoseStateMap = ref<Record<string, ImuPoseState>>({});
 const compactMetricSelectionMap = ref<Record<string, string>>({});
+const panelRealtimeHzMap = ref<Record<string, number>>({});
 const maxHistoryLength = 80;
-const maxRecordedEntries = 120;
+const maxRecordedEntriesForDisplay = 120;
+const maxPrettyPreviewChars = 8000;
+const maxPrettyPreviewLines = 120;
+const maxPreviewDepth = 5;
+const maxPreviewArrayItems = 32;
+const maxPreviewObjectKeys = 36;
+const maxPreviewStringLength = 1200;
+const panelUiUpdateMinIntervalMs = 120;
+
+function panelShellName() {
+  return props.compact ? "侧边小窗" : "完整小窗";
+}
+
+function emitRosLog(level: "info" | "warning" | "error", message: string) {
+  emit("rosLog", {
+    source: panelShellName(),
+    level,
+    message,
+  });
+}
+
+function buildSharedRosConfig(): RosLiveConfig {
+  return {
+    provider: props.provider,
+    url: props.url,
+    timeoutMs: props.timeoutMs,
+    sharedKey: `ros-nav-test:${props.provider}:${props.url}:${props.timeoutMs}`,
+    adapterName: "ROS 测试工作台共享连接",
+  };
+}
+
+function activePanelLabels() {
+  const panels = activePanels.value.map((panel) => `${panel.title}(${panel.topic})`);
+  return panels.length > 0 ? panels.join("、") : "无活动小窗";
+}
 
 const activePanels = computed(() => props.panels.filter((panel) => !panel.collapsed && !panel.paused));
 
@@ -161,6 +201,10 @@ function safeNumber(value: unknown) {
 function safeHzLimit(panel: NavPanelItem) {
   const value = Number(panel.hzLimit ?? 0);
   return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function panelFrequencyKey(panel: NavPanelItem) {
+  return panel.topic.trim() || panel.id;
 }
 
 function normalizePointSize(panel: NavPanelItem) {
@@ -566,7 +610,47 @@ function buildImuPreview(panelId: string, message: any): ImuPreview | null {
   };
 }
 
-function prettyMessage(message: any) {
+function sanitizePreviewValue(value: unknown, depth = 0): unknown {
+  if (depth >= maxPreviewDepth) {
+    return "[深层内容已折叠]";
+  }
+  if (typeof value === "string") {
+    return value.length > maxPreviewStringLength ? `${value.slice(0, maxPreviewStringLength)}... [字符串已截断]` : value;
+  }
+  if (Array.isArray(value)) {
+    const preview = value.slice(0, maxPreviewArrayItems).map((item) => sanitizePreviewValue(item, depth + 1));
+    if (value.length > maxPreviewArrayItems) {
+      preview.push(`[其余 ${value.length - maxPreviewArrayItems} 项已折叠]`);
+    }
+    return preview;
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  const previewEntries = entries.slice(0, maxPreviewObjectKeys).map(([key, item]) => [key, sanitizePreviewValue(item, depth + 1)]);
+  const nextObject = Object.fromEntries(previewEntries);
+  if (entries.length > maxPreviewObjectKeys) {
+    nextObject.__truncated_keys__ = `其余 ${entries.length - maxPreviewObjectKeys} 个字段已折叠`;
+  }
+  return nextObject;
+}
+
+function truncatePrettyPreviewText(text: string) {
+  const lines = text.split(/\r?\n/);
+  let previewText = lines.slice(0, maxPrettyPreviewLines).join("\n");
+  let truncated = lines.length > maxPrettyPreviewLines;
+  if (previewText.length > maxPrettyPreviewChars) {
+    previewText = previewText.slice(0, maxPrettyPreviewChars);
+    truncated = true;
+  }
+  if (!truncated) {
+    return previewText;
+  }
+  return `${previewText}\n\n[预览已截断：界面仅展示前 ${maxPrettyPreviewLines} 行 / ${maxPrettyPreviewChars} 字符。]`;
+}
+
+function buildPrettyMessageText(message: any, mode: "preview" | "full" = "preview") {
   if (Array.isArray(message?.fields) && message?.data) {
     return JSON.stringify(
       {
@@ -585,10 +669,14 @@ function prettyMessage(message: any) {
   if (typeof message?.data === "string") {
     const parsed = tryParseJsonString(message.data);
     if (parsed) {
-      return JSON.stringify(parsed, null, 2);
+      return JSON.stringify(mode === "preview" ? sanitizePreviewValue(parsed) : parsed, null, 2);
     }
   }
-  return JSON.stringify(message, null, 2);
+  return JSON.stringify(mode === "preview" ? sanitizePreviewValue(message) : message, null, 2);
+}
+
+function prettyMessagePreview(message: any) {
+  return truncatePrettyPreviewText(buildPrettyMessageText(message, "preview"));
 }
 
 function buildDefaultState(topic: string): PanelState {
@@ -870,14 +958,12 @@ function buildPanelVisualization(panel: NavPanelItem, message: any, previous?: P
   };
 }
 
-function setPanelState(panel: NavPanelItem, message: any) {
-  const previous = panelStateMap.value[panel.id] ?? buildDefaultState(panel.topic);
-  const visualization = buildPanelVisualization(panel, message, previous);
+function setPanelState(panel: NavPanelItem, summary: string, prettyPreview: string, visualization: Omit<PanelState, "summary" | "pretty" | "updatedAt">) {
   panelStateMap.value = {
     ...panelStateMap.value,
     [panel.id]: {
-      summary: summarizeMessage(panel, message),
-      pretty: prettyMessage(message),
+      summary,
+      pretty: prettyPreview,
       updatedAt: formatTimestamp(),
       chartTitle: visualization.chartTitle,
       metricSeries: visualization.metricSeries,
@@ -887,6 +973,26 @@ function setPanelState(panel: NavPanelItem, message: any) {
       imuPreview: visualization.imuPreview,
     },
   };
+}
+
+function buildPanelStateSnapshot(summary: string, prettyText: string, visualization: Omit<PanelState, "summary" | "pretty" | "updatedAt">): PanelState {
+  return {
+    summary,
+    pretty: prettyText,
+    updatedAt: formatTimestamp(),
+    chartTitle: visualization.chartTitle,
+    metricSeries: visualization.metricSeries,
+    badges: visualization.badges,
+    keyValues: visualization.keyValues,
+    pointCloudPreview: visualization.pointCloudPreview,
+    imuPreview: visualization.imuPreview,
+  };
+}
+
+function setPanelVisualization(panel: NavPanelItem, message: any, summary: string, prettyPreview: string) {
+  const previous = panelStateMap.value[panel.id] ?? buildDefaultState(panel.topic);
+  const visualization = buildPanelVisualization(panel, message, previous);
+  setPanelState(panel, summary, prettyPreview, visualization);
   return visualization;
 }
 
@@ -964,8 +1070,11 @@ function recordingDurationText(recording: PanelRecordingState) {
 }
 
 function appendRecordedEntry(recording: PanelRecordingState, timestampText: string, content: string) {
-  const nextEntries = [`[${timestampText}] ${content}`, ...recording.entries];
-  return nextEntries.length > maxRecordedEntries ? nextEntries.slice(0, maxRecordedEntries) : nextEntries;
+  return [`[${timestampText}] ${content}`, ...recording.entries];
+}
+
+function recordingEntriesForDisplay(recording: PanelRecordingState) {
+  return recording.entries.slice(0, maxRecordedEntriesForDisplay);
 }
 
 function mergeRecordedMetricSeries(recording: PanelRecordingState, state: PanelState, offsetMs: number) {
@@ -1041,7 +1150,7 @@ async function toggleRecording(panel: NavPanelItem) {
   }
 }
 
-function updateRecordingState(panel: NavPanelItem, message: any, state: PanelState) {
+function updateRecordingState(panel: NavPanelItem, prettyText: string, state: PanelState) {
   const recording = panelRecording(panel.id);
   if (!recording.isRecording) {
     return;
@@ -1054,7 +1163,7 @@ function updateRecordingState(panel: NavPanelItem, message: any, state: PanelSta
     [panel.id]: {
       ...recording,
       durationMs: offsetMs,
-      entries: appendRecordedEntry(recording, timestampText, prettyMessage(message)),
+      entries: appendRecordedEntry(recording, timestampText, prettyText),
       metricSeries: mergeRecordedMetricSeries(recording, state, offsetMs),
     },
   };
@@ -1071,6 +1180,25 @@ function panelConnectionText(panel: NavPanelItem) {
     return "未连接";
   }
   return "已订阅";
+}
+
+function panelRealtimeHzText(panel: NavPanelItem) {
+  const hz = panelRealtimeHzMap.value[panelFrequencyKey(panel)];
+  if (!Number.isFinite(hz) || hz <= 0) {
+    return "-";
+  }
+  return hz >= 10 ? `${hz.toFixed(1)} Hz` : `${hz.toFixed(2)} Hz`;
+}
+
+function panelRealtimeHzTone(panel: NavPanelItem) {
+  const hz = panelRealtimeHzMap.value[panelFrequencyKey(panel)];
+  if (!Number.isFinite(hz) || hz <= 0) {
+    return "danger";
+  }
+  if (hz < 2) {
+    return "warning";
+  }
+  return "success";
 }
 
 function pointCloudDotRadius(panel: NavPanelItem) {
@@ -1094,47 +1222,100 @@ function handlePanelMessage(panelId: string, message: any) {
   if (!panel) {
     return;
   }
+  const frequencyKey = panelFrequencyKey(panel);
+
+  const arrivalTime = Date.now();
+  const previousArrivalTime = panelLastArrivalTimeMap.get(frequencyKey) ?? 0;
+  if (previousArrivalTime > 0) {
+    const instantHz = 1000 / Math.max(1, arrivalTime - previousArrivalTime);
+    const previousHz = panelRealtimeHzMap.value[frequencyKey];
+    const nextHz = Number.isFinite(previousHz) && previousHz > 0
+      ? previousHz * 0.6 + instantHz * 0.4
+      : instantHz;
+    panelRealtimeHzMap.value = {
+      ...panelRealtimeHzMap.value,
+      [frequencyKey]: nextHz,
+    };
+  }
+  panelLastArrivalTimeMap.set(frequencyKey, arrivalTime);
+  const recording = panelRecording(panel.id);
+  const previousUiUpdateTime = panelUiUpdateTimeMap.get(panelId) ?? 0;
+  const hasExistingState = panelStateMap.value[panel.id] !== undefined;
+  const shouldUpdateUi = recording.isRecording
+    || !hasExistingState
+    || arrivalTime - previousUiUpdateTime >= panelUiUpdateMinIntervalMs;
 
   if (isPointCloudPanel(panel)) {
     const hzLimit = safeHzLimit(panel);
     if (hzLimit > 0) {
       const minIntervalMs = 1000 / hzLimit;
-      const now = Date.now();
-      const previousTime = lastMessageTimeMap.get(panelId) ?? 0;
-      if (now - previousTime < minIntervalMs) {
+      const previousTime = pointCloudThrottleTimeMap.get(panelId) ?? 0;
+      if (arrivalTime - previousTime < minIntervalMs) {
         return;
       }
-      lastMessageTimeMap.set(panelId, now);
+      pointCloudThrottleTimeMap.set(panelId, arrivalTime);
     }
   }
 
-  const visualization = setPanelState(panel, message);
-  updateRecordingState(panel, message, {
-    summary: summarizeMessage(panel, message),
-    pretty: prettyMessage(message),
-    updatedAt: formatTimestamp(),
-    chartTitle: visualization.chartTitle,
-    metricSeries: visualization.metricSeries,
-    badges: visualization.badges,
-    keyValues: visualization.keyValues,
-    pointCloudPreview: visualization.pointCloudPreview,
-  });
+  if (!shouldUpdateUi) {
+    return;
+  }
+
+  const summary = summarizeMessage(panel, message);
+  const prettyPreview = prettyMessagePreview(message);
+  const visualization = setPanelVisualization(panel, message, summary, prettyPreview);
+  panelUiUpdateTimeMap.set(panelId, arrivalTime);
+  if (recording.isRecording) {
+    updateRecordingState(
+      panel,
+      buildPrettyMessageText(message, "full"),
+      buildPanelStateSnapshot(summary, prettyPreview, visualization),
+    );
+  }
 }
 
 async function reconnect() {
+  reconnectTimer = undefined;
   unsubscribeMap.forEach((unsubscribe) => unsubscribe());
   unsubscribeMap.clear();
-  lastMessageTimeMap.clear();
+  pointCloudThrottleTimeMap.clear();
+  panelLastArrivalTimeMap.clear();
+  panelUiUpdateTimeMap.clear();
+  panelRealtimeHzMap.value = {};
   adapter?.disconnect();
   isAdapterConnected.value = false;
-  adapter = createRosLiveAdapter({
-    provider: props.provider,
-    url: props.url,
-    timeoutMs: props.timeoutMs,
+  adapter = createSharedRosLiveAdapter({
+    ...buildSharedRosConfig(),
+    adapterName: panelShellName(),
+    onStatusChange: (snapshot) => {
+      isAdapterConnected.value = snapshot.connected;
+      adapterState.value = snapshot.message;
+      if (!snapshot.connected) {
+        return;
+      }
+      activePanels.value.forEach((panel) => {
+        if (unsubscribeMap.has(panel.id)) {
+          return;
+        }
+        const unsubscribe = adapter?.subscribe(panel.topic, panel.messageType, (message) => {
+          handlePanelMessage(panel.id, message);
+        });
+        if (unsubscribe) {
+          unsubscribeMap.set(panel.id, unsubscribe);
+        }
+      });
+    },
+    onError: (event) => {
+      emitRosLog(
+        event.recoverable ? "warning" : "error",
+        `${panelShellName()}连接异常，影响窗口: ${activePanelLabels()}。原因: ${event.message}${event.detail ? ` (${event.detail})` : ""}`
+      );
+    },
   });
 
   if (!props.url && props.provider !== "mock") {
     adapterState.value = "未配置地址";
+    emitRosLog("warning", `${panelShellName()}未配置 rosbridge 地址，未启动连接。`);
     return;
   }
 
@@ -1151,30 +1332,54 @@ async function reconnect() {
         unsubscribeMap.set(panel.id, unsubscribe);
       }
     });
+    emitRosLog("info", `${panelShellName()}连接成功，当前活动窗口: ${activePanelLabels()}`);
   } catch (error) {
     isAdapterConnected.value = false;
     adapterState.value = (error as Error).message;
+    emitRosLog("error", `${panelShellName()}连接失败，影响窗口: ${activePanelLabels()}。原因: ${(error as Error).message}`);
   }
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer) {
+    window.clearTimeout(reconnectTimer);
+  }
+  reconnectTimer = window.setTimeout(() => {
+    void reconnect();
+  }, 120);
 }
 
 watch(
   () => [props.provider, props.url, props.timeoutMs],
-  async () => {
-    await reconnect();
-  },
+  () => scheduleReconnect(),
   { immediate: true }
+);
+
+watch(
+  () => props.reconnectToken,
+  () => scheduleReconnect()
 );
 
 watch(
   () => props.panels,
   (panels) => {
     const activeIds = new Set(panels.filter((panel) => !panel.collapsed && !panel.paused).map((panel) => panel.id));
+    const panelById = new Map(panels.map((panel) => [panel.id, panel]));
     const existingIds = new Set(panels.map((panel) => panel.id));
     [...unsubscribeMap.keys()].forEach((panelId) => {
       if (!activeIds.has(panelId)) {
         unsubscribeMap.get(panelId)?.();
         unsubscribeMap.delete(panelId);
-        lastMessageTimeMap.delete(panelId);
+        pointCloudThrottleTimeMap.delete(panelId);
+        panelUiUpdateTimeMap.delete(panelId);
+        const panel = panelById.get(panelId);
+        const frequencyKey = panel ? panelFrequencyKey(panel) : panelId;
+        panelLastArrivalTimeMap.delete(frequencyKey);
+        if (panelRealtimeHzMap.value[frequencyKey] !== undefined) {
+          const nextRealtimeHzMap = { ...panelRealtimeHzMap.value };
+          delete nextRealtimeHzMap[frequencyKey];
+          panelRealtimeHzMap.value = nextRealtimeHzMap;
+        }
       }
     });
     const nextImuPoseStateMap = Object.fromEntries(
@@ -1188,6 +1393,18 @@ watch(
     );
     if (Object.keys(nextCompactMetricSelectionMap).length !== Object.keys(compactMetricSelectionMap.value).length) {
       compactMetricSelectionMap.value = nextCompactMetricSelectionMap;
+    }
+    const nextPanelStateMap = Object.fromEntries(
+      Object.entries(panelStateMap.value).filter(([panelId]) => existingIds.has(panelId))
+    );
+    if (Object.keys(nextPanelStateMap).length !== Object.keys(panelStateMap.value).length) {
+      panelStateMap.value = nextPanelStateMap;
+    }
+    const nextPanelRecordingMap = Object.fromEntries(
+      Object.entries(panelRecordingMap.value).filter(([panelId]) => existingIds.has(panelId))
+    );
+    if (Object.keys(nextPanelRecordingMap).length !== Object.keys(panelRecordingMap.value).length) {
+      panelRecordingMap.value = nextPanelRecordingMap;
     }
 
     if (!adapter || !isAdapterConnected.value) {
@@ -1210,9 +1427,16 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  if (reconnectTimer) {
+    window.clearTimeout(reconnectTimer);
+    reconnectTimer = undefined;
+  }
   unsubscribeMap.forEach((unsubscribe) => unsubscribe());
   unsubscribeMap.clear();
-  lastMessageTimeMap.clear();
+  pointCloudThrottleTimeMap.clear();
+  panelLastArrivalTimeMap.clear();
+  panelUiUpdateTimeMap.clear();
+  panelRealtimeHzMap.value = {};
   adapter?.disconnect();
   isAdapterConnected.value = false;
 });
@@ -1287,12 +1511,21 @@ onBeforeUnmount(() => {
             <span class="kv-value">{{ panel.messageType || panel.type }}</span>
           </div>
           <div v-if="!props.compact" class="nav-mini-panel-meta">
+            <span class="kv-key">频率</span>
+            <span class="kv-value nav-hz-value" :class="`tone-${panelRealtimeHzTone(panel)}`">{{ panelRealtimeHzText(panel) }}</span>
+          </div>
+          <div v-if="!props.compact" class="nav-mini-panel-meta">
             <span class="kv-key">摘要</span>
             <span class="kv-value">{{ panelState(panel.id, panel.topic).summary }}</span>
           </div>
           <div v-if="!props.compact" class="nav-mini-panel-meta">
             <span class="kv-key">更新时间</span>
             <span class="kv-value">{{ panelState(panel.id, panel.topic).updatedAt }}</span>
+          </div>
+
+          <div v-if="props.compact" class="nav-mini-panel-meta compact-inline">
+            <span class="kv-key">频率</span>
+            <span class="kv-value nav-hz-value" :class="`tone-${panelRealtimeHzTone(panel)}`">{{ panelRealtimeHzText(panel) }}</span>
           </div>
 
           <div v-if="props.compact && !panelState(panel.id, panel.topic).metricSeries.length" class="nav-mini-panel-compact-summary">
@@ -1369,7 +1602,7 @@ onBeforeUnmount(() => {
                 <polyline
                   :points="sparklinePoints(metric.values)"
                   :stroke="metric.color"
-                  stroke-width="2"
+                  stroke-width="1.5"
                   fill="none"
                   stroke-linecap="round"
                   stroke-linejoin="round"
@@ -1401,7 +1634,10 @@ onBeforeUnmount(() => {
               录制内容
               <span>{{ panelRecording(panel.id).startedAtText }} -> {{ panelRecording(panel.id).stoppedAtText === '-' && panelRecording(panel.id).isRecording ? '进行中' : panelRecording(panel.id).stoppedAtText }}</span>
             </div>
-            <pre class="logs nav-panel-pretty nav-recording-log">{{ panelRecording(panel.id).entries.join('\n\n') }}</pre>
+            <pre class="logs nav-panel-pretty nav-recording-log">{{ recordingEntriesForDisplay(panelRecording(panel.id)).join('\n\n') }}</pre>
+            <div v-if="panelRecording(panel.id).entries.length > maxRecordedEntriesForDisplay" class="section-subtitle">
+              当前界面仅展示最新 {{ maxRecordedEntriesForDisplay }} 条，停止录制后保存文件仍包含全部消息。
+            </div>
           </div>
         </div>
       </article>
