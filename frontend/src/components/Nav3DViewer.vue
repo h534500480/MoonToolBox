@@ -845,27 +845,41 @@ function pointColorForTopic(topic: string) {
   return "#ffffff";
 }
 
-function renderPointCloud(display: NavViewerDisplay, message: any) {
-  if (!scene) {
-    return;
+function extractCustomPointCloudPositions(message: any) {
+  const points = Array.isArray(message?.points) ? message.points : [];
+  if (points.length === 0) {
+    return [];
   }
-  const latestDisplay = getDisplayByTopic(display.topic) || display;
-  const topic = latestDisplay.topic;
+  const sampleStep = Math.max(1, Math.ceil(points.length / 18000));
+  const positions: number[] = [];
+  for (let index = 0; index < points.length; index += sampleStep) {
+    const point = points[index] as Record<string, unknown> | null;
+    const x = Number(point?.x ?? Number.NaN);
+    const y = Number(point?.y ?? Number.NaN);
+    const z = Number(point?.z ?? Number.NaN);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+      continue;
+    }
+    positions.push(x, y, z);
+  }
+  return positions;
+}
 
+function extractPointCloud2Positions(message: any) {
   const fields = Array.isArray(message?.fields) ? message.fields : [];
   const pointStep = Number(message?.point_step ?? 0);
   const width = Number(message?.width ?? 0);
   const height = Number(message?.height ?? 1);
   const bytes = normalizePointCloudBytes(message?.data);
   if (pointStep <= 0 || width <= 0 || !bytes || bytes.byteLength < pointStep) {
-    return;
+    return [];
   }
 
   const xOffset = resolveFieldOffset(fields, "x");
   const yOffset = resolveFieldOffset(fields, "y");
   const zOffset = resolveFieldOffset(fields, "z");
   if (xOffset < 0 || yOffset < 0 || zOffset < 0) {
-    return;
+    return [];
   }
 
   const totalPoints = width * Math.max(1, height);
@@ -887,6 +901,22 @@ function renderPointCloud(display: NavViewerDisplay, message: any) {
     }
     positions.push(x, y, z);
   }
+  return positions;
+}
+
+function renderPointCloud(display: NavViewerDisplay, message: any) {
+  if (!scene) {
+    return;
+  }
+  const latestDisplay = getDisplayByTopic(display.topic) || display;
+  const topic = latestDisplay.topic;
+  const positions = Array.isArray(message?.points)
+    ? extractCustomPointCloudPositions(message)
+    : extractPointCloud2Positions(message);
+  if (positions.length === 0) {
+    return;
+  }
+
   let points = pointCloudByTopic.get(topic);
   if (!points) {
     const geometry = new THREE.BufferGeometry();

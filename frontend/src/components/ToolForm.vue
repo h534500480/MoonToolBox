@@ -1229,16 +1229,7 @@ function disconnectNavDelayPanel() {
 }
 
 function applyNavDelayTopics() {
-  navDelayTopicsApplied.value = navDelayTopicsInput.value;
-  navDelayOverviewSelectionMap.value = Object.fromEntries(
-    navDelayTopicDefinitions.value.map((definition) => [definition.topic, isNavDelayOverviewTopicSelected(definition.topic)])
-  );
-  disconnectNavDelayPanel();
-  if (navDelayPanelCollapsed.value || props.tool.key !== "ros_nav_test") {
-    navDelayMessage.value = "已应用总览话题，展开窗口后会开始订阅。";
-    return;
-  }
-  void reconnectNavDelayPanel();
+  setNavDelayTopics(normalizeNavDelayTopicsInput(navDelayTopicsInput.value));
 }
 
 async function reconnectNavDelayPanel() {
@@ -2534,6 +2525,45 @@ function addSelectedTopicsToMainView() {
   selectedNavTopics.value = [];
 }
 
+function hasDelayTopic(topicKey: string) {
+  return normalizeNavDelayTopicsInput(navDelayTopicsInput.value).includes(topicKey);
+}
+
+function setNavDelayTopics(topics: string[]) {
+  const normalized = normalizeNavDelayTopicsInput(topics.join("\n"));
+  navDelayTopicsInput.value = normalized.join("\n");
+  navDelayTopicsApplied.value = navDelayTopicsInput.value;
+  navDelayOverviewSelectionMap.value = Object.fromEntries(
+    normalized.map((topic) => [topic, isNavDelayOverviewTopicSelected(topic)])
+  );
+  disconnectNavDelayPanel();
+  if (navDelayPanelCollapsed.value || props.tool.key !== "ros_nav_test") {
+    navDelayMessage.value = "已更新延迟总览话题，展开窗口后会开始订阅。";
+    return;
+  }
+  void reconnectNavDelayPanel();
+}
+
+function addTopicToDelayWindow(topic: NavTopicOption) {
+  if (hasDelayTopic(topic.key)) {
+    return;
+  }
+  const nextTopics = [...normalizeNavDelayTopicsInput(navDelayTopicsInput.value), topic.key];
+  setNavDelayTopics(nextTopics);
+}
+
+function addSelectedTopicsToDelayWindow() {
+  if (selectedNavTopicOptions.value.length === 0) {
+    return;
+  }
+  const nextTopics = [
+    ...normalizeNavDelayTopicsInput(navDelayTopicsInput.value),
+    ...selectedNavTopicOptions.value.map((topic) => topic.key),
+  ];
+  setNavDelayTopics(nextTopics);
+  selectedNavTopics.value = [];
+}
+
 function addTopicToMainView(topic: NavTopicOption) {
   if (hasMainDisplay(topic.key)) {
     return;
@@ -3364,6 +3394,7 @@ data: [0, 0, 100, ...]</pre>
           <div class="nav-topic-batch-bar">
             <span class="nav-topic-batch-text">已勾选 {{ selectedNavTopicOptions.length }} 项</span>
             <button class="primary-btn" type="button" :disabled="selectedNavTopicOptions.length === 0" @click="addSelectedTopicsToMainView">批量加到主视窗</button>
+            <button class="secondary-btn" type="button" :disabled="selectedNavTopicOptions.length === 0" @click="addSelectedTopicsToDelayWindow">批量加到延迟窗口</button>
             <button class="secondary-btn" type="button" :disabled="selectedNavTopicOptions.length === 0" @click="addSelectedTopicsAsSidePanels">批量简易展示</button>
             <button class="secondary-btn" type="button" :disabled="selectedNavTopicOptions.length === 0" @click="addSelectedTopicsAsFullPanels">批量完整展示</button>
           </div>
@@ -3385,6 +3416,14 @@ data: [0, 0, 100, ...]</pre>
                   @click.prevent="addTopicToMainView(topic)"
                 >
                   {{ hasMainDisplay(topic.key) ? "已在主视窗" : "加到主视窗" }}
+                </button>
+                <button
+                  class="secondary-btn"
+                  type="button"
+                  :disabled="hasDelayTopic(topic.key)"
+                  @click.prevent="addTopicToDelayWindow(topic)"
+                >
+                  {{ hasDelayTopic(topic.key) ? "已在延迟窗口" : "加到延迟窗口" }}
                 </button>
                 <button
                   class="secondary-btn"

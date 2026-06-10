@@ -4,6 +4,6 @@
     "pcd_tile": true,
     "network_scan": true,
     "costmap": true,
-    "mtslash_export": true
+    "mtslash_export": false
   }
 }

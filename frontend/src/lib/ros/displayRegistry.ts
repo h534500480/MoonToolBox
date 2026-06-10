@@ -23,8 +23,13 @@ export interface NavViewerDisplay {
   tfVisibleFrames?: string[];
 }
 
+function isCustomPointCloudMessageType(messageType: string): boolean {
+  const normalized = messageType.trim().toLowerCase();
+  return normalized.endsWith("/custommsg") || normalized.endsWith("/msg/custommsg");
+}
+
 export function inferDisplayKind(topic: string, messageType: string): NavDisplayKind {
-  if (messageType === "sensor_msgs/msg/PointCloud2") {
+  if (messageType === "sensor_msgs/msg/PointCloud2" || isCustomPointCloudMessageType(messageType)) {
     return "pointcloud";
   }
   if (messageType === "sensor_msgs/msg/LaserScan") {
