@@ -129,6 +129,75 @@ npm run dev
 - backend: `http://127.0.0.1:8000`，局域网访问用 `http://<本机局域网IP>:8000`
 - frontend: `http://127.0.0.1:5173`，局域网访问用 `http://<本机局域网IP>:5173`
 
+## ROS Android APP
+
+当前仓库已经补齐 Android APP 基础骨架，主线仍然复用现有 `frontend/` 中的 ROS 定位测试能力，并通过分页拆分为：
+
+- 主视图
+- 话题列表
+- 话题内容
+- 运行参数
+- 延迟分析
+- 录制回看
+
+前端 Android 壳使用：
+
+- `Vue + Vite`
+- `vue-router`
+- `Capacitor Android`
+
+相关文件位置：
+
+- `frontend/src/components/RosNavAppPage.vue`
+- `frontend/src/components/ToolForm.vue`
+- `frontend/capacitor.config.ts`
+- `frontend/android/`
+
+### Android 构建步骤
+
+先安装前端依赖：
+
+```powershell
+cd .\frontend
+npm install
+```
+
+构建并同步 Android 资源：
+
+```powershell
+npm run build:android
+```
+
+首次生成 Android 工程：
+
+```powershell
+npm run cap:add:android
+```
+
+打开 Android Studio 工程：
+
+```powershell
+npm run cap:open:android
+```
+
+然后在 Android Studio 中执行：
+
+- `Build > Build APK(s)`
+或
+- `Build > Generate Signed Bundle / APK`
+
+### APP 使用说明
+
+1. 首次进入 APP 后，先在 APP 顶部填写后端地址，例如：`http://192.168.1.10:8000/api`
+2. 保存后端地址
+3. 再进入主视图、话题列表等页面使用
+
+说明：
+
+- APP 中的 ROS 实时三维主视图仍直接连接 `rosbridge`
+- 话题列表、运行参数、录制文件等能力仍依赖后端 `/api`
+- Android 端已经开启明文 HTTP 访问，便于连接局域网内的开发后端
+
 ## 本地一键安装 / 启动 Web 版
 
 首次部署：

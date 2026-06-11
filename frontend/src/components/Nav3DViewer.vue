@@ -77,6 +77,7 @@ let lastViewportHeight = 0;
 let interactionStartPoint: THREE.Vector3 | null = null;
 let interactionCurrentPoint: THREE.Vector3 | null = null;
 let interactionPreviewGroup: THREE.Group | null = null;
+let activeInteractionPointerId: number | null = null;
 let webglContextLost = false;
 
 const unsubscribeMap = new Map<string, () => void>();
@@ -196,6 +197,17 @@ function fitRendererSize() {
   renderer.setSize(width, height, false);
   camera.aspect = width / height;
   camera.updateProjectionMatrix();
+}
+
+function syncControlLockState() {
+  if (!controls || !renderer) {
+    return;
+  }
+  const interactionLocked = currentInteractionMode.value !== "none" || activeInteractionPointerId !== null;
+  controls.enabled = !interactionLocked;
+  // 主视图区域统一禁用浏览器默认触控滚动，避免移动端横屏下手势被页面抢走。
+  renderer.domElement.style.touchAction = "none";
+  renderer.domElement.style.cursor = interactionLocked ? "crosshair" : "grab";
 }
 
 function animate() {
@@ -1002,7 +1014,7 @@ function buildInteractionPreview(startPoint: THREE.Vector3, endPoint: THREE.Vect
   interactionPreviewGroup = group;
 }
 
-function worldPointFromMouse(event: MouseEvent) {
+function worldPointFromPointer(event: Pick<PointerEvent, "clientX" | "clientY">) {
   if (!camera || !renderer) {
     return null;
   }
@@ -1015,26 +1027,31 @@ function worldPointFromMouse(event: MouseEvent) {
   return hit ? point.clone() : null;
 }
 
-function handlePointerDown(event: MouseEvent) {
-  if (event.button !== 0 || currentInteractionMode.value === "none") {
+function handlePointerDown(event: PointerEvent) {
+  if (currentInteractionMode.value === "none") {
     return;
   }
-  const point = worldPointFromMouse(event);
+  if (event.pointerType === "mouse" && event.button !== 0) {
+    return;
+  }
+  const point = worldPointFromPointer(event);
   if (!point) {
     return;
   }
+  activeInteractionPointerId = event.pointerId;
   interactionStartPoint = point;
   interactionCurrentPoint = point.clone();
-  controls && (controls.enabled = false);
+  renderer?.domElement.setPointerCapture(event.pointerId);
+  syncControlLockState();
   buildInteractionPreview(interactionStartPoint, interactionCurrentPoint);
   event.preventDefault();
 }
 
-function handlePointerMove(event: MouseEvent) {
-  if (!interactionStartPoint || currentInteractionMode.value === "none") {
+function handlePointerMove(event: PointerEvent) {
+  if (!interactionStartPoint || currentInteractionMode.value === "none" || activeInteractionPointerId !== event.pointerId) {
     return;
   }
-  const point = worldPointFromMouse(event);
+  const point = worldPointFromPointer(event);
   if (!point) {
     return;
   }
@@ -1056,7 +1073,8 @@ function finishInteraction(emitResult: boolean) {
   clearInteractionPreview();
   interactionStartPoint = null;
   interactionCurrentPoint = null;
-  controls && (controls.enabled = true);
+  activeInteractionPointerId = null;
+  syncControlLockState();
 
   if (!emitResult || mode === "none") {
     return;
@@ -1069,18 +1087,25 @@ function finishInteraction(emitResult: boolean) {
   });
 }
 
-function handlePointerUp(event: MouseEvent) {
-  if (event.button !== 0) {
+function handlePointerUp(event: PointerEvent) {
+  if (activeInteractionPointerId !== event.pointerId) {
     return;
   }
+  renderer?.domElement.releasePointerCapture(event.pointerId);
   finishInteraction(true);
 }
 
-function handlePointerLeave() {
+function handlePointerCancel(event?: PointerEvent) {
+  if (event && activeInteractionPointerId !== event.pointerId) {
+    return;
+  }
+  if (event) {
+    renderer?.domElement.releasePointerCapture(event.pointerId);
+  }
   if (!interactionStartPoint) {
     return;
   }
-  finishInteraction(true);
+  finishInteraction(false);
 }
 
 function quaternionToYaw(rotation: any) {
@@ -1845,6 +1870,7 @@ watch(
   () => currentInteractionMode.value,
   () => {
     finishInteraction(false);
+    syncControlLockState();
   }
 );
 
@@ -1858,10 +1884,12 @@ onMounted(async () => {
   if (mountRef.value) {
     resizeObserver.observe(mountRef.value);
   }
-  renderer?.domElement.addEventListener("mousedown", handlePointerDown);
-  renderer?.domElement.addEventListener("mousemove", handlePointerMove);
-  renderer?.domElement.addEventListener("mouseup", handlePointerUp);
-  renderer?.domElement.addEventListener("mouseleave", handlePointerLeave);
+  renderer?.domElement.addEventListener("pointerdown", handlePointerDown);
+  renderer?.domElement.addEventListener("pointermove", handlePointerMove);
+  renderer?.domElement.addEventListener("pointerup", handlePointerUp);
+  renderer?.domElement.addEventListener("pointercancel", handlePointerCancel);
+  renderer?.domElement.addEventListener("pointerleave", handlePointerCancel);
+  syncControlLockState();
   scheduleReconnectAndResubscribe();
 });
 
@@ -1872,10 +1900,11 @@ onBeforeUnmount(() => {
     reconnectTimer = undefined;
   }
   resizeObserver?.disconnect();
-  renderer?.domElement.removeEventListener("mousedown", handlePointerDown);
-  renderer?.domElement.removeEventListener("mousemove", handlePointerMove);
-  renderer?.domElement.removeEventListener("mouseup", handlePointerUp);
-  renderer?.domElement.removeEventListener("mouseleave", handlePointerLeave);
+  renderer?.domElement.removeEventListener("pointerdown", handlePointerDown);
+  renderer?.domElement.removeEventListener("pointermove", handlePointerMove);
+  renderer?.domElement.removeEventListener("pointerup", handlePointerUp);
+  renderer?.domElement.removeEventListener("pointercancel", handlePointerCancel);
+  renderer?.domElement.removeEventListener("pointerleave", handlePointerCancel);
   unsubscribeMap.forEach((unsubscribe) => unsubscribe());
   unsubscribeMap.clear();
   supportTfUnsubscribeMap.forEach((unsubscribe) => unsubscribe());

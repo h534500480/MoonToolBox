@@ -12,18 +12,50 @@ import type {
   RosTopicListResponse,
 } from "../types";
 
-const API_BASE = "/api";
+const API_BASE_STORAGE_KEY = "moontoolbox.apiBase";
+
+export function normalizeApiBase(rawValue: string): string {
+  const trimmed = rawValue.trim();
+  if (!trimmed) {
+    return "/api";
+  }
+  const withoutTrailingSlash = trimmed.replace(/\/+$/g, "");
+  if (withoutTrailingSlash === "/api" || withoutTrailingSlash.endsWith("/api")) {
+    return withoutTrailingSlash;
+  }
+  return `${withoutTrailingSlash}/api`;
+}
+
+export function getApiBase(): string {
+  if (typeof window === "undefined") {
+    return "/api";
+  }
+  return normalizeApiBase(window.localStorage.getItem(API_BASE_STORAGE_KEY) || "/api");
+}
+
+export function saveApiBase(rawValue: string): string {
+  const normalized = normalizeApiBase(rawValue);
+  if (typeof window !== "undefined") {
+    window.localStorage.setItem(API_BASE_STORAGE_KEY, normalized);
+  }
+  return normalized;
+}
+
+function apiUrl(path: string): string {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return `${getApiBase()}${normalizedPath}`;
+}
 
 export function buildBackendImageUrl(path: string, cacheKey = ""): string {
   const query = new URLSearchParams({ path });
   if (cacheKey) {
     query.set("t", cacheKey);
   }
-  return `${API_BASE}/files/image?${query.toString()}`;
+  return `${apiUrl("/files/image")}?${query.toString()}`;
 }
 
 export async function fetchTools(): Promise<ToolDefinition[]> {
-  const response = await fetch(`${API_BASE}/tools`);
+  const response = await fetch(apiUrl("/tools"));
   if (!response.ok) {
     throw new Error("Failed to load tools");
   }
@@ -31,7 +63,7 @@ export async function fetchTools(): Promise<ToolDefinition[]> {
 }
 
 export async function runTool(toolKey: string, values: Record<string, string>): Promise<ToolRunResponse> {
-  const response = await fetch(`${API_BASE}/tools/${toolKey}/run`, {
+  const response = await fetch(apiUrl(`/tools/${toolKey}/run`), {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -52,7 +84,7 @@ export async function runTool(toolKey: string, values: Record<string, string>): 
 }
 
 export async function fetchPreferences(): Promise<PreferencesPayload> {
-  const response = await fetch(`${API_BASE}/preferences`);
+  const response = await fetch(apiUrl("/preferences"));
   if (!response.ok) {
     throw new Error("Failed to load preferences");
   }
@@ -60,7 +92,7 @@ export async function fetchPreferences(): Promise<PreferencesPayload> {
 }
 
 export async function fetchSystemInfo(): Promise<SystemInfoResponse> {
-  const response = await fetch(`${API_BASE}/system/info`);
+  const response = await fetch(apiUrl("/system/info"));
   if (!response.ok) {
     throw new Error("Failed to load system info");
   }
@@ -68,7 +100,7 @@ export async function fetchSystemInfo(): Promise<SystemInfoResponse> {
 }
 
 export async function fetchRosDataSourceConfig(): Promise<RosDataSourceConfig> {
-  const response = await fetch(`${API_BASE}/ros/data-source`);
+  const response = await fetch(apiUrl("/ros/data-source"));
   if (!response.ok) {
     throw new Error("Failed to load ROS data source config");
   }
@@ -76,7 +108,7 @@ export async function fetchRosDataSourceConfig(): Promise<RosDataSourceConfig> {
 }
 
 export async function saveRosDataSourceConfig(payload: RosDataSourceConfig): Promise<RosDataSourceConfig> {
-  const response = await fetch(`${API_BASE}/ros/data-source`, {
+  const response = await fetch(apiUrl("/ros/data-source"), {
     method: "PUT",
     headers: {
       "Content-Type": "application/json"
@@ -90,7 +122,7 @@ export async function saveRosDataSourceConfig(payload: RosDataSourceConfig): Pro
 }
 
 export async function inspectRosDataSource(payload: RosDataSourceConfig): Promise<RosInspectionResponse> {
-  const response = await fetch(`${API_BASE}/ros/data-source/inspect`, {
+  const response = await fetch(apiUrl("/ros/data-source/inspect"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -111,7 +143,7 @@ export async function inspectRosDataSource(payload: RosDataSourceConfig): Promis
 }
 
 export async function fetchRosTopics(payload: RosDataSourceConfig): Promise<RosTopicListResponse> {
-  const response = await fetch(`${API_BASE}/ros/topics`, {
+  const response = await fetch(apiUrl("/ros/topics"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -132,7 +164,7 @@ export async function fetchRosTopics(payload: RosDataSourceConfig): Promise<RosT
 }
 
 export async function fetchRosRuntimeParams(payload: RosDataSourceConfig): Promise<RosRuntimeParamsResponse> {
-  const response = await fetch(`${API_BASE}/ros/runtime-params`, {
+  const response = await fetch(apiUrl("/ros/runtime-params"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -153,7 +185,7 @@ export async function fetchRosRuntimeParams(payload: RosDataSourceConfig): Promi
 }
 
 export async function savePreferences(payload: PreferencesPayload): Promise<PreferencesPayload> {
-  const response = await fetch(`${API_BASE}/preferences`, {
+  const response = await fetch(apiUrl("/preferences"), {
     method: "PUT",
     headers: {
       "Content-Type": "application/json"
@@ -167,7 +199,7 @@ export async function savePreferences(payload: PreferencesPayload): Promise<Pref
 }
 
 export async function browsePath(payload: BrowseDialogPayload): Promise<string> {
-  const response = await fetch(`${API_BASE}/dialogs/browse`, {
+  const response = await fetch(apiUrl("/dialogs/browse"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -182,7 +214,7 @@ export async function browsePath(payload: BrowseDialogPayload): Promise<string> 
 }
 
 export async function openLocalPath(path: string): Promise<void> {
-  const response = await fetch(`${API_BASE}/dialogs/open-path`, {
+  const response = await fetch(apiUrl("/dialogs/open-path"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -202,7 +234,7 @@ export async function openLocalPath(path: string): Promise<void> {
 }
 
 export async function fetchNavRecordingFiles(): Promise<NavRecordingFileListResponse> {
-  const response = await fetch(`${API_BASE}/nav-recordings`);
+  const response = await fetch(apiUrl("/nav-recordings"));
   if (!response.ok) {
     throw new Error("Failed to load nav recordings");
   }
@@ -210,7 +242,7 @@ export async function fetchNavRecordingFiles(): Promise<NavRecordingFileListResp
 }
 
 export async function saveNavRecording(payload: NavRecordingSavePayload): Promise<NavRecordingFileListResponse> {
-  const response = await fetch(`${API_BASE}/nav-recordings`, {
+  const response = await fetch(apiUrl("/nav-recordings"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -231,7 +263,7 @@ export async function saveNavRecording(payload: NavRecordingSavePayload): Promis
 }
 
 export async function deleteNavRecording(path: string): Promise<NavRecordingFileListResponse> {
-  const response = await fetch(`${API_BASE}/nav-recordings`, {
+  const response = await fetch(apiUrl("/nav-recordings"), {
     method: "DELETE",
     headers: {
       "Content-Type": "application/json"
@@ -253,7 +285,7 @@ export async function deleteNavRecording(path: string): Promise<NavRecordingFile
 
 export async function fetchLocalTextFile(path: string): Promise<string> {
   const query = new URLSearchParams({ path });
-  const response = await fetch(`${API_BASE}/files/text?${query.toString()}`);
+  const response = await fetch(`${apiUrl("/files/text")}?${query.toString()}`);
   if (!response.ok) {
     let detail = "Failed to read text file";
     try {
@@ -284,7 +316,7 @@ export async function fetchPcdTilePreview(path: string, tileSize: string): Promi
     path,
     tile_size: tileSize || "20.0"
   });
-  const response = await fetch(`${API_BASE}/tools/pcd_tile/preview?${query.toString()}`);
+  const response = await fetch(`${apiUrl("/tools/pcd_tile/preview")}?${query.toString()}`);
   if (!response.ok) {
     throw new Error("Failed to preview pcd tile");
   }
@@ -298,7 +330,7 @@ export interface MtslashCaptchaResponse {
 }
 
 export async function fetchMtslashCaptcha(): Promise<MtslashCaptchaResponse> {
-  const response = await fetch(`${API_BASE}/tools/mtslash_export/login-captcha`, {
+  const response = await fetch(apiUrl("/tools/mtslash_export/login-captcha"), {
     method: "POST"
   });
   if (!response.ok) {
@@ -321,7 +353,7 @@ export interface MtslashLoginResponse {
 }
 
 export async function loginMtslash(values: Record<string, string>): Promise<MtslashLoginResponse> {
-  const response = await fetch(`${API_BASE}/tools/mtslash_export/login`, {
+  const response = await fetch(apiUrl("/tools/mtslash_export/login"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -357,7 +389,7 @@ export async function fetchMtslashFavorites(sessionId: string): Promise<MtslashF
     session_id: sessionId,
     max_pages: "200"
   });
-  const response = await fetch(`${API_BASE}/tools/mtslash_export/favorites?${query.toString()}`);
+  const response = await fetch(`${apiUrl("/tools/mtslash_export/favorites")}?${query.toString()}`);
   if (!response.ok) {
     let detail = "Failed to fetch favorites";
     try {
@@ -376,7 +408,7 @@ export async function fetchMtslashBrowserFavorites(browser: string): Promise<Mts
     browser,
     max_pages: "200"
   });
-  const response = await fetch(`${API_BASE}/tools/mtslash_export/browser/favorites?${query.toString()}`);
+  const response = await fetch(`${apiUrl("/tools/mtslash_export/browser/favorites")}?${query.toString()}`);
   if (!response.ok) {
     let detail = "Failed to fetch browser favorites";
     try {
@@ -405,7 +437,7 @@ export interface MtslashBrowserResponse {
 }
 
 export async function startMtslashBrowser(browser: string): Promise<MtslashBrowserResponse> {
-  const response = await fetch(`${API_BASE}/tools/mtslash_export/browser/start`, {
+  const response = await fetch(apiUrl("/tools/mtslash_export/browser/start"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -427,7 +459,7 @@ export async function startMtslashBrowser(browser: string): Promise<MtslashBrows
 
 export async function fetchMtslashBrowserTabs(browser: string): Promise<MtslashBrowserResponse> {
   const query = new URLSearchParams({ browser });
-  const response = await fetch(`${API_BASE}/tools/mtslash_export/browser/tabs?${query.toString()}`);
+  const response = await fetch(`${apiUrl("/tools/mtslash_export/browser/tabs")}?${query.toString()}`);
   if (!response.ok) {
     let detail = "Failed to load browser tabs";
     try {

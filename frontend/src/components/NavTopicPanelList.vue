@@ -109,6 +109,8 @@ const props = defineProps<{
   panels: NavPanelItem[];
   compact?: boolean;
   reconnectToken?: number;
+  allowRecording?: boolean;
+  allowRemove?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -1464,6 +1466,7 @@ onBeforeUnmount(() => {
             </span>
           </button>
           <button
+            v-if="props.allowRecording !== false"
             class="secondary-btn small"
             :class="{ recording: panelRecording(panel.id).isRecording }"
             type="button"
@@ -1471,7 +1474,7 @@ onBeforeUnmount(() => {
           >
             {{ panelRecording(panel.id).isRecording ? "停止录制" : "录制" }}
           </button>
-          <button class="section-card-action danger" type="button" @click="emit('remove', panel.id)">移除</button>
+          <button v-if="props.allowRemove !== false" class="section-card-action danger" type="button" @click="emit('remove', panel.id)">移除</button>
         </div>
 
         <div v-if="!panel.collapsed" class="nav-mini-panel-body">

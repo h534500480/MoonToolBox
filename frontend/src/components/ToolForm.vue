@@ -44,12 +44,25 @@ const props = defineProps<{
   summary: string;
   logs: string[];
   resultData: Record<string, any>;
+  appMode?: boolean;
+  rosAppPage?: string;
 }>();
 
 const emit = defineEmits<{
   run: [values: Record<string, string>];
   clearLogs: [];
 }>();
+
+const rosAppPageKeys = ["main", "topics", "panels", "runtime", "delay", "recordings"] as const;
+const isRosAppMode = computed(() => Boolean(props.appMode) && props.tool.key === "ros_nav_test");
+const activeRosAppPage = computed(() => {
+  const page = (props.rosAppPage || "main").trim();
+  return rosAppPageKeys.includes(page as typeof rosAppPageKeys[number]) ? page : "main";
+});
+
+function shouldShowRosAppSection(...pages: Array<typeof rosAppPageKeys[number]>) {
+  return !isRosAppMode.value || pages.includes(activeRosAppPage.value as typeof rosAppPageKeys[number]);
+}
 
 const formValues = reactive<Record<string, string>>({});
 const tilePreview = ref("");
@@ -2257,6 +2270,10 @@ function fieldKind(fieldKey: string) {
   return "input";
 }
 
+function openRosAppWorkbench() {
+  window.location.hash = "#/ros-app/main";
+}
+
 async function fetchCaptcha() {
   mtslashCaptchaLoading.value = true;
   mtslashLoginMessage.value = "";
@@ -2795,7 +2812,7 @@ onBeforeUnmount(() => {
     </header>
 
     <div class="tool-layout" :class="`tool-layout-${tool.key}`">
-      <section v-if="tool.key !== 'mtslash_export'" class="panel tool-form-panel">
+      <section v-if="tool.key !== 'mtslash_export' && (tool.key !== 'ros_nav_test' || shouldShowRosAppSection('runtime'))" class="panel tool-form-panel">
         <div class="section-head">
           <div class="result-title">参数配置</div>
           <div class="section-subtitle">支持手动输入和本地浏览选择</div>
@@ -2857,7 +2874,7 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="actions">
-          <button class="primary-btn" :disabled="loading" @click="submit">
+          <button v-if="!(isRosAppMode && tool.key === 'ros_nav_test')" class="primary-btn" :disabled="loading" @click="submit">
             {{ loading ? "处理中..." : tool.primary_action }}
           </button>
           <template v-if="tool.key === 'pcd_map'">
@@ -2874,6 +2891,7 @@ onBeforeUnmount(() => {
             <button class="secondary-btn" type="button" @click="clearToolLogs">清空日志</button>
           </template>
           <template v-else-if="tool.key === 'ros_nav_test'">
+            <button v-if="!isRosAppMode" class="secondary-btn" type="button" @click="openRosAppWorkbench">打开 APP 分页版</button>
             <button class="secondary-btn" type="button" :disabled="rosDataSourceSaving" @click="saveRosNavConfig">
               {{ rosDataSourceSaving ? "保存中..." : "保存接入配置" }}
             </button>
@@ -3164,7 +3182,7 @@ data: [0, 0, 100, ...]</pre>
       </template>
 
       <template v-else-if="tool.key === 'ros_nav_test'">
-        <section class="result-panel nav-overview-panel">
+        <section v-if="shouldShowRosAppSection('main')" class="result-panel nav-overview-panel">
           <div class="result-title">测试工作台概览</div>
           <p class="summary">这一版先确认导航测试页布局，后续再逐步接入 ROS 话题订阅、三维渲染和实际小窗内容。</p>
           <div class="stat-strip">
@@ -3213,7 +3231,7 @@ data: [0, 0, 100, ...]</pre>
           </div>
         </section>
 
-        <section class="panel nav-main-view-panel">
+        <section v-if="shouldShowRosAppSection('main')" class="panel nav-main-view-panel">
           <div class="section-head">
             <div>
               <div class="result-title">三维主视图</div>
@@ -3372,7 +3390,7 @@ data: [0, 0, 100, ...]</pre>
           />
         </section>
 
-        <section class="panel nav-topic-picker-panel">
+        <section v-if="shouldShowRosAppSection('topics')" class="panel nav-topic-picker-panel">
           <div class="section-head">
             <div>
               <div class="result-title">话题选择小窗</div>
@@ -3448,7 +3466,7 @@ data: [0, 0, 100, ...]</pre>
           </div>
         </section>
 
-        <section class="panel nav-status-panel">
+        <section v-if="shouldShowRosAppSection('runtime')" class="panel nav-status-panel">
           <div class="section-head">
             <div>
               <div class="result-title">主视图状态</div>
@@ -3503,7 +3521,7 @@ data: [0, 0, 100, ...]</pre>
           </div>
         </section>
 
-        <section class="panel nav-side-monitor-panel">
+        <section v-if="shouldShowRosAppSection('panels')" class="panel nav-side-monitor-panel">
           <div class="section-head">
             <div>
               <div class="result-title">侧边小窗</div>
@@ -3526,7 +3544,7 @@ data: [0, 0, 100, ...]</pre>
           />
         </section>
 
-        <section class="panel nav-recordings-panel-shell">
+        <section v-if="shouldShowRosAppSection('recordings')" class="panel nav-recordings-panel-shell">
           <div class="nav-recordings-panel">
             <div class="section-head">
               <div>
@@ -3648,7 +3666,7 @@ data: [0, 0, 100, ...]</pre>
           </div>
         </section>
 
-        <section class="panel nav-panel-list-panel">
+        <section v-if="shouldShowRosAppSection('panels')" class="panel nav-panel-list-panel">
           <div class="section-head">
             <div>
               <div class="result-title">完整小窗列表</div>
@@ -3670,7 +3688,7 @@ data: [0, 0, 100, ...]</pre>
           />
         </section>
 
-        <section class="panel nav-delay-panel">
+        <section v-if="shouldShowRosAppSection('delay')" class="panel nav-delay-panel">
           <div class="section-head">
             <button class="nav-runtime-toggle" type="button" @click="toggleNavDelayPanel">
               <span class="collapse-trigger-label">
@@ -3763,7 +3781,7 @@ data: [0, 0, 100, ...]</pre>
           </div>
         </section>
 
-        <section class="panel nav-runtime-params-panel">
+        <section v-if="shouldShowRosAppSection('runtime')" class="panel nav-runtime-params-panel">
           <div class="section-head">
             <button class="nav-runtime-toggle" type="button" @click="toggleNavRuntimeParamsPanel">
               <span class="collapse-trigger-label">
