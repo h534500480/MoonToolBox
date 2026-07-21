@@ -5,16 +5,16 @@ import { useRoute, useRouter } from "vue-router";
 
 import Nav3DViewer from "./Nav3DViewer.vue";
 import NavTopicPanelList from "./NavTopicPanelList.vue";
-import { createRosLiveAdapter } from "../lib/ros/liveAdapter";
-import { createMobileDetailPanel, type MobileNavTopicOption } from "../lib/ros/mobileCatalog";
+import { buildSharedRosKey, createSharedRosLiveAdapter, type RosLiveAdapter, type RosLiveConfig } from "../lib/ros/liveAdapter";
+import { createMobileDetailPanel, type MobileNavTopicOption, type MobileRosConnectionConfig } from "../lib/ros/mobileCatalog";
 import {
   addTopicToMobileMainView,
   hasMobileMainDisplay,
-  inspectMobileRosConnection,
+  inspectMobileRosConnection as inspectMobileRosConnectionState,
   loadMobileRosAppState,
   mobileRosAppState,
-  refreshMobileRuntimeParams,
-  refreshMobileTopics,
+  refreshMobileRuntimeParams as refreshMobileRuntimeParamsState,
+  refreshMobileTopics as refreshMobileTopicsState,
   removeTopicFromMobileMainView,
   updateMobileConnectionConfig,
   updateMobileMainDisplay,
@@ -52,8 +52,10 @@ const obstacleZoneStatus = ref<{ label: string; tone: "neutral" | "success" | "w
 const layerDrawerRef = ref<HTMLElement | null>(null);
 const layerDrawerHeightPx = ref(0);
 const layerDrawerDragTranslatePx = ref<number | null>(null);
+const connectionDraft = ref<MobileRosConnectionConfig>({ ...mobileRosAppState.connection });
+const layerInputDrafts = ref<Record<string, string>>({});
 
-let mobileStatusAdapter: ReturnType<typeof createRosLiveAdapter> | null = null;
+let mobileSharedAdapter: RosLiveAdapter | null = null;
 let mobileStatusUnsubscribes: Array<() => void> = [];
 let layerDrawerResizeObserver: ResizeObserver | null = null;
 let layerDrawerActivePointerId: number | null = null;
@@ -79,6 +81,9 @@ const connectionStateLabel = computed(() => {
   if (status === "partial") {
     return "部分可用";
   }
+  if (status === "error") {
+    return "检测失败";
+  }
   if (mobileRosAppState.inspectLoading) {
     return "检测中";
   }
@@ -92,6 +97,9 @@ const connectionStateTone = computed(() => {
   }
   if (status === "partial") {
     return "partial";
+  }
+  if (status === "error") {
+    return "danger";
   }
   return "idle";
 });
@@ -208,11 +216,93 @@ function resetMobileStatusCards() {
   obstacleZoneStatus.value = { label: "未知", tone: "neutral" };
 }
 
+function syncConnectionDraftFromState() {
+  connectionDraft.value = { ...mobileRosAppState.connection };
+}
+
+function layerInputDraftKey(topic: string, field: string) {
+  return `${topic}::${field}`;
+}
+
+function syncLayerInputDraft(topic: string, field: string, value: string) {
+  layerInputDrafts.value = {
+    ...layerInputDrafts.value,
+    [layerInputDraftKey(topic, field)]: value,
+  };
+}
+
+function removeLayerInputDraft(topic: string, field: string) {
+  const draftKey = layerInputDraftKey(topic, field);
+  if (!(draftKey in layerInputDrafts.value)) {
+    return;
+  }
+  const nextDrafts = { ...layerInputDrafts.value };
+  delete nextDrafts[draftKey];
+  layerInputDrafts.value = nextDrafts;
+}
+
+function layerInputValue(topic: string, field: string, fallback: string) {
+  return layerInputDrafts.value[layerInputDraftKey(topic, field)] ?? fallback;
+}
+
+function buildMobileSharedRosConfig(): RosLiveConfig {
+  return {
+    provider: connectionDraft.value.provider || mobileRosAppState.connection.provider,
+    url: (connectionDraft.value.url || mobileRosAppState.connection.url).trim(),
+    timeoutMs: Number(connectionDraft.value.timeoutMs || mobileRosAppState.connection.timeoutMs || "8000"),
+    autoReconnect: true,
+    reconnectBaseDelayMs: 2000,
+    reconnectMaxDelayMs: 30000,
+    reconnectMaxAttempts: 5,
+    sharedKey: buildSharedRosKey(
+      "ros-nav-test",
+      connectionDraft.value.provider || mobileRosAppState.connection.provider,
+      (connectionDraft.value.url || mobileRosAppState.connection.url).trim(),
+      Number(connectionDraft.value.timeoutMs || mobileRosAppState.connection.timeoutMs || "8000")
+    ),
+    adapterName: "ROS 测试工作台共享连接",
+  };
+}
+
+function createMobileSharedAdapter() {
+  const baseConfig = buildMobileSharedRosConfig();
+  return createSharedRosLiveAdapter({
+    ...baseConfig,
+    adapterName: "移动端工作台",
+    onError: (event) => {
+      appendRosLog(event.recoverable ? "warning" : "error", `${event.scope}: ${event.message}${event.detail ? ` (${event.detail})` : ""}`);
+    },
+  });
+}
+
+function rebuildMobileSharedAdapter() {
+  mobileSharedAdapter?.disconnect();
+  mobileSharedAdapter = null;
+  const url = mobileRosAppState.connection.url.trim();
+  if (!url || mobileRosAppState.connection.provider !== "rosbridge") {
+    return null;
+  }
+  mobileSharedAdapter = createMobileSharedAdapter();
+  return mobileSharedAdapter;
+}
+
+async function ensureMobileSharedAdapterConnected() {
+  const url = (connectionDraft.value.url || mobileRosAppState.connection.url).trim();
+  const provider = connectionDraft.value.provider || mobileRosAppState.connection.provider;
+  if (!url || provider !== "rosbridge") {
+    throw new Error("当前未配置可用的 rosbridge 地址。");
+  }
+  const adapter = mobileSharedAdapter ?? rebuildMobileSharedAdapter();
+  if (!adapter) {
+    throw new Error("当前未创建共享连接。");
+  }
+  await adapter.connect();
+  return adapter;
+}
+
 function teardownMobileStatusSubscriptions() {
   mobileStatusUnsubscribes.forEach((unsubscribe) => unsubscribe());
   mobileStatusUnsubscribes = [];
-  mobileStatusAdapter?.disconnect();
-  mobileStatusAdapter = null;
 }
 
 async function connectMobileStatusSubscriptions() {
@@ -224,23 +314,13 @@ async function connectMobileStatusSubscriptions() {
     return;
   }
 
-  mobileStatusAdapter = createRosLiveAdapter({
-    provider: mobileRosAppState.connection.provider,
-    url,
-    timeoutMs: Number(mobileRosAppState.connection.timeoutMs || "8000"),
-    adapterName: "移动端状态订阅",
-    onError: (event) => {
-      appendRosLog(event.recoverable ? "warning" : "error", `${event.scope}: ${event.message}${event.detail ? ` (${event.detail})` : ""}`);
-    },
-  });
-
   try {
-    await mobileStatusAdapter.connect();
+    const adapter = await ensureMobileSharedAdapterConnected();
     mobileStatusUnsubscribes = [
-      mobileStatusAdapter.subscribe("/ndt_status", "std_msgs/msg/UInt8", (message) => {
+      adapter.subscribe("/ndt_status", "std_msgs/msg/UInt8", (message) => {
         ndtHealthStatus.value = mapNdtStatus(message?.data);
       }),
-      mobileStatusAdapter.subscribe("/geneox_mid360_obstacle", "std_msgs/msg/UInt8", (message) => {
+      adapter.subscribe("/geneox_mid360_obstacle", "std_msgs/msg/UInt8", (message) => {
         obstacleZoneStatus.value = mapObstacleZoneStatus(message?.data);
       }),
     ];
@@ -258,11 +338,31 @@ function scrollFocusedFieldIntoView(event: FocusEvent) {
   if (!(field instanceof HTMLElement)) {
     return;
   }
-  const overlay = field.closest(".ros-mobile-config-modal, .ros-mobile-side-sheet, .ros-mobile-module-overlay, .ros-mobile-export-modal");
   window.setTimeout(() => {
-    field.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
-    if (overlay instanceof HTMLElement) {
-      overlay.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
+    const scrollContainer = field.closest(
+      ".ros-mobile-bottom-drawer-body, .ros-mobile-config-modal, .ros-mobile-side-sheet-scroll, .ros-mobile-topic-browser, .ros-mobile-topic-preview"
+    );
+    if (!(scrollContainer instanceof HTMLElement)) {
+      field.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+      return;
+    }
+    const containerRect = scrollContainer.getBoundingClientRect();
+    const fieldRect = field.getBoundingClientRect();
+    const keyboardInset = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--mobile-keyboard-inset")) || 0;
+    const safeTop = containerRect.top + 20;
+    const safeBottom = containerRect.bottom - Math.max(88, Math.min(containerRect.height * 0.38, keyboardInset + 36));
+    if (fieldRect.bottom > safeBottom) {
+      scrollContainer.scrollBy({
+        top: fieldRect.bottom - safeBottom,
+        behavior: "smooth",
+      });
+      return;
+    }
+    if (fieldRect.top < safeTop) {
+      scrollContainer.scrollBy({
+        top: fieldRect.top - safeTop,
+        behavior: "smooth",
+      });
     }
   }, 180);
 }
@@ -324,8 +424,49 @@ function appendRosLog(level: "info" | "warning" | "error", message: string) {
   rosLogs.value = [`[${level.toUpperCase()}] ${message}`, ...rosLogs.value].slice(0, 120);
 }
 
+async function inspectMobileRosConnection() {
+  try {
+    const adapter = await ensureMobileSharedAdapterConnected();
+    await inspectMobileRosConnectionState(adapter);
+  } catch (error) {
+    mobileRosAppState.inspectResult = {
+      provider: mobileRosAppState.connection.provider,
+      status: "error",
+      message: `连接 rosbridge 失败: ${(error as Error).message}`,
+      capabilities: [],
+      detected_hints: [],
+      topics_count: 0,
+    };
+  }
+}
+
+async function refreshMobileTopics() {
+  try {
+    const adapter = await ensureMobileSharedAdapterConnected();
+    await refreshMobileTopicsState(adapter);
+  } catch (error) {
+    mobileRosAppState.topicsLoading = false;
+    mobileRosAppState.topicsMessage = `读取话题失败: ${(error as Error).message}`;
+  }
+}
+
+async function refreshMobileRuntimeParams() {
+  try {
+    const adapter = await ensureMobileSharedAdapterConnected();
+    await refreshMobileRuntimeParamsState(adapter);
+  } catch (error) {
+    mobileRosAppState.runtimeLoading = false;
+    mobileRosAppState.runtimeMessage = `读取运行时参数失败: ${(error as Error).message}`;
+  }
+}
+
 function persistConnectionConfig() {
-  updateMobileConnectionConfig({ ...mobileRosAppState.connection });
+  const nextConnection = {
+    ...connectionDraft.value,
+    timeoutMs: normalizeTimeoutMs(connectionDraft.value.timeoutMs || "8000"),
+  };
+  updateMobileConnectionConfig(nextConnection);
+  syncConnectionDraftFromState();
   viewerReconnectToken.value += 1;
   appendRosLog("info", `已保存连接配置: ${mobileRosAppState.connection.url || "未配置地址"}`);
 }
@@ -338,12 +479,19 @@ function normalizeTimeoutMs(rawValue: string) {
   return `${Math.max(8000, Math.round(parsed))}`;
 }
 
-function updateConnectionField(key: keyof typeof mobileRosAppState.connection, value: string) {
+function updateConnectionDraftField(key: keyof MobileRosConnectionConfig, value: string) {
+  connectionDraft.value = {
+    ...connectionDraft.value,
+    [key]: value,
+  };
+}
+
+function updateConnectionField(key: keyof MobileRosConnectionConfig, value: string) {
   if (key === "timeoutMs") {
-    updateMobileConnectionConfig({ timeoutMs: normalizeTimeoutMs(value) });
+    updateConnectionDraftField(key, value);
     return;
   }
-  updateMobileConnectionConfig({ [key]: value } as Partial<typeof mobileRosAppState.connection>);
+  updateConnectionDraftField(key, value);
 }
 
 function openTopicDetail(topic: string) {
@@ -380,6 +528,58 @@ function updateMainDisplayMapOpacity(topic: string, rawValue: string) {
 function updateMainDisplayTfLabelSize(topic: string, rawValue: string) {
   const tfLabelSize = Math.min(2, Math.max(0.2, Number(rawValue || "0.5") || 0.5));
   updateMobileMainDisplay(topic, { tfLabelSize });
+}
+
+function updateLayerDraft(topic: string, field: string, value: string) {
+  syncLayerInputDraft(topic, field, value);
+}
+
+function commitLayerNumberInput(topic: string, field: "pointSize" | "hzLimit" | "mapOpacity" | "tfLabelSize", rawValue: string) {
+  if (!rawValue.trim()) {
+    const display = mobileRosAppState.mainDisplays.find((item) => item.topic === topic);
+    if (display) {
+      syncLayerInputDraft(topic, field, String(display[field] ?? ""));
+    }
+    return;
+  }
+  if (field === "pointSize") {
+    updateMainDisplayPointSize(topic, rawValue);
+    syncLayerInputDraft(topic, field, String(mobileRosAppState.mainDisplays.find((item) => item.topic === topic)?.pointSize ?? 0.08));
+    return;
+  }
+  if (field === "hzLimit") {
+    updateMainDisplayHzLimit(topic, rawValue);
+    syncLayerInputDraft(topic, field, String(mobileRosAppState.mainDisplays.find((item) => item.topic === topic)?.hzLimit ?? 0));
+    return;
+  }
+  if (field === "mapOpacity") {
+    updateMainDisplayMapOpacity(topic, rawValue);
+    syncLayerInputDraft(topic, field, String(mobileRosAppState.mainDisplays.find((item) => item.topic === topic)?.mapOpacity ?? 0.55));
+    return;
+  }
+  updateMainDisplayTfLabelSize(topic, rawValue);
+  syncLayerInputDraft(topic, field, String(mobileRosAppState.mainDisplays.find((item) => item.topic === topic)?.tfLabelSize ?? 0.5));
+}
+
+function commitConnectionDraftField(key: keyof MobileRosConnectionConfig) {
+  if (key !== "timeoutMs") {
+    return;
+  }
+  connectionDraft.value = {
+    ...connectionDraft.value,
+    timeoutMs: normalizeTimeoutMs(connectionDraft.value.timeoutMs || "8000"),
+  };
+}
+
+function handleTextFieldConfirm(event: KeyboardEvent) {
+  if (event.key !== "Enter") {
+    return;
+  }
+  event.preventDefault();
+  const target = event.target;
+  if (target instanceof HTMLElement) {
+    target.blur();
+  }
 }
 
 function updateMainDisplayTfShowNames(topic: string, checked: boolean) {
@@ -509,23 +709,9 @@ function yawToQuaternion(yaw: number) {
 }
 
 async function publishRosMessage(topicName: string, messageType: string, message: Record<string, unknown>) {
-  const adapter = createRosLiveAdapter({
-    provider: mobileRosAppState.connection.provider,
-    url: mobileRosAppState.connection.url.trim(),
-    timeoutMs: Number(mobileRosAppState.connection.timeoutMs || "8000"),
-    autoReconnect: false,
-    adapterName: `移动端下发 ${topicName}`,
-    onError: (event) => {
-      appendRosLog(event.recoverable ? "warning" : "error", `${event.scope}: ${event.message}${event.detail ? ` (${event.detail})` : ""}`);
-    },
-  });
-  try {
-    await adapter.connect();
-    adapter.publish(topicName, messageType, message);
-    appendRosLog("info", `消息下发成功: ${topicName}`);
-  } finally {
-    adapter.disconnect();
-  }
+  const adapter = await ensureMobileSharedAdapterConnected();
+  adapter.publish(topicName, messageType, message);
+  appendRosLog("info", `消息下发成功: ${topicName}`);
 }
 
 function nextRequestPlanId() {
@@ -676,6 +862,9 @@ watch(
   () => currentPage.value,
   (page) => {
     menuOpen.value = false;
+    if (page === "config") {
+      syncConnectionDraftFromState();
+    }
     if (page === "topics" && mobileRosAppState.topicOptions.length === 0) {
       void refreshMobileTopics();
     }
@@ -694,6 +883,7 @@ watch(
     viewerReconnectToken.value,
   ],
   () => {
+    rebuildMobileSharedAdapter();
     void connectMobileStatusSubscriptions();
   },
   { immediate: true }
@@ -701,6 +891,7 @@ watch(
 
 onMounted(() => {
   loadMobileRosAppState();
+  syncConnectionDraftFromState();
   document.addEventListener("focusin", scrollFocusedFieldIntoView);
   visualViewportCleanup = installVisualViewportKeyboardSync();
   void nextTick(() => {
@@ -716,6 +907,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   document.removeEventListener("focusin", scrollFocusedFieldIntoView);
   teardownMobileStatusSubscriptions();
+  mobileSharedAdapter?.disconnect();
+  mobileSharedAdapter = null;
   layerDrawerResizeObserver?.disconnect();
   layerDrawerResizeObserver = null;
   visualViewportCleanup?.();
@@ -866,26 +1059,56 @@ onBeforeUnmount(() => {
               <div class="grid-form ros-mobile-config-grid">
                 <label class="field">
                   <span class="field-label">接入方式</span>
-                  <select class="field-input" :value="mobileRosAppState.connection.provider" @change="updateConnectionField('provider', ($event.target as HTMLSelectElement).value)">
+                  <select class="field-input" :value="connectionDraft.provider" @change="updateConnectionField('provider', ($event.target as HTMLSelectElement).value)">
                     <option value="rosbridge">rosbridge websocket</option>
                     <option value="mock">mock</option>
                   </select>
                 </label>
                 <label class="field">
                   <span class="field-label">Bridge 地址</span>
-                  <input class="field-input" :value="mobileRosAppState.connection.url" placeholder="ws://10.10.15.64:9090" @input="updateConnectionField('url', ($event.target as HTMLInputElement).value)" />
+                  <input
+                    class="field-input"
+                    :value="connectionDraft.url"
+                    placeholder="ws://10.10.15.64:9090"
+                    @input="updateConnectionField('url', ($event.target as HTMLInputElement).value)"
+                    @blur="void 0"
+                    @keydown="handleTextFieldConfirm"
+                  />
                 </label>
                 <label class="field">
                   <span class="field-label">Topic 查询服务</span>
-                  <input class="field-input" :value="mobileRosAppState.connection.rosapiService" placeholder="/rosapi/topics_and_raw_types" @input="updateConnectionField('rosapiService', ($event.target as HTMLInputElement).value)" />
+                  <input
+                    class="field-input"
+                    :value="connectionDraft.rosapiService"
+                    placeholder="/rosapi/topics_and_raw_types"
+                    @input="updateConnectionField('rosapiService', ($event.target as HTMLInputElement).value)"
+                    @blur="void 0"
+                    @keydown="handleTextFieldConfirm"
+                  />
                 </label>
                 <label class="field">
                   <span class="field-label">固定坐标系</span>
-                  <input class="field-input" :value="mobileRosAppState.connection.fixedFrame" placeholder="map" @input="updateConnectionField('fixedFrame', ($event.target as HTMLInputElement).value)" />
+                  <input
+                    class="field-input"
+                    :value="connectionDraft.fixedFrame"
+                    placeholder="map"
+                    @input="updateConnectionField('fixedFrame', ($event.target as HTMLInputElement).value)"
+                    @blur="void 0"
+                    @keydown="handleTextFieldConfirm"
+                  />
                 </label>
                 <label class="field">
                   <span class="field-label">连接超时 ms</span>
-                  <input class="field-input" :value="mobileRosAppState.connection.timeoutMs" type="number" min="8000" step="1000" @input="updateConnectionField('timeoutMs', ($event.target as HTMLInputElement).value)" />
+                  <input
+                    class="field-input"
+                    :value="connectionDraft.timeoutMs"
+                    type="text"
+                    inputmode="numeric"
+                    placeholder="8000"
+                    @input="updateConnectionField('timeoutMs', ($event.target as HTMLInputElement).value)"
+                    @blur="commitConnectionDraftField('timeoutMs')"
+                    @keydown="handleTextFieldConfirm"
+                  />
                 </label>
               </div>
               <div class="ros-mobile-modal-foot">
@@ -1079,15 +1302,42 @@ onBeforeUnmount(() => {
                       </label>
                       <label v-if="display.kind === 'pointcloud'" class="nav-display-config-item">
                         <span class="kv-key">点大小</span>
-                        <input class="field-input nav-pointcloud-input" type="number" min="0.01" max="0.6" step="0.01" :value="display.pointSize || 0.08" @input="updateMainDisplayPointSize(display.topic, ($event.target as HTMLInputElement).value)" />
+                        <input
+                          class="field-input nav-pointcloud-input"
+                          type="text"
+                          inputmode="decimal"
+                          :value="layerInputValue(display.topic, 'pointSize', String(display.pointSize || 0.08))"
+                          @focus="updateLayerDraft(display.topic, 'pointSize', layerInputValue(display.topic, 'pointSize', String(display.pointSize || 0.08)))"
+                          @input="updateLayerDraft(display.topic, 'pointSize', ($event.target as HTMLInputElement).value)"
+                          @blur="commitLayerNumberInput(display.topic, 'pointSize', ($event.target as HTMLInputElement).value)"
+                          @keydown="handleTextFieldConfirm"
+                        />
                       </label>
                       <label v-if="display.kind === 'pointcloud'" class="nav-display-config-item">
                         <span class="kv-key">Hz 限制</span>
-                        <input class="field-input nav-pointcloud-input" type="number" min="0" max="60" step="1" :value="display.hzLimit || 0" @input="updateMainDisplayHzLimit(display.topic, ($event.target as HTMLInputElement).value)" />
+                        <input
+                          class="field-input nav-pointcloud-input"
+                          type="text"
+                          inputmode="numeric"
+                          :value="layerInputValue(display.topic, 'hzLimit', String(display.hzLimit || 0))"
+                          @focus="updateLayerDraft(display.topic, 'hzLimit', layerInputValue(display.topic, 'hzLimit', String(display.hzLimit || 0)))"
+                          @input="updateLayerDraft(display.topic, 'hzLimit', ($event.target as HTMLInputElement).value)"
+                          @blur="commitLayerNumberInput(display.topic, 'hzLimit', ($event.target as HTMLInputElement).value)"
+                          @keydown="handleTextFieldConfirm"
+                        />
                       </label>
                       <label v-if="display.kind === 'map'" class="nav-display-config-item">
                         <span class="kv-key">透明度</span>
-                        <input class="field-input nav-pointcloud-input" type="number" min="0.05" max="1" step="0.05" :value="display.mapOpacity || 0.55" @input="updateMainDisplayMapOpacity(display.topic, ($event.target as HTMLInputElement).value)" />
+                        <input
+                          class="field-input nav-pointcloud-input"
+                          type="text"
+                          inputmode="decimal"
+                          :value="layerInputValue(display.topic, 'mapOpacity', String(display.mapOpacity || 0.55))"
+                          @focus="updateLayerDraft(display.topic, 'mapOpacity', layerInputValue(display.topic, 'mapOpacity', String(display.mapOpacity || 0.55)))"
+                          @input="updateLayerDraft(display.topic, 'mapOpacity', ($event.target as HTMLInputElement).value)"
+                          @blur="commitLayerNumberInput(display.topic, 'mapOpacity', ($event.target as HTMLInputElement).value)"
+                          @keydown="handleTextFieldConfirm"
+                        />
                       </label>
                       <template v-if="display.kind === 'tf'">
                         <label class="nav-display-config-item nav-display-check-item">
@@ -1102,12 +1352,13 @@ onBeforeUnmount(() => {
                           <span class="kv-key">名字大小</span>
                           <input
                             class="field-input nav-pointcloud-input"
-                            type="number"
-                            min="0.2"
-                            max="2"
-                            step="0.1"
-                            :value="display.tfLabelSize ?? 0.5"
-                            @input="updateMainDisplayTfLabelSize(display.topic, ($event.target as HTMLInputElement).value)"
+                            type="text"
+                            inputmode="decimal"
+                            :value="layerInputValue(display.topic, 'tfLabelSize', String(display.tfLabelSize ?? 0.5))"
+                            @focus="updateLayerDraft(display.topic, 'tfLabelSize', layerInputValue(display.topic, 'tfLabelSize', String(display.tfLabelSize ?? 0.5)))"
+                            @input="updateLayerDraft(display.topic, 'tfLabelSize', ($event.target as HTMLInputElement).value)"
+                            @blur="commitLayerNumberInput(display.topic, 'tfLabelSize', ($event.target as HTMLInputElement).value)"
+                            @keydown="handleTextFieldConfirm"
                           />
                         </label>
                       </template>

@@ -3820,7 +3820,7 @@ select {
 .ros-mobile-viewer-bottom {
   position: absolute;
   left: 50%;
-  bottom: 74px;
+  bottom: clamp(78px, 10vh, 122px);
   z-index: 11;
   transform: translateX(-50%);
   display: grid;
@@ -4120,6 +4120,7 @@ select {
   touch-action: none;
   max-height: 82vh;
   overflow: visible;
+  overscroll-behavior: contain;
 }
 
 .ros-mobile-bottom-drawer.open {
@@ -4159,6 +4160,9 @@ select {
 .ros-mobile-bottom-drawer-body {
   max-height: calc(82vh - 52px);
   overflow: auto;
+  padding-bottom: calc(18px + var(--mobile-keyboard-inset));
+  scroll-padding-bottom: calc(18px + var(--mobile-keyboard-inset));
+  overscroll-behavior: contain;
 }
 
 .nav-viewer-canvas-host canvas {
@@ -4194,7 +4198,7 @@ select {
   height: 32px;
   padding: 0 10px;
   font-size: 12px;
-  scroll-margin-bottom: calc(44vh + var(--mobile-keyboard-inset));
+  scroll-margin-block: 18px calc(38vh + var(--mobile-keyboard-inset));
 }
 
 .ros-mobile-module-overlay .ros-mobile-module-card span {

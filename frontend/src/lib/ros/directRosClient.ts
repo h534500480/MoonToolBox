@@ -5,6 +5,7 @@
  */
 import * as ROSLIB from "roslib";
 
+import type { RosLiveAdapter } from "./liveAdapter";
 import type {
   RosDataSourceConfig,
   RosInspectionResponse,
@@ -48,6 +49,17 @@ function timeoutMsFromConfig(config: RosDataSourceConfig) {
 function serviceName(nodeName: string, suffix: string) {
   const normalized = nodeName.replace(/\/+$/g, "");
   return normalized ? `${normalized}/${suffix}` : `/${suffix}`;
+}
+
+type RosServiceCaller = <T>(service: string, serviceType: string, request: Record<string, unknown>, timeoutMs: number) => Promise<T>;
+
+interface DirectRosExecutionContext {
+  ros?: ROSLIB.Ros;
+  adapter?: RosLiveAdapter;
+}
+
+interface DirectRosCallOptions {
+  serviceTimeoutMs?: number;
 }
 
 async function withRosConnection<T>(config: RosDataSourceConfig, worker: (ros: ROSLIB.Ros) => Promise<T>): Promise<T> {
@@ -99,7 +111,35 @@ async function withRosConnection<T>(config: RosDataSourceConfig, worker: (ros: R
   }
 }
 
-async function callService<T>(ros: ROSLIB.Ros, service: string, serviceType: string, request: Record<string, unknown>, timeoutMs: number): Promise<T> {
+function createRosServiceCaller(ros: ROSLIB.Ros): RosServiceCaller {
+  return async <T>(service: string, serviceType: string, request: Record<string, unknown>, timeoutMs: number) => {
+    return await callRosService<T>(ros, service, serviceType, request, timeoutMs);
+  };
+}
+
+function createAdapterServiceCaller(adapter: RosLiveAdapter): RosServiceCaller {
+  return async <T>(service: string, serviceType: string, request: Record<string, unknown>, timeoutMs: number) => {
+    return await adapter.callService<T>(service, serviceType, request, timeoutMs);
+  };
+}
+
+async function withServiceCaller<T>(
+  config: RosDataSourceConfig,
+  context: DirectRosExecutionContext | undefined,
+  worker: (callService: RosServiceCaller) => Promise<T>
+): Promise<T> {
+  if (context?.adapter) {
+    return await worker(createAdapterServiceCaller(context.adapter));
+  }
+  if (context?.ros) {
+    return await worker(createRosServiceCaller(context.ros));
+  }
+  return await withRosConnection(config, async (ros) => {
+    return await worker(createRosServiceCaller(ros));
+  });
+}
+
+async function callRosService<T>(ros: ROSLIB.Ros, service: string, serviceType: string, request: Record<string, unknown>, timeoutMs: number): Promise<T> {
   return await new Promise<T>((resolve, reject) => {
     const client = new ROSLIB.Service({
       ros,
@@ -155,14 +195,14 @@ function decodeParameterValue(value: Record<string, unknown>) {
   return null;
 }
 
-async function listServices(ros: ROSLIB.Ros, timeoutMs: number) {
-  const response = await callService<{ services?: string[] }>(ros, "/rosapi/services", "rosapi_msgs/srv/Services", {}, timeoutMs);
+async function listServices(callService: RosServiceCaller, timeoutMs: number) {
+  const response = await callService<{ services?: string[] }>("/rosapi/services", "rosapi_msgs/srv/Services", {}, timeoutMs);
   return (response.services || []).map((item) => String(item).trim()).filter(Boolean);
 }
 
-async function resolveParameterService(ros: ROSLIB.Ros, nodeName: string, suffix: string, timeoutMs: number) {
+async function resolveParameterService(callService: RosServiceCaller, nodeName: string, suffix: string, timeoutMs: number) {
   const directName = serviceName(nodeName, suffix);
-  const services = await listServices(ros, timeoutMs);
+  const services = await listServices(callService, timeoutMs);
   if (services.includes(directName)) {
     return directName;
   }
@@ -176,10 +216,9 @@ async function resolveParameterService(ros: ROSLIB.Ros, nodeName: string, suffix
   throw new Error(`Service ${directName} does not exist`);
 }
 
-async function loadNodeRuntimeParams(ros: ROSLIB.Ros, nodeName: string, timeoutMs: number) {
-  const listService = await resolveParameterService(ros, nodeName, "list_parameters", timeoutMs);
+async function loadNodeRuntimeParams(callService: RosServiceCaller, nodeName: string, timeoutMs: number) {
+  const listService = await resolveParameterService(callService, nodeName, "list_parameters", timeoutMs);
   const listResponse = await callService<{ result?: { names?: string[] } }>(
-    ros,
     listService,
     "rcl_interfaces/srv/ListParameters",
     { prefixes: [], depth: 100 },
@@ -190,9 +229,8 @@ async function loadNodeRuntimeParams(ros: ROSLIB.Ros, nodeName: string, timeoutM
     return {};
   }
 
-  const getService = await resolveParameterService(ros, nodeName, "get_parameters", timeoutMs);
+  const getService = await resolveParameterService(callService, nodeName, "get_parameters", timeoutMs);
   const getResponse = await callService<{ values?: Array<Record<string, unknown>> }>(
-    ros,
     getService,
     "rcl_interfaces/srv/GetParameters",
     { names },
@@ -206,7 +244,7 @@ async function loadNodeRuntimeParams(ros: ROSLIB.Ros, nodeName: string, timeoutM
   return params;
 }
 
-export async function inspectRosDataSourceDirect(config: RosDataSourceConfig): Promise<RosInspectionResponse> {
+export async function inspectRosDataSourceDirect(config: RosDataSourceConfig, context?: DirectRosExecutionContext): Promise<RosInspectionResponse> {
   if ((config.provider || "rosbridge").trim().toLowerCase() !== "rosbridge") {
     return {
       provider: config.provider,
@@ -219,15 +257,19 @@ export async function inspectRosDataSourceDirect(config: RosDataSourceConfig): P
   }
 
   try {
-    return await withRosConnection(config, async (ros) => {
-      const topics = await listRosTopicsDirect(config, ros);
+    return await withServiceCaller(config, context, async (callService) => {
+      const timeoutMs = timeoutMsFromConfig(config);
+      await callService("/rosapi/get_time", "rosapi_msgs/srv/GetTime", {}, Math.min(timeoutMs, 10000));
       return {
         provider: "rosbridge",
-        status: topics.status,
-        message: topics.status === "success" ? "rosbridge 可用，话题列表读取成功。" : topics.message,
-        capabilities: ["inspect", "list_topics"],
-        detected_hints: [`WebSocket 连接成功: ${(config.options.url || "").trim()}`],
-        topics_count: topics.topics.length,
+        status: "success",
+        message: "rosbridge 与 rosapi 轻量探测成功。",
+        capabilities: ["inspect", "list_topics", "call_service"],
+        detected_hints: [
+          `WebSocket 连接成功: ${(config.options.url || "").trim()}`,
+          "已通过 /rosapi/get_time 完成轻量服务探测。",
+        ],
+        topics_count: 0,
       };
     });
   } catch (error) {
@@ -245,13 +287,16 @@ export async function inspectRosDataSourceDirect(config: RosDataSourceConfig): P
   }
 }
 
-export async function listRosTopicsDirect(config: RosDataSourceConfig, existingRos?: ROSLIB.Ros): Promise<RosTopicListResponse> {
-  const executor = async (ros: ROSLIB.Ros) => {
-    const timeoutMs = timeoutMsFromConfig(config);
+export async function listRosTopicsDirect(
+  config: RosDataSourceConfig,
+  context?: DirectRosExecutionContext,
+  options?: DirectRosCallOptions
+): Promise<RosTopicListResponse> {
+  const executor = async (callService: RosServiceCaller) => {
+    const timeoutMs = Math.max(timeoutMsFromConfig(config), options?.serviceTimeoutMs ?? 0);
     const serviceNameRaw = (config.options.rosapi_service || "/rosapi/topics_and_raw_types").trim() || "/rosapi/topics_and_raw_types";
     try {
       const response = await callService<{ topics?: string[]; types?: string[] }>(
-        ros,
         serviceNameRaw,
         "rosapi_msgs/srv/TopicsAndRawTypes",
         {},
@@ -266,7 +311,7 @@ export async function listRosTopicsDirect(config: RosDataSourceConfig, existingR
         topics: topics.map((topic, index) => ({ name: String(topic), type: String(types[index] || "") })),
       } satisfies RosTopicListResponse;
     } catch {
-      const fallback = await callService<{ topics?: string[] }>(ros, "/rosapi/topics", "rosapi_msgs/srv/Topics", {}, timeoutMs);
+      const fallback = await callService<{ topics?: string[] }>("/rosapi/topics", "rosapi_msgs/srv/Topics", {}, timeoutMs);
       const topics = fallback.topics || [];
       return {
         provider: "rosbridge",
@@ -277,13 +322,10 @@ export async function listRosTopicsDirect(config: RosDataSourceConfig, existingR
     }
   };
 
-  if (existingRos) {
-    return await executor(existingRos);
-  }
-  return await withRosConnection(config, executor);
+  return await withServiceCaller(config, context, executor);
 }
 
-export async function listRosRuntimeParamsDirect(config: RosDataSourceConfig): Promise<RosRuntimeParamsResponse> {
+export async function listRosRuntimeParamsDirect(config: RosDataSourceConfig, context?: DirectRosExecutionContext): Promise<RosRuntimeParamsResponse> {
   if ((config.provider || "rosbridge").trim().toLowerCase() !== "rosbridge") {
     return {
       provider: config.provider,
@@ -295,7 +337,7 @@ export async function listRosRuntimeParamsDirect(config: RosDataSourceConfig): P
     };
   }
 
-  return await withRosConnection(config, async (ros) => {
+  return await withServiceCaller(config, context, async (callService) => {
     const timeoutMs = timeoutMsFromConfig(config);
     const groups: RosRuntimeParamGroup[] = [];
     const failedNodes: string[] = [];
@@ -306,7 +348,7 @@ export async function listRosRuntimeParamsDirect(config: RosDataSourceConfig): P
         const nodes: RosRuntimeParamNode[] = [];
         for (const nodeName of nodeNames) {
           try {
-            const params = await loadNodeRuntimeParams(ros, nodeName, timeoutMs);
+            const params = await loadNodeRuntimeParams(callService, nodeName, timeoutMs);
             nodes.push({ node: nodeName, params, error: "" });
           } catch (error) {
             const message = (error as Error).message;

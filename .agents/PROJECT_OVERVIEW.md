@@ -60,6 +60,8 @@
 ## 依赖关系与数据流
 
 - 前端通过 `/api` 调用后端。
+- Android / 移动端 ROS 工作台优先直接连接 rosbridge WebSocket，不依赖本机 FastAPI 后端读取 ROS 数据；页面主视图、状态卡、话题浏览、运行参数读取和消息下发共用 `frontend/src/lib/ros/liveAdapter.ts` 的共享连接。
+- `frontend/src/lib/ros/directRosClient.ts` 保留 rosapi 直连兜底能力；当传入共享 `RosLiveAdapter` 时，话题列表、轻量探测和参数读取复用现有 WebSocket。
 - 后端根据工具类型调用：
   - `backend/app/services/*.py`
   - `cpp/build/*.exe`
@@ -91,3 +93,4 @@
 2. 系统 `python` 版本不一定满足要求，但项目自己的 `.venv` 或发行版运行时可能已经满足。
 3. `.codexignore` 默认忽略构建产物与本机数据；只在确认运行条件时才有必要查看这些目录。
 4. Android 目录位于 `frontend/android/`，但它依赖前端构建结果与局域网后端，不代表项目只能在 Android 上验证。
+5. 移动端 rosbridge 不可达时，共享连接会有限自动重连并在达到上限后暂停；排查连接问题时优先查看 `RosNavAppPage.vue` 的共享连接配置和 `liveAdapter.ts` 的重连参数。

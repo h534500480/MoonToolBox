@@ -5,6 +5,7 @@
 import { reactive } from "vue";
 
 import type { RosDataSourceConfig, RosInspectionResponse, RosRuntimeParamsResponse } from "../../types";
+import type { RosLiveAdapter } from "./liveAdapter";
 import {
   MOBILE_ROS_STORAGE_KEY,
   defaultMobileRosConnectionConfig,
@@ -35,13 +36,14 @@ export const mobileRosAppState = reactive({
   runtimeMessage: "",
 });
 
-function buildDataSourceConfig(): RosDataSourceConfig {
+function buildDataSourceConfig(timeoutOverrideMs?: number): RosDataSourceConfig {
+  const baseTimeoutMs = mobileRosAppState.connection.timeoutMs || "8000";
   return {
     provider: mobileRosAppState.connection.provider || "rosbridge",
     options: {
       url: mobileRosAppState.connection.url.trim(),
       rosapi_service: mobileRosAppState.connection.rosapiService.trim() || "/rosapi/topics_and_raw_types",
-      timeout_ms: mobileRosAppState.connection.timeoutMs || "8000",
+      timeout_ms: timeoutOverrideMs ? String(timeoutOverrideMs) : baseTimeoutMs,
     },
   };
 }
@@ -109,20 +111,20 @@ export function updateMobileMainDisplay(topic: string, patch: Partial<NavViewerD
   persistMobileRosAppState();
 }
 
-export async function inspectMobileRosConnection() {
+export async function inspectMobileRosConnection(adapter?: RosLiveAdapter) {
   mobileRosAppState.inspectLoading = true;
   try {
-    mobileRosAppState.inspectResult = await inspectRosDataSourceDirect(buildDataSourceConfig());
+    mobileRosAppState.inspectResult = await inspectRosDataSourceDirect(buildDataSourceConfig(), adapter ? { adapter } : undefined);
     mobileRosAppState.runtimeMessage = mobileRosAppState.inspectResult.message;
   } finally {
     mobileRosAppState.inspectLoading = false;
   }
 }
 
-export async function refreshMobileTopics() {
+export async function refreshMobileTopics(adapter?: RosLiveAdapter) {
   mobileRosAppState.topicsLoading = true;
   try {
-    const response = await listRosTopicsDirect(buildDataSourceConfig());
+    const response = await listRosTopicsDirect(buildDataSourceConfig(15000), adapter ? { adapter } : undefined, { serviceTimeoutMs: 15000 });
     const merged = mergeMobileTopicOptions(response.topics.map((topic) => ({
       key: topic.name,
       label: topic.name.split("/").filter(Boolean).pop() || topic.name,
@@ -138,10 +140,10 @@ export async function refreshMobileTopics() {
   }
 }
 
-export async function refreshMobileRuntimeParams() {
+export async function refreshMobileRuntimeParams(adapter?: RosLiveAdapter) {
   mobileRosAppState.runtimeLoading = true;
   try {
-    mobileRosAppState.runtimeParams = await listRosRuntimeParamsDirect(buildDataSourceConfig());
+    mobileRosAppState.runtimeParams = await listRosRuntimeParamsDirect(buildDataSourceConfig(), adapter ? { adapter } : undefined);
     mobileRosAppState.runtimeMessage = mobileRosAppState.runtimeParams.message;
   } catch (error) {
     mobileRosAppState.runtimeMessage = `读取运行时参数失败: ${(error as Error).message}`;

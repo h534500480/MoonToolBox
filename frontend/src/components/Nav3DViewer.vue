@@ -5,7 +5,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
 import type { NavViewerDisplay } from "../lib/ros/displayRegistry";
-import { createSharedRosLiveAdapter, type RosLiveConfig } from "../lib/ros/liveAdapter";
+import { buildSharedRosKey, createSharedRosLiveAdapter, type RosLiveConfig } from "../lib/ros/liveAdapter";
 
 interface NavViewerExpose {
   focusOnNdtPose: () => { ok: boolean; message: string };
@@ -1752,7 +1752,7 @@ function buildSharedRosConfig(): RosLiveConfig {
     provider: props.provider,
     url: props.url,
     timeoutMs: props.timeoutMs,
-    sharedKey: `ros-nav-test:${props.provider}:${props.url}:${props.timeoutMs}`,
+    sharedKey: buildSharedRosKey("ros-nav-test", props.provider, props.url, props.timeoutMs),
     adapterName: "ROS 测试工作台共享连接",
   };
 }

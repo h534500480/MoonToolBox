@@ -17,6 +17,7 @@ export interface RosLiveConfig {
   autoReconnect?: boolean;
   reconnectBaseDelayMs?: number;
   reconnectMaxDelayMs?: number;
+  reconnectMaxAttempts?: number;
   adapterName?: string;
   sharedKey?: string;
   onStatusChange?: (snapshot: RosConnectionSnapshot) => void;
@@ -46,6 +47,7 @@ export interface RosLiveAdapter {
   requestReconnect(reason?: string): Promise<void>;
   subscribe(topicName: string, messageType: string, handler: RosMessageHandler): () => void;
   publish(topicName: string, messageType: string, message: Record<string, unknown>): void;
+  callService<T>(serviceName: string, serviceType: string, request: Record<string, unknown>, timeoutMs?: number): Promise<T>;
   getConnectionSnapshot(): RosConnectionSnapshot;
 }
 
@@ -133,6 +135,9 @@ class SharedRosSession {
         this.subscribe(clientId, topicName, messageType, handler),
       publish: (topicName: string, messageType: string, message: Record<string, unknown>) => {
         this.baseAdapter.publish(topicName, messageType, message);
+      },
+      callService: async <T>(serviceName: string, serviceType: string, request: Record<string, unknown>, timeoutMs?: number) => {
+        return await this.baseAdapter.callService<T>(serviceName, serviceType, request, timeoutMs);
       },
       getConnectionSnapshot: () => this.baseAdapter.getConnectionSnapshot(),
     };
@@ -328,6 +333,10 @@ class MockRosLiveAdapter implements RosLiveAdapter {
 
   publish(): void {}
 
+  async callService<T>(): Promise<T> {
+    return Promise.reject(new Error("mock 数据源不支持服务调用"));
+  }
+
   getConnectionSnapshot(): RosConnectionSnapshot {
     return {
       connected: true,
@@ -358,6 +367,7 @@ class RosbridgeLiveAdapter implements RosLiveAdapter {
   private reconnectAttempt = 0;
   private readonly subscriptions = new Map<string, SubscriptionRecord>();
   private subscriptionSequence = 0;
+  private connectionSequence = 0;
 
   constructor(config: RosLiveConfig) {
     this.config = config;
@@ -445,6 +455,33 @@ class RosbridgeLiveAdapter implements RosLiveAdapter {
     topic.publish(message as any);
   }
 
+  async callService<T>(serviceName: string, serviceType: string, request: Record<string, unknown>, timeoutMs?: number): Promise<T> {
+    if (!this.ros || !this.connected) {
+      throw new Error("rosbridge 尚未连接");
+    }
+    const service = new ROSLIB.Service({
+      ros: this.ros,
+      name: serviceName,
+      serviceType,
+    });
+    return await new Promise<T>((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        reject(new Error(`调用服务超时: ${serviceName}`));
+      }, Math.max(1000, timeoutMs ?? this.config.timeoutMs ?? ROSBRIDGE_HANDSHAKE_TIMEOUT_MIN_MS));
+      service.callService(
+        request as never,
+        (response) => {
+          window.clearTimeout(timer);
+          resolve(response as T);
+        },
+        (error) => {
+          window.clearTimeout(timer);
+          reject(new Error(typeof error === "string" ? error : `调用服务失败: ${serviceName}`));
+        }
+      );
+    });
+  }
+
   getConnectionSnapshot(): RosConnectionSnapshot {
     return {
       connected: this.connected,
@@ -462,18 +499,27 @@ class RosbridgeLiveAdapter implements RosLiveAdapter {
     }
 
     this.closeRosSocket();
-    this.ros = new ROSLIB.Ros();
+    const connectionId = this.connectionSequence + 1;
+    this.connectionSequence = connectionId;
+    const ros = new ROSLIB.Ros();
+    this.ros = ros;
 
     return new Promise<void>((resolve, reject) => {
       const timeoutMs = Math.max(ROSBRIDGE_HANDSHAKE_TIMEOUT_MIN_MS, this.config.timeoutMs ?? ROSBRIDGE_HANDSHAKE_TIMEOUT_MIN_MS);
       const timer = window.setTimeout(() => {
-        this.message = `连接超时: ${this.config.url}`;
-        this.connected = false;
-        this.reconnecting = false;
-        this.connectPromise = null;
-        this.emitStatus();
-        reject(new Error(this.message));
-        this.scheduleReconnect("连接超时");
+        if (!this.isActiveRos(ros, connectionId)) {
+          return;
+        }
+        finish(() => {
+          this.message = `连接超时: ${this.config.url}`;
+          this.connected = false;
+          this.reconnecting = false;
+          this.connectPromise = null;
+          this.closeActiveRosSocket(ros, connectionId);
+          this.emitStatus();
+          reject(new Error(this.message));
+          this.scheduleReconnect("连接超时");
+        });
       }, timeoutMs);
       let settled = false;
 
@@ -486,7 +532,10 @@ class RosbridgeLiveAdapter implements RosLiveAdapter {
         callback();
       };
 
-      this.ros?.once("connection", () => {
+      ros.once("connection", () => {
+        if (!this.isActiveRos(ros, connectionId)) {
+          return;
+        }
         finish(() => {
           this.connected = true;
           this.reconnecting = false;
@@ -499,7 +548,10 @@ class RosbridgeLiveAdapter implements RosLiveAdapter {
         });
       });
 
-      this.ros?.on("error", (error: unknown) => {
+      ros.on("error", (error: unknown) => {
+        if (!this.isActiveRos(ros, connectionId)) {
+          return;
+        }
         const detail = this.errorDetail(error);
         if (!settled) {
           finish(() => {
@@ -507,6 +559,7 @@ class RosbridgeLiveAdapter implements RosLiveAdapter {
             this.reconnecting = false;
             this.message = `连接失败: ${this.config.url}`;
             this.connectPromise = null;
+            this.closeActiveRosSocket(ros, connectionId);
             this.emitStatus();
             reject(new Error(detail ? `${this.message} (${detail})` : this.message));
             this.scheduleReconnect("首次连接失败", detail);
@@ -525,7 +578,10 @@ class RosbridgeLiveAdapter implements RosLiveAdapter {
         });
       });
 
-      this.ros?.on("close", () => {
+      ros.on("close", () => {
+        if (!this.isActiveRos(ros, connectionId)) {
+          return;
+        }
         this.connected = false;
         this.detachAllTopicHandles();
         if (this.manualDisconnect) {
@@ -548,12 +604,27 @@ class RosbridgeLiveAdapter implements RosLiveAdapter {
         this.scheduleReconnect("连接已断开");
       });
 
-      this.ros?.connect(this.config.url);
+      ros.connect(this.config.url);
     });
   }
 
   private scheduleReconnect(reason: string, detail = "") {
     if (this.manualDisconnect || this.config.autoReconnect === false || this.reconnectTimer) {
+      return;
+    }
+    const maxAttempts = this.config.reconnectMaxAttempts;
+    if (Number.isFinite(maxAttempts) && maxAttempts !== undefined && this.reconnectAttempt >= maxAttempts) {
+      this.reconnecting = false;
+      this.message = `连接失败，已暂停自动重连（已尝试 ${this.reconnectAttempt} 次）`;
+      this.closeRosSocket();
+      this.emitStatus();
+      this.reportError({
+        scope: this.adapterScope(),
+        message: "自动重连已暂停",
+        detail: detail || this.config.url,
+        recoverable: true,
+        attempt: this.reconnectAttempt,
+      });
       return;
     }
     this.reconnectAttempt += 1;
@@ -625,12 +696,31 @@ class RosbridgeLiveAdapter implements RosLiveAdapter {
     if (!this.ros) {
       return;
     }
+    const ros = this.ros;
     try {
-      this.ros.close();
+      ros.close();
     } catch {
       // 保持断开流程可继续，不因重复关闭中断。
     }
     this.ros = null;
+  }
+
+  private closeActiveRosSocket(ros: ROSLIB.Ros, connectionId: number) {
+    if (!this.isActiveRos(ros, connectionId)) {
+      return;
+    }
+    try {
+      ros.close();
+    } catch {
+      // 连接失败路径中关闭 socket 失败时继续进入重试控制。
+    }
+    if (this.ros === ros) {
+      this.ros = null;
+    }
+  }
+
+  private isActiveRos(ros: ROSLIB.Ros, connectionId: number) {
+    return this.ros === ros && this.connectionSequence === connectionId;
   }
 
   private clearReconnectTimer() {
@@ -680,6 +770,10 @@ export function createSharedRosLiveAdapter(config: RosLiveConfig): RosLiveAdapte
   const nextSession = new SharedRosSession(sharedKey, config);
   sharedRosSessionMap.set(sharedKey, nextSession);
   return nextSession.createClient(config);
+}
+
+export function buildSharedRosKey(prefix: string, provider: string, url: string, timeoutMs?: number) {
+  return `${prefix}:${provider}:${url}:${timeoutMs ?? ""}`;
 }
 
 export function getSharedRosSessionStats(sharedKey: string): SharedRosSessionStats {

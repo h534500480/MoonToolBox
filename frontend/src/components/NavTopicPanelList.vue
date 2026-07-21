@@ -3,7 +3,7 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 
 import { saveNavRecording } from "../api/client";
-import { createSharedRosLiveAdapter, type RosLiveConfig } from "../lib/ros/liveAdapter";
+import { buildSharedRosKey, createSharedRosLiveAdapter, type RosLiveConfig } from "../lib/ros/liveAdapter";
 
 interface NavPanelItem {
   id: string;
@@ -161,7 +161,7 @@ function buildSharedRosConfig(): RosLiveConfig {
     provider: props.provider,
     url: props.url,
     timeoutMs: props.timeoutMs,
-    sharedKey: `ros-nav-test:${props.provider}:${props.url}:${props.timeoutMs}`,
+    sharedKey: buildSharedRosKey("ros-nav-test", props.provider, props.url, props.timeoutMs),
     adapterName: "ROS 测试工作台共享连接",
   };
 }
