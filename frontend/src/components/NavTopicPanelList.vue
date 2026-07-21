@@ -1274,6 +1274,20 @@ function handlePanelMessage(panelId: string, message: any) {
   }
 }
 
+function subscribeActivePanels() {
+  activePanels.value.forEach((panel) => {
+    if (unsubscribeMap.has(panel.id)) {
+      return;
+    }
+    const unsubscribe = adapter?.subscribe(panel.topic, panel.messageType, (message) => {
+      handlePanelMessage(panel.id, message);
+    });
+    if (unsubscribe) {
+      unsubscribeMap.set(panel.id, unsubscribe);
+    }
+  });
+}
+
 async function reconnect() {
   reconnectTimer = undefined;
   unsubscribeMap.forEach((unsubscribe) => unsubscribe());
@@ -1293,17 +1307,7 @@ async function reconnect() {
       if (!snapshot.connected) {
         return;
       }
-      activePanels.value.forEach((panel) => {
-        if (unsubscribeMap.has(panel.id)) {
-          return;
-        }
-        const unsubscribe = adapter?.subscribe(panel.topic, panel.messageType, (message) => {
-          handlePanelMessage(panel.id, message);
-        });
-        if (unsubscribe) {
-          unsubscribeMap.set(panel.id, unsubscribe);
-        }
-      });
+      subscribeActivePanels();
     },
     onError: (event) => {
       emitRosLog(
@@ -1324,14 +1328,7 @@ async function reconnect() {
     const snapshot = adapter.getConnectionSnapshot();
     isAdapterConnected.value = snapshot.connected;
     adapterState.value = snapshot.message;
-    activePanels.value.forEach((panel) => {
-      const unsubscribe = adapter?.subscribe(panel.topic, panel.messageType, (message) => {
-        handlePanelMessage(panel.id, message);
-      });
-      if (unsubscribe) {
-        unsubscribeMap.set(panel.id, unsubscribe);
-      }
-    });
+    subscribeActivePanels();
     emitRosLog("info", `${panelShellName()}连接成功，当前活动窗口: ${activePanelLabels()}`);
   } catch (error) {
     isAdapterConnected.value = false;

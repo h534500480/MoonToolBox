@@ -1,11 +1,14 @@
 from pathlib import Path
 import subprocess
 from datetime import datetime
+import json
 from typing import Dict, List, Tuple
 
+import yaml
 from fastapi import HTTPException
 
 from app.models import ToolRunResponse
+from app.services.global_relocalization import export_reviewed_database, load_candidates
 
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -14,6 +17,7 @@ PCD_MAP_CLI = CPP_BUILD_DIR / "pcd_map_cli.exe"
 PCD_TILE_CLI = CPP_BUILD_DIR / "pcd_tile_cli.exe"
 NETWORK_SCAN_CLI = CPP_BUILD_DIR / "network_scan_cli.exe"
 COSTMAP_CLI = CPP_BUILD_DIR / "costmap_cli.exe"
+GLOBAL_RELOCALIZATION_CLI = CPP_BUILD_DIR / "global_relocalization_cli.exe"
 
 
 def _parse_key_value_output(lines: List[str]) -> Dict[str, str]:
@@ -47,6 +51,71 @@ def _run_command(tool_key: str, command: List[str]) -> Tuple[subprocess.Complete
         *[f"[STDERR] {line}" for line in stderr_lines],
     ]
     return completed, logs, stdout_lines, parsed
+
+
+def _write_runtime_global_reloc_config(output_dir: str, config: Dict) -> str:
+    if not config:
+        return ""
+    path = Path(output_dir) / "_runtime_global_relocalization_config.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    return str(path)
+
+
+def _global_reloc_option_args(values: Dict[str, str]) -> List[str]:
+    option_map = {
+        "target_base_positions": "--target-base-positions",
+        "max_base_samples": "--max-base-samples",
+        "min_candidate_distance_m": "--min-candidate-distance",
+        "yaw_step_deg": "--yaw-step-deg",
+    }
+    args: List[str] = []
+    for field_key, cli_flag in option_map.items():
+        raw_value = values.get(field_key, "").strip()
+        if raw_value:
+            args.extend([cli_flag, raw_value])
+    return args
+
+
+def _run_global_reloc_command(command: List[str]) -> ToolRunResponse:
+    completed, logs, _, parsed = _run_command("global_relocalization_candidates", command)
+    if completed.returncode != 0:
+        return ToolRunResponse(tool="global_relocalization_candidates", status="error", summary="全局重定位候选点生成失败。", logs=logs)
+
+    summary = (
+        f"C++ 候选点/描述子生成完成：候选={parsed.get('accepted_candidates', '0')} | "
+        f"rejected={parsed.get('rejected_candidates', '0')} | rays={parsed.get('ray_count', '0')} | "
+        f"输出={parsed.get('candidates_csv_path', 'unknown')}"
+    )
+    data = {
+        "metadata_path": parsed.get("metadata_path", ""),
+        "candidates_csv_path": parsed.get("candidates_csv_path", ""),
+        "candidates_npy_path": parsed.get("candidates_npy_path", ""),
+        "descriptors_npy_path": parsed.get("descriptors_npy_path", ""),
+        "ring_keys_npy_path": parsed.get("ring_keys_npy_path", ""),
+        "sector_keys_npy_path": parsed.get("sector_keys_npy_path", ""),
+        "preview_pcd_path": parsed.get("preview_pcd_path", ""),
+        "input_points": parsed.get("input_points", ""),
+        "downsampled_points": parsed.get("downsampled_points", ""),
+        "occupied_voxels": parsed.get("occupied_voxels", ""),
+        "supported_ground_cells": parsed.get("supported_ground_cells", ""),
+        "accepted_base_positions": parsed.get("accepted_base_positions", ""),
+        "accepted_candidates": parsed.get("accepted_candidates", ""),
+        "manual_additions": parsed.get("manual_additions", ""),
+        "manual_deletions": parsed.get("manual_deletions", ""),
+        "rejected_candidates": parsed.get("rejected_candidates", ""),
+        "ray_count": parsed.get("ray_count", ""),
+        "generated_at": datetime.utcnow().isoformat(),
+    }
+    return ToolRunResponse(tool="global_relocalization_candidates", status="success", summary=summary, logs=logs, data=data)
+
+
+def _reviewed_candidate_count(path: Path) -> int:
+    """读取 reviewed/candidates 文件的候选数量，用于避免空审核文件覆盖自动生成入口。"""
+    try:
+        return int(load_candidates(str(path), max_candidates=500000).get("candidate_count", 0))
+    except Exception:
+        return 0
 
 
 def run_pcd_map(values: Dict[str, str]) -> ToolRunResponse:
@@ -161,6 +230,105 @@ def run_pcd_tile(values: Dict[str, str]) -> ToolRunResponse:
         f"tile_count={parsed.get('tile_count', '0')}"
     )
     return ToolRunResponse(tool="pcd_tile", status="success", summary=summary, logs=logs)
+
+
+def run_global_relocalization_candidates(values: Dict[str, str]) -> ToolRunResponse:
+    if not GLOBAL_RELOCALIZATION_CLI.exists():
+        raise HTTPException(status_code=500, detail=f"C++ CLI not found: {GLOBAL_RELOCALIZATION_CLI}")
+
+    output_dir = values.get("output_dir", "").strip() or str(ROOT_DIR / "output_global_relocalization")
+    config = {}
+    if values.get("config_json", "").strip():
+        try:
+            config = json.loads(values["config_json"])
+        except json.JSONDecodeError:
+            config = {}
+    runtime_config_path = _write_runtime_global_reloc_config(output_dir, config)
+    config_path = values.get("config_path", "").strip() or runtime_config_path
+    input_pcd = values.get("input_pcd", "").strip()
+
+    final_candidates_json = values.get("final_candidates_json", "").strip()
+    if final_candidates_json:
+        try:
+            final_candidates = json.loads(final_candidates_json)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="最终候选点 JSON 格式错误") from exc
+        if not isinstance(final_candidates, list):
+            raise HTTPException(status_code=400, detail="最终候选点 JSON 必须是数组")
+        if not input_pcd:
+            raise HTTPException(status_code=400, detail="计算 descriptors.npy/ring_keys.npy 需要输入 PCD")
+        input_path = Path(input_pcd)
+        if not input_path.exists():
+            raise HTTPException(status_code=400, detail=f"输入 PCD 不存在: {input_pcd}")
+        exported = export_reviewed_database({
+            "output_dir": output_dir,
+            "config": config,
+            "candidates": final_candidates,
+        })
+        command = [
+            str(GLOBAL_RELOCALIZATION_CLI),
+            "--map",
+            str(input_path),
+            "--output",
+            output_dir,
+            "--candidates",
+            exported["reviewed_csv_path"],
+        ]
+        if config_path:
+            command.extend(["--config", config_path])
+        command.extend(_global_reloc_option_args(values))
+        return _run_global_reloc_command(command)
+
+    candidate_file = values.get("candidate_file", "").strip()
+    candidate_path = Path(candidate_file) if candidate_file else None
+    if candidate_path and candidate_path.exists() and candidate_path.name.lower() == "reviewed_candidates.csv":
+        reviewed_count = _reviewed_candidate_count(candidate_path)
+        if reviewed_count <= 0:
+            candidate_path = None
+        else:
+            values["active_candidates"] = str(reviewed_count)
+    if candidate_path and candidate_path.exists() and candidate_path.name.lower() == "reviewed_candidates.csv":
+        if not input_pcd:
+            raise HTTPException(status_code=400, detail="计算 descriptors.npy/ring_keys.npy 需要输入 PCD")
+        input_path = Path(input_pcd)
+        if not input_path.exists():
+            raise HTTPException(status_code=400, detail=f"输入 PCD 不存在: {input_pcd}")
+        command = [
+            str(GLOBAL_RELOCALIZATION_CLI),
+            "--map",
+            str(input_path),
+            "--output",
+            output_dir,
+            "--candidates",
+            str(candidate_path),
+        ]
+        if config_path:
+            command.extend(["--config", config_path])
+        command.extend(_global_reloc_option_args(values))
+        return _run_global_reloc_command(command)
+
+    if not input_pcd:
+        raise HTTPException(status_code=400, detail="缺少输入 PCD")
+    input_path = Path(input_pcd)
+    if not input_path.exists():
+        raise HTTPException(status_code=400, detail=f"输入 PCD 不存在: {input_pcd}")
+
+    command = [
+        str(GLOBAL_RELOCALIZATION_CLI),
+        "--map",
+        str(input_path),
+        "--output",
+        output_dir,
+    ]
+
+    if config_path:
+        command.extend(["--config", config_path])
+    manual_file = values.get("manual_file", "").strip()
+    if manual_file:
+        command.extend(["--manual", manual_file])
+
+    command.extend(_global_reloc_option_args(values))
+    return _run_global_reloc_command(command)
 
 
 def run_network_scan(values: Dict[str, str]) -> ToolRunResponse:

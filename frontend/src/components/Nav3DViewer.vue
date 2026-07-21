@@ -30,6 +30,7 @@ const emit = defineEmits<{
 const mountRef = ref<HTMLDivElement | null>(null);
 const connectionLabel = ref("未连接");
 const sceneStatus = ref("等待显示项");
+const baseLinkHudText = ref("等待 rosbridge 连接");
 
 interface NavPoseAnchor {
   topic: string;
@@ -128,6 +129,12 @@ const interactionHintText = computed(() => {
     return "导航目标模式: 左键点击地图并拖动方向，松开后下发 /nav2_goal_request。";
   }
   return "";
+});
+const baseLinkHudTone = computed(() => {
+  if (connectionLabel.value !== "已连接") {
+    return "warning";
+  }
+  return baseLinkHudText.value.includes("等待") || baseLinkHudText.value.includes("不可用") ? "warning" : "success";
 });
 
 function initializeScene() {
@@ -368,6 +375,7 @@ function clearAllTopicVisuals() {
     ...laserByTopic.keys(),
     ...obstacleZoneGroupByTopic.keys(),
   ].forEach((topic) => disposeTopic(topic));
+  updateBaseLinkHud();
 }
 
 function replaceObjectGeometry<T extends THREE.Object3D & { geometry?: THREE.BufferGeometry | THREE.Geometry | null }>(
@@ -586,7 +594,7 @@ function syncPathDisplayConfigs(displays: NavViewerDisplay[]) {
 
 function syncPoseDisplayConfigs(displays: NavViewerDisplay[]) {
   displays.forEach((display) => {
-    if (display.kind !== "pose") {
+    if (display.kind !== "pose" && display.kind !== "pose_array") {
       return;
     }
     const group = poseObjectByTopic.get(display.topic);
@@ -594,18 +602,18 @@ function syncPoseDisplayConfigs(displays: NavViewerDisplay[]) {
       return;
     }
     const color = new THREE.Color(poseColorForDisplay(display));
-    const body = group.getObjectByName("pose-body") as THREE.Mesh | null;
-    const bodyMaterial = body?.material;
-    if (body && bodyMaterial && !Array.isArray(bodyMaterial) && "color" in bodyMaterial) {
-      (bodyMaterial as THREE.MeshStandardMaterial).color = color;
-      bodyMaterial.needsUpdate = true;
-    }
-    const tail = group.getObjectByName("pose-tail") as THREE.Mesh | null;
-    const tailMaterial = tail?.material;
-    if (tail && tailMaterial && !Array.isArray(tailMaterial) && "color" in tailMaterial) {
-      (tailMaterial as THREE.MeshBasicMaterial).color = color;
-      tailMaterial.needsUpdate = true;
-    }
+    group.traverse((child) => {
+      if (child.name !== "pose-body" && child.name !== "pose-tail") {
+        return;
+      }
+      const mesh = child as THREE.Mesh;
+      const material = mesh.material;
+      if (!material || Array.isArray(material) || !("color" in material)) {
+        return;
+      }
+      (material as THREE.MeshStandardMaterial | THREE.MeshBasicMaterial).color = color;
+      material.needsUpdate = true;
+    });
   });
 }
 
@@ -1093,6 +1101,48 @@ function quaternionToYaw(rotation: any) {
   return Math.atan2(sinyCosp, cosyCosp);
 }
 
+function formatHudCoordinate(value: number) {
+  return Number.isFinite(value) ? value.toFixed(3) : "-";
+}
+
+function updateBaseLinkHud() {
+  if (connectionLabel.value !== "已连接") {
+    baseLinkHudText.value = "等待 rosbridge 连接";
+    return;
+  }
+
+  const baseLinkTransform = resolveFrameTransformToFixed("base_link");
+  if (baseLinkTransform) {
+    const position = new THREE.Vector3();
+    const quaternion = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    baseLinkTransform.decompose(position, quaternion, scale);
+    baseLinkHudText.value = [
+      `frame: ${currentFixedFrame()} <- base_link`,
+      `x: ${formatHudCoordinate(position.x)}`,
+      `y: ${formatHudCoordinate(position.y)}`,
+      `z: ${formatHudCoordinate(position.z)}`,
+      `yaw: ${formatHudCoordinate(quaternionToYaw(quaternion))} rad`,
+    ].join(" | ");
+    return;
+  }
+
+  const poseAnchor = resolvePrimaryPoseAnchor();
+  if (poseAnchor) {
+    baseLinkHudText.value = [
+      `frame: ${poseAnchor.frameId}`,
+      `x: ${formatHudCoordinate(poseAnchor.x)}`,
+      `y: ${formatHudCoordinate(poseAnchor.y)}`,
+      `z: ${formatHudCoordinate(poseAnchor.z)}`,
+      `yaw: ${formatHudCoordinate(poseAnchor.yaw)} rad`,
+      "来源: pose",
+    ].join(" | ");
+    return;
+  }
+
+  baseLinkHudText.value = "base_link 位姿暂不可用";
+}
+
 function createCircleLine(radius: number, color: string, dashed = false) {
   const points: THREE.Vector3[] = [];
   const segments = 96;
@@ -1330,29 +1380,18 @@ function renderPose(topic: string, message: any) {
   let group = poseObjectByTopic.get(topic) as THREE.Group | undefined;
   if (!group) {
     group = new THREE.Group();
-    const body = new THREE.Mesh(
-      new THREE.ConeGeometry(0.22, 0.68, 18),
-      new THREE.MeshStandardMaterial({ color: poseColorForDisplay(display) })
-    );
-    body.name = "pose-body";
-    group.add(body);
-
-    const tail = new THREE.Mesh(
-      new THREE.CircleGeometry(0.12, 16),
-      new THREE.MeshBasicMaterial({ color: poseColorForDisplay(display) })
-    );
-    tail.name = "pose-tail";
-    group.add(tail);
+    group.add(createPoseMarker(poseColorForDisplay(display), 1));
     scene.add(group);
     poseObjectByTopic.set(topic, group);
   }
 
-  const body = group.getObjectByName("pose-body") as THREE.Mesh | null;
+  const marker = group.children[0] as THREE.Group | undefined;
+  const body = marker?.getObjectByName("pose-body") as THREE.Mesh | null;
   if (body) {
     body.rotation.z = yaw - Math.PI / 2;
     body.position.set(Number(position.x ?? 0), Number(position.y ?? 0), 0.34);
   }
-  const tail = group.getObjectByName("pose-tail") as THREE.Mesh | null;
+  const tail = marker?.getObjectByName("pose-tail") as THREE.Mesh | null;
   if (tail) {
     tail.position.set(Number(position.x ?? 0), Number(position.y ?? 0), 0.02);
   }
@@ -1371,6 +1410,79 @@ function renderPose(topic: string, message: any) {
     yaw,
   });
   refreshAllObstacleZones();
+  updateBaseLinkHud();
+}
+
+function createPoseMarker(color: string, scale: number) {
+  const marker = new THREE.Group();
+  const body = new THREE.Mesh(
+    new THREE.ConeGeometry(0.22 * scale, 0.68 * scale, 18),
+    new THREE.MeshStandardMaterial({ color })
+  );
+  body.name = "pose-body";
+  marker.add(body);
+
+  const tail = new THREE.Mesh(
+    new THREE.CircleGeometry(0.12 * scale, 16),
+    new THREE.MeshBasicMaterial({ color })
+  );
+  tail.name = "pose-tail";
+  marker.add(tail);
+  return marker;
+}
+
+function renderPoseArray(topic: string, message: any) {
+  if (!scene) {
+    return;
+  }
+  const poses = Array.isArray(message?.poses) ? message.poses : [];
+  const frameId = normalizeFrameId(message?.header?.frame_id) || currentFixedFrame();
+  const display = getDisplayByTopic(topic) ?? {
+    topic,
+    messageType: "geometry_msgs/msg/PoseArray",
+    kind: "pose_array" as const,
+    label: topic,
+  };
+
+  let group = poseObjectByTopic.get(topic) as THREE.Group | undefined;
+  if (!group) {
+    group = new THREE.Group();
+    scene.add(group);
+    poseObjectByTopic.set(topic, group);
+  }
+  while (group.children.length > poses.length) {
+    const child = group.children.pop();
+    if (child) {
+      clearThreeObject(child);
+    }
+  }
+  while (group.children.length < poses.length) {
+    group.add(createPoseMarker(poseColorForDisplay(display), 0.72));
+  }
+
+  poses.forEach((pose: any, index: number) => {
+    const position = pose?.position ?? {};
+    const orientation = pose?.orientation ?? {};
+    const yaw = quaternionToYaw(orientation);
+    const marker = group!.children[index] as THREE.Group;
+    marker.visible = true;
+    const body = marker.getObjectByName("pose-body") as THREE.Mesh | null;
+    if (body) {
+      body.rotation.z = yaw - Math.PI / 2;
+      body.position.set(Number(position.x ?? 0), Number(position.y ?? 0), 0.25);
+    }
+    const tail = marker.getObjectByName("pose-tail") as THREE.Mesh | null;
+    if (tail) {
+      tail.position.set(Number(position.x ?? 0), Number(position.y ?? 0), 0.018);
+    }
+  });
+
+  sourceFrameByTopic.set(topic, frameId);
+  sourceStampMsByTopic.set(topic, extractHeaderStampMs(message));
+  cacheTopicLocalMatrix(topic, composeLocalMatrix());
+  applyObjectFrameTransform(topic, group, frameId, sourceStampMsByTopic.get(topic) ?? null);
+  group.visible = true;
+  updateBaseLinkHud();
 }
 
 function buildTfLabelSprite(label: string, sizeScale: number) {
@@ -1630,6 +1742,7 @@ function ingestTfMessage(topic: string, message: any) {
     tfTransformHistoryByChildFrame.set(childFrame, nextHistory);
   });
   emitTfFrames(topic);
+  updateBaseLinkHud();
 }
 
 function ensureSupportTfSubscriptions() {
@@ -1707,6 +1820,11 @@ function renderDisplayMessage(display: NavViewerDisplay, message: any) {
     sceneStatus.value = `已更新位姿: ${display.topic}`;
     return;
   }
+  if (display.kind === "pose_array") {
+    renderPoseArray(display.topic, message);
+    sceneStatus.value = `已更新位姿数组: ${display.topic}`;
+    return;
+  }
   if (display.kind === "obstacle_zone") {
     renderObstacleZone(display.topic, message);
     return;
@@ -1751,6 +1869,7 @@ async function reconnectAndResubscribe() {
     onStatusChange: (snapshot) => {
       connectionLabel.value = snapshot.connected ? "已连接" : snapshot.reconnecting ? "重连中" : "未连接";
       sceneStatus.value = snapshot.message;
+      updateBaseLinkHud();
       if (snapshot.connected) {
         ensureSupportTfSubscriptions();
         props.displays.forEach((display) => ensureDisplaySubscription(display));
@@ -1767,6 +1886,7 @@ async function reconnectAndResubscribe() {
   if (!props.url && props.provider !== "mock") {
     connectionLabel.value = "未配置地址";
     sceneStatus.value = "请先填写 rosbridge 地址";
+    updateBaseLinkHud();
     emitRosLog("warning", "三维主视图未配置 rosbridge 地址，未启动连接。");
     return;
   }
@@ -1776,6 +1896,7 @@ async function reconnectAndResubscribe() {
     const snapshot = rosAdapter.getConnectionSnapshot();
     connectionLabel.value = snapshot.connected ? "已连接" : "未连接";
     sceneStatus.value = snapshot.message;
+    updateBaseLinkHud();
     ensureSupportTfSubscriptions();
     props.displays.forEach((display) => ensureDisplaySubscription(display));
     emitRosLog("info", `三维主视图连接成功: ${snapshot.message}`);
@@ -1783,6 +1904,7 @@ async function reconnectAndResubscribe() {
     connectionLabel.value = "连接失败";
     sceneStatus.value = (error as Error).message;
     clearAllTopicVisuals();
+    updateBaseLinkHud();
     emitRosLog("error", `三维主视图连接失败: ${(error as Error).message}`);
   }
 }
@@ -1896,6 +2018,10 @@ onBeforeUnmount(() => {
 
     <div class="nav-viewer-stage">
       <div ref="mountRef" class="nav-viewer-canvas-host"></div>
+      <div class="nav-viewer-base-link-hud" :class="`tone-${baseLinkHudTone}`">
+        <span class="nav-viewer-base-link-title">机器狗位置</span>
+        <span class="nav-viewer-base-link-text">{{ baseLinkHudText }}</span>
+      </div>
       <button class="nav-viewer-focus-button" type="button" aria-label="定位图示" title="定位图示" @click="handleFocusButtonClick">
         <svg class="nav-viewer-focus-icon" viewBox="0 0 128 128" aria-hidden="true">
           <defs>

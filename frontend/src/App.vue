@@ -57,6 +57,9 @@ function defaultSectionForTool(tool: ToolDefinition) {
   if (tool.key.includes("pcd")) {
     return "mapping";
   }
+  if (tool.key.includes("relocalization") || tool.key.includes("candidate")) {
+    return "mapping";
+  }
   if (tool.key.includes("mtslash")) {
     return "entertainment";
   }

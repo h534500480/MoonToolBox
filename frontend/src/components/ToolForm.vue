@@ -37,6 +37,7 @@ import { createRosLiveAdapter, createSharedRosLiveAdapter, getSharedRosSessionSt
 
 const Nav3DViewer = defineAsyncComponent(() => import("./Nav3DViewer.vue"));
 const NavTopicPanelList = defineAsyncComponent(() => import("./NavTopicPanelList.vue"));
+const GlobalRelocalizationCandidateTool = defineAsyncComponent(() => import("./GlobalRelocalizationCandidateTool.vue"));
 
 const props = defineProps<{
   tool: ToolDefinition;
@@ -269,6 +270,7 @@ const defaultNavTopicOptions: NavTopicOption[] = [
   { key: "/cloud_registered_bl", label: "NDT 输入点云", type: "sensor_msgs/msg/PointCloud2", note: "NDT 实际输入点云，适合和 points_aligned 对比。" },
   { key: "/cloud_registered_body", label: "FAST-LIO 输出点云", type: "sensor_msgs/msg/PointCloud2", note: "结构参考点云，也是 scan 链路上游。" },
   { key: "/ndt_pose", label: "NDT 位姿", type: "geometry_msgs/msg/PoseStamped", note: "文档明确推荐优先接入，用于显示定位箭头。" },
+  { key: "/initialpose_candidates", label: "候选位姿数组", type: "geometry_msgs/msg/PoseArray", note: "用于观察自动定位或重定位候选点，主视图会按位姿箭头批量显示。" },
   { key: "/odometry/filtered", label: "融合里程计", type: "nav_msgs/msg/Odometry", note: "查看导航运动和位姿连续性。" },
   { key: "/plan", label: "当前路径", type: "nav_msgs/msg/Path", note: "文档建议作为几何验证主视图的常规叠加项。" },
   { key: "/tf", label: "TF 树", type: "tf2_msgs/msg/TFMessage", note: "查看 base_link 与地图坐标系链路。" },
@@ -451,6 +453,10 @@ const navInteractionMode = ref<"none" | "initialpose" | "navgoal">("none");
 const navControlLoading = ref(false);
 const navControlMessage = ref("");
 const navGoalSequence = ref(1);
+const manualInitialPoseX = ref("");
+const manualInitialPoseY = ref("");
+const manualInitialPoseZ = ref("0");
+const manualInitialPoseYaw = ref("");
 let costmapTimer: number | undefined;
 let rosSharedStatsTimer: number | undefined;
 let navDelayAdapter: ReturnType<typeof createSharedRosLiveAdapter> | null = null;
@@ -1820,6 +1826,28 @@ async function publishRosMessage(topicName: string, messageType: string, message
   }
 }
 
+async function callRosService(serviceName: string, serviceType: string, args: Record<string, unknown>) {
+  const adapter = createRosLiveAdapter({
+    ...buildRosLiveConfig(),
+    adapterName: `调用 ${serviceName}`,
+    autoReconnect: false,
+    onError: (event) => {
+      appendRosRuntimeLog(
+        event.recoverable ? "warning" : "error",
+        `${event.scope}: ${event.message}${event.detail ? ` (${event.detail})` : ""}`
+      );
+    },
+  });
+  try {
+    await adapter.connect();
+    const response = await adapter.callService(serviceName, serviceType, args);
+    appendRosRuntimeLog("info", `服务调用成功: ${serviceName} (${serviceType})`);
+    return response;
+  } finally {
+    adapter.disconnect();
+  }
+}
+
 function nextRequestPlanId() {
   const requestPlanId = `web_test_${String(navGoalSequence.value).padStart(3, "0")}`;
   navGoalSequence.value += 1;
@@ -1836,7 +1864,7 @@ function enterNavGoalMode() {
   navControlMessage.value = navInteractionMode.value === "navgoal" ? "已进入导航目标模式，请在主视图点击并拖动方向。" : "已退出导航目标模式。";
 }
 
-async function publishInitialPose(x: number, y: number, yaw: number) {
+async function publishInitialPose(x: number, y: number, yaw: number, z = 0) {
   const orientation = yawToQuaternion(yaw);
   await publishRosMessage("/initialpose", "geometry_msgs/msg/PoseWithCovarianceStamped", {
     header: {
@@ -1847,7 +1875,7 @@ async function publishInitialPose(x: number, y: number, yaw: number) {
         position: {
           x,
           y,
-          z: 0,
+          z,
         },
         orientation,
       },
@@ -1861,6 +1889,31 @@ async function publishInitialPose(x: number, y: number, yaw: number) {
       ],
     },
   });
+}
+
+function parseManualInitialPoseValue(value: string, label: string) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${label} 不是有效数值`);
+  }
+  return parsed;
+}
+
+async function submitManualInitialPose() {
+  navControlLoading.value = true;
+  try {
+    const x = parseManualInitialPoseValue(manualInitialPoseX.value, "x");
+    const y = parseManualInitialPoseValue(manualInitialPoseY.value, "y");
+    const z = parseManualInitialPoseValue(manualInitialPoseZ.value || "0", "z");
+    const yaw = parseManualInitialPoseValue(manualInitialPoseYaw.value, "yaw");
+    await publishInitialPose(x, y, yaw, z);
+    navInteractionMode.value = "none";
+    navControlMessage.value = `已下发手动初始化定位: (${x.toFixed(3)}, ${y.toFixed(3)}, ${z.toFixed(3)}, yaw=${yaw.toFixed(2)})`;
+  } catch (error) {
+    navControlMessage.value = `手动初始化定位失败: ${(error as Error).message}`;
+  } finally {
+    navControlLoading.value = false;
+  }
 }
 
 async function publishNavGoal(x: number, y: number, yaw: number) {
@@ -1909,6 +1962,22 @@ async function sendNavControlCommand(command: "pause" | "resume" | "cancel") {
     navControlMessage.value = `已发送导航控制: ${command}`;
   } catch (error) {
     navControlMessage.value = `控制下发失败: ${(error as Error).message}`;
+  } finally {
+    navControlLoading.value = false;
+  }
+}
+
+async function triggerAutoLocalization() {
+  navControlLoading.value = true;
+  try {
+    const response = await callRosService("/fallback_global_localization_trigger", "std_srvs/srv/Trigger", {});
+    const success = response?.success === true;
+    const message = typeof response?.message === "string" && response.message.trim() ? response.message : "";
+    navControlMessage.value = success
+      ? `已触发自动定位${message ? `: ${message}` : ""}`
+      : `自动定位触发返回失败${message ? `: ${message}` : ""}`;
+  } catch (error) {
+    navControlMessage.value = `自动定位触发失败: ${(error as Error).message}`;
   } finally {
     navControlLoading.value = false;
   }
@@ -2795,7 +2864,7 @@ onBeforeUnmount(() => {
     </header>
 
     <div class="tool-layout" :class="`tool-layout-${tool.key}`">
-      <section v-if="tool.key !== 'mtslash_export'" class="panel tool-form-panel">
+      <section v-if="tool.key !== 'mtslash_export' && tool.key !== 'global_relocalization_candidates'" class="panel tool-form-panel">
         <div class="section-head">
           <div class="result-title">参数配置</div>
           <div class="section-subtitle">支持手动输入和本地浏览选择</div>
@@ -2906,7 +2975,19 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <template v-if="tool.key === 'pcd_map'">
+      <template v-if="tool.key === 'global_relocalization_candidates'">
+        <GlobalRelocalizationCandidateTool
+          :tool="tool"
+          :loading="loading"
+          :summary="summary"
+          :logs="logs"
+          :result-data="resultData"
+          @run="emit('run', $event)"
+          @clear-logs="clearToolLogs"
+        />
+      </template>
+
+      <template v-else-if="tool.key === 'pcd_map'">
         <section class="result-panel">
           <div class="result-title">地图结果</div>
           <p class="summary">{{ summary }}</p>
@@ -3200,12 +3281,20 @@ data: [0, 0, 100, ...]</pre>
               <button class="primary-btn" type="button" :disabled="navControlLoading" @click="enterInitialPoseMode">
                 {{ navInteractionMode === "initialpose" ? "退出初始化定位" : "初始化定位" }}
               </button>
+              <button class="primary-btn" type="button" :disabled="navControlLoading" @click="triggerAutoLocalization">自动定位</button>
               <button class="primary-btn" type="button" :disabled="navControlLoading" @click="enterNavGoalMode">
                 {{ navInteractionMode === "navgoal" ? "退出导航目标" : "导航目标" }}
               </button>
               <button class="secondary-btn" type="button" :disabled="navControlLoading" @click="sendNavControlCommand('pause')">暂停</button>
               <button class="secondary-btn" type="button" :disabled="navControlLoading" @click="sendNavControlCommand('resume')">继续</button>
               <button class="secondary-btn" type="button" :disabled="navControlLoading" @click="sendNavControlCommand('cancel')">取消</button>
+            </div>
+            <div class="manual-initial-pose-row">
+              <input v-model="manualInitialPoseX" class="field-input compact-input" type="number" step="0.001" placeholder="x" />
+              <input v-model="manualInitialPoseY" class="field-input compact-input" type="number" step="0.001" placeholder="y" />
+              <input v-model="manualInitialPoseZ" class="field-input compact-input" type="number" step="0.001" placeholder="z" />
+              <input v-model="manualInitialPoseYaw" class="field-input compact-input" type="number" step="0.01" placeholder="yaw(rad)" />
+              <button class="primary-btn" type="button" :disabled="navControlLoading" @click="submitManualInitialPose">确认初始化</button>
             </div>
           </div>
           <div class="section-subtitle nav-control-feedback">

@@ -7,7 +7,7 @@
  * 2. 根据 topic 名和消息类型推断显示类型，避免模板里堆判断。
  * 3. 后续新增 LaserScan、Marker、PointCloud2 时只扩展这里。
  */
-export type NavDisplayKind = "map" | "path" | "tf" | "pose" | "pointcloud" | "laser" | "obstacle_zone" | "unknown";
+export type NavDisplayKind = "map" | "path" | "tf" | "pose" | "pose_array" | "pointcloud" | "laser" | "obstacle_zone" | "unknown";
 
 export interface NavViewerDisplay {
   topic: string;
@@ -54,6 +54,12 @@ export function inferDisplayKind(topic: string, messageType: string): NavDisplay
     return "obstacle_zone";
   }
   if (
+    messageType === "geometry_msgs/msg/PoseArray" ||
+    messageType === "geometry_msgs/PoseArray"
+  ) {
+    return "pose_array";
+  }
+  if (
     messageType === "geometry_msgs/msg/PoseWithCovarianceStamped" ||
     messageType === "geometry_msgs/msg/PoseStamped" ||
     messageType === "geometry_msgs/PoseWithCovarianceStamped" ||
@@ -85,6 +91,9 @@ export function buildDisplayLabel(topic: string, kind: NavDisplayKind): string {
   }
   if (kind === "pose") {
     return `Pose: ${topic}`;
+  }
+  if (kind === "pose_array") {
+    return `PoseArray: ${topic}`;
   }
   if (kind === "obstacle_zone") {
     return `Obstacle Zone: ${topic}`;

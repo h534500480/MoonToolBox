@@ -53,7 +53,7 @@ Write-Host "[2/5] Installing Python dependencies..."
 Invoke-Checked $Python @("-m", "pip", "install", "-i", $env:ROS_TOOL_PIP_INDEX_URL, "--trusted-host", ([Uri]$env:ROS_TOOL_PIP_INDEX_URL).Host, "--upgrade", "pip")
 Invoke-Checked $Python @("-m", "pip", "install", "-i", $env:ROS_TOOL_PIP_INDEX_URL, "--trusted-host", ([Uri]$env:ROS_TOOL_PIP_INDEX_URL).Host, "-r", "requirements.txt", "-r", "backend\requirements.txt")
 
-$RequiredExes = @("pcd_map_cli.exe", "pcd_tile_cli.exe", "network_scan_cli.exe", "costmap_cli.exe")
+$RequiredExes = @("pcd_map_cli.exe", "pcd_tile_cli.exe", "global_relocalization_cli.exe", "network_scan_cli.exe", "costmap_cli.exe")
 $MissingExes = @($RequiredExes | Where-Object { -not (Test-Path (Join-Path $Root "cpp\build\$_")) })
 if ($MissingExes.Count -gt 0) {
   Write-Host "[3/5] Building C++ CLI tools..."

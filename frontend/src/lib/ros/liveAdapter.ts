@@ -46,6 +46,7 @@ export interface RosLiveAdapter {
   requestReconnect(reason?: string): Promise<void>;
   subscribe(topicName: string, messageType: string, handler: RosMessageHandler): () => void;
   publish(topicName: string, messageType: string, message: Record<string, unknown>): void;
+  callService(serviceName: string, serviceType: string, args: Record<string, unknown>): Promise<any>;
   getConnectionSnapshot(): RosConnectionSnapshot;
 }
 
@@ -134,6 +135,8 @@ class SharedRosSession {
       publish: (topicName: string, messageType: string, message: Record<string, unknown>) => {
         this.baseAdapter.publish(topicName, messageType, message);
       },
+      callService: (serviceName: string, serviceType: string, args: Record<string, unknown>) =>
+        this.baseAdapter.callService(serviceName, serviceType, args),
       getConnectionSnapshot: () => this.baseAdapter.getConnectionSnapshot(),
     };
   }
@@ -328,6 +331,10 @@ class MockRosLiveAdapter implements RosLiveAdapter {
 
   publish(): void {}
 
+  async callService(): Promise<any> {
+    return { success: true, message: "mock service called" };
+  }
+
   getConnectionSnapshot(): RosConnectionSnapshot {
     return {
       connected: true,
@@ -443,6 +450,25 @@ class RosbridgeLiveAdapter implements RosLiveAdapter {
     });
 
     topic.publish(message as any);
+  }
+
+  callService(serviceName: string, serviceType: string, args: Record<string, unknown>): Promise<any> {
+    if (!this.ros || !this.connected) {
+      return Promise.reject(new Error("rosbridge 尚未连接"));
+    }
+
+    const service = new ROSLIB.Service({
+      ros: this.ros,
+      name: serviceName,
+      serviceType,
+    });
+    return new Promise((resolve, reject) => {
+      service.callService(
+        args,
+        (result: any) => resolve(result),
+        (error: unknown) => reject(new Error(this.errorDetail(error) || `服务调用失败: ${serviceName}`))
+      );
+    });
   }
 
   getConnectionSnapshot(): RosConnectionSnapshot {

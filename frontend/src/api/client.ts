@@ -291,6 +291,147 @@ export async function fetchPcdTilePreview(path: string, tileSize: string): Promi
   return response.json();
 }
 
+export interface GlobalRelocalizationCandidateItem {
+  place_id?: number;
+  candidate_id: number;
+  x: number;
+  y: number;
+  z: number;
+  roll_deg: number;
+  pitch_deg: number;
+  canonical_yaw_deg?: number;
+  yaw_deg: number;
+  qx: number;
+  qy: number;
+  qz: number;
+  qw: number;
+  observability_score: number;
+  hit_count: number;
+  hit_ratio: number;
+  visible_sector_count: number;
+  descriptor_nonzero_ratio: number;
+  source: string;
+  locked: boolean;
+  label: string;
+  original_candidate_id: number;
+  z_frame?: "ground" | "base_link" | string;
+}
+
+export interface GlobalRelocalizationPcdPreviewResponse {
+  path: string;
+  point_count: number;
+  sampled_count: number;
+  bounds: Record<string, number>;
+  points: number[][];
+}
+
+export interface GlobalRelocalizationCandidatesResponse {
+  path: string;
+  candidate_count: number;
+  columns: string[];
+  candidates: GlobalRelocalizationCandidateItem[];
+}
+
+export interface GlobalRelocalizationManualExportResponse {
+  manual_path: string;
+  reviewed_csv_path: string;
+  manual_additions_count: number;
+  manual_deletions_count: number;
+  locked_count: number;
+  candidate_count: number;
+}
+
+export interface GlobalRelocalizationFinalExportResponse {
+  metadata_path: string;
+  candidates_csv_path: string;
+  reviewed_csv_path: string;
+  candidates_npy_path: string;
+  descriptors_npy_path: string;
+  ring_keys_npy_path: string;
+  sector_keys_npy_path: string;
+  candidate_count: number;
+  descriptor_shape: number[];
+  ring_key_shape: number[];
+  sector_key_shape: number[];
+}
+
+export async function fetchGlobalRelocalizationPcdPreview(path: string, maxPoints = 90000): Promise<GlobalRelocalizationPcdPreviewResponse> {
+  const query = new URLSearchParams({
+    path,
+    max_points: String(maxPoints)
+  });
+  const response = await fetch(`${API_BASE}/tools/global_relocalization_candidates/pcd-preview?${query.toString()}`);
+  if (!response.ok) {
+    let detail = "Failed to load PCD preview";
+    try {
+      const data = await response.json();
+      detail = data.detail ?? detail;
+    } catch {
+      // Keep fallback message.
+    }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+export async function fetchGlobalRelocalizationCandidates(path: string): Promise<GlobalRelocalizationCandidatesResponse> {
+  const query = new URLSearchParams({ path });
+  const response = await fetch(`${API_BASE}/tools/global_relocalization_candidates/candidates?${query.toString()}`);
+  if (!response.ok) {
+    let detail = "Failed to load candidates";
+    try {
+      const data = await response.json();
+      detail = data.detail ?? detail;
+    } catch {
+      // Keep fallback message.
+    }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+export async function exportGlobalRelocalizationManual(payload: Record<string, unknown>): Promise<GlobalRelocalizationManualExportResponse> {
+  const response = await fetch(`${API_BASE}/tools/global_relocalization_candidates/manual-export`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    let detail = "Failed to export manual candidates";
+    try {
+      const data = await response.json();
+      detail = data.detail ?? detail;
+    } catch {
+      // Keep fallback message.
+    }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+export async function exportGlobalRelocalizationFinal(payload: Record<string, unknown>): Promise<GlobalRelocalizationFinalExportResponse> {
+  const response = await fetch(`${API_BASE}/tools/global_relocalization_candidates/final-export`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    let detail = "Failed to export reviewed candidates";
+    try {
+      const data = await response.json();
+      detail = data.detail ?? detail;
+    } catch {
+      // Keep fallback message.
+    }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
 export interface MtslashCaptchaResponse {
   session_id: string;
   captcha_image: string;

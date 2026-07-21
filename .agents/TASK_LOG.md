@@ -1,0 +1,573 @@
+# 任务日志
+
+## 2026-07-20
+
+- 任务目标：在 ROS 定位导航测试三维主视图右下角显示机器狗当前位置（`base_link` 的 `x/y/z/yaw`）。
+- 修改文件：
+  - `frontend/src/components/Nav3DViewer.vue`
+  - `frontend/src/styles.css`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 主视图新增“机器狗位置”HUD 卡片，默认显示在三维画布右下角，窄屏下自动改为画布下方整行显示。
+  - 优先读取 `TF` 中 `base_link -> fixed_frame` 的变换结果，显示 `x/y/z/yaw(rad)`；若当前没有 `base_link` TF，则回退显示当前主位姿显示项的 pose 缓存，并标记来源为 `pose`。
+  - 在 TF 更新、位姿更新、连接状态变化和清空场景时同步刷新 HUD 文案，避免断连后仍显示旧位置。
+- 风险、限制或尚未验证项：
+  - 已运行 `cd frontend && npm run build`，构建通过；仍有既有的 Vite chunk 体积警告。
+  - 本轮未连接真实 rosbridge/TF 流做在线验证；当前 `yaw` 按弧度显示。
+
+- 任务目标：修复导航测试小窗在连接成功时重复注册订阅 handler 的问题。
+- 修改文件：
+  - `frontend/src/components/NavTopicPanelList.vue`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 新增 `subscribeActivePanels()`，把小窗活动面板的订阅补齐逻辑收敛到单一入口。
+  - `reconnect()` 中的 `onStatusChange(connected)` 回调和 `await adapter.connect()` 成功后的流程都改为复用同一订阅入口，并保留 `unsubscribeMap.has(panel.id)` 去重判断。
+  - 修复后，同一轮连接里每个 panel 只会注册一份 handler，不再因为“连接成功回调订一次 + connect 成功后再订一次”导致前端重复消费同一条消息。
+- 风险、限制或尚未验证项：
+  - 已运行 `cd frontend && npm run build`，构建通过；仍有既有的 Vite chunk 体积警告。
+  - 本轮未连接真实 rosbridge 复测，只完成了静态修复和前端构建验证。
+
+- 任务目标：排查 ROS 定位导航测试页在 rosbridge + 弱网场景下的订阅链路风险，分析是否存在导致数据延迟累积、机器狗端变卡和 SSH 断连的前端问题。
+- 修改文件：
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 仅做代码阅读和风险定位，未改动前后端业务逻辑。
+  - 确认主视图、侧边/完整小窗和链路延迟窗口都会通过共享 rosbridge 连接订阅 ROS 话题，但底层 `ROSLIB.Topic` 订阅统一使用 `throttle_rate: 0`、`queue_size: 1`，不会在传输层降低高频点云/位姿话题的进站速率。
+  - 确认主视图默认会加载 `/debug/loaded_pointcloud_map`、`/points_aligned`、`/cloud_registered_bl` 三路 `PointCloud2`，链路延迟窗口默认还会额外订阅 `/cloud_registered_body`、`/cloud_registered_bl`、`/points_aligned` 等 7 个高频话题；页面级 Hz 限制只在浏览器收到消息后本地丢弃，不能减少 rosbridge、网络和机器人侧的实际发送压力。
+  - 确认 `NavTopicPanelList.vue` 在连接成功回调和 `await connect()` 之后都会执行一轮 `subscribe`，同一 panel 会重复注册 handler；虽然共享连接会合并同 topic 的底层 rosbridge 订阅，但前端同页消息处理会重复执行，增加浏览器和页面状态更新负担。
+- 风险、限制或尚未验证项：
+  - 本轮未连接真实机器狗或 rosbridge，只基于源码静态分析；“弱网下 SSH 断开”与机器人端 CPU/带宽被 rosbridge 放大占满的关联属于高置信推断，尚未做在线抓包或 rosbridge 日志验证。
+  - 尚未在真实环境统计 topic 带宽、消息频率和浏览器内存曲线；后续若要定责，建议补充 rosbridge 端带宽、机器人 CPU、WebSocket backlog 和前端 Performance 录制。
+
+## 2026-07-17
+
+- 任务目标：避免空 reviewed CSV 后手工加点时输出 `placeholder_zero_descriptors` 占位库。
+- 修改文件：
+  - `backend/app/services/global_relocalization.py`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - `export_reviewed_database` 不再写 `metadata.yaml/candidates.npy/descriptors.npy/ring_keys.npy/sector_keys.npy/candidates.csv` 占位文件，只写给 C++ 消费的 `reviewed_candidates.csv`。
+  - 真实 v2 离线库仍必须由 C++ `global_relocalization_cli` 基于 PCD 重新计算 descriptor/ring/sector key 后输出，避免 C++ 中断或未执行时留下全 0 descriptor 假库。
+- 风险、限制或尚未验证项：
+  - 已运行 `python -m compileall backend\app`。
+  - 已用临时目录直接调用 `export_reviewed_database` 验证：现在只生成 `reviewed_candidates.csv`。
+  - 已存在的 placeholder DB 不会自动修复，需要重新点击“确认候选点”触发 C++ 生成真实库。
+
+## 2026-07-16
+
+- 任务目标：修复全局重定位离线生成未按页面参数写入 descriptor/metadata 的问题。
+- 修改文件：
+  - `cpp/src/mapping/global_relocalization.cpp`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 修复 C++ runtime YAML 简易解析器的 `trim()`，现在会同时去掉单引号和双引号。
+  - 根因是前端参数经后端 PyYAML 写入 `_runtime_global_relocalization_config.yaml` 后，多数数值是 `'0.05'` 这种单引号字符串；旧解析器无法把它解析为数字，导致 `occupancy_resolution_m`、`occupancy_inflate_radius_m` 等标量参数回退 C++ 默认值。
+- 风险、限制或尚未验证项：
+  - 已重新编译 `global_relocalization_cli.exe`，并通过 `python -m compileall backend\app`。
+  - 已用 `global_relocalization_db_3/_runtime_global_relocalization_config.yaml` 复测：metadata 正确写出 `occupancy_resolution_m=0.05`、`occupancy_inflate_radius_m=0.05`、`min_range_m=0.2`、`ray_count=5580`。
+  - 已有旧 DB 不会自动更新，需要重新确认候选点/重新生成 DB。
+
+- 任务目标：修正手动数值初始化定位的 yaw 单位，使其与三维界面一致。
+- 修改文件：
+  - `frontend/src/components/ToolForm.vue`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 手动初始化输入的 yaw 从角度解释改为弧度解释，和 `Nav3DViewer` 交互返回值、原 `/initialpose` 发布链路保持一致。
+  - 输入占位文案从 `yaw°` 改为 `yaw(rad)`，状态反馈不再显示角度符号。
+- 风险、限制或尚未验证项：
+  - 已运行 `npm run build`；未连接真实 ROS 环境实发验证。
+
+- 任务目标：在 ROS 定位导航测试模块中增加手动数值初始化定位入口。
+- 修改文件：
+  - `frontend/src/components/ToolForm.vue`
+  - `frontend/src/styles.css`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 在“定位与导航控制”卡片中新增 `x/y/z/yaw°` 输入和“确认初始化”按钮。
+  - 手动确认后复用既有 `/initialpose` 发布链路，消息类型仍为 `geometry_msgs/msg/PoseWithCovarianceStamped`。
+  - `publishInitialPose` 支持传入 z；三维主视图点击初始化仍默认使用 z=0。
+  - yaw 输入按角度处理，发布前转换为弧度并生成四元数。
+- 风险、限制或尚未验证项：
+  - 已运行 `npm run build` 和 `python -m compileall backend\app`；Vite 仍有 Three/OrbitControls chunk 体积警告。
+  - 未连接真实 rosbridge/ROS 环境实发 `/initialpose` 验证。
+
+## 2026-07-15
+
+- 任务目标：将当前项目离线默认参数改为匹配机器人日志中的在线 query 参数。
+- 修改文件：
+  - `cpp/include/ros_tool_suite/mapping/global_relocalization.hpp`
+  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
+  - `.agents/PROJECT_OVERVIEW.md`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 当前项目离线默认 `virtual_lidar.min_range_m` 从 `0.60` 改为 `0.30`。
+  - 当前项目离线默认 `virtual_lidar.occupancy_inflate_radius_m` 从 `0.40` 改为 `0.15`。
+  - `virtual_lidar.lidar_to_base_rpy_deg` 默认保持 `[0,0,0]`，与日志中的在线 query 一致。
+- 风险、限制或尚未验证项：
+  - 已重新编译 `global_relocalization_cli.exe`，并通过 `python -m compileall backend\app`、`npm run build`；Vite 仍有 Three/OrbitControls chunk 体积警告。
+  - 已用默认参数小样本生成验证 metadata：`min_range_m=0.3`、`occupancy_inflate_radius_m=0.15`、`lidar_to_base_rpy_deg=[0,0,0]`、`ray_count=5580`。
+  - 已有输出目录中的 `_runtime_global_relocalization_config.yaml` 或旧 DB metadata 不会自动更新，需要重新确认候选点/重新生成 DB。
+
+- 任务目标：同步全局重定位离线 Scan Context 默认参数。
+- 修改文件：
+  - `cpp/include/ros_tool_suite/mapping/global_relocalization.hpp`
+  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
+  - `.agents/PROJECT_OVERVIEW.md`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 将 C++ 内置默认和前端页面默认的 `virtual_lidar.min_range_m` 从 `0.30` 改为 `0.60`。
+  - 核对用户给出的其余默认参数：`occupancy_resolution_m=0.25`、FOV/step、LiDAR 外参、descriptor 维度/半径/高度裁剪当前已一致，无需改算法代码。
+- 风险、限制或尚未验证项：
+  - 已重新编译 `global_relocalization_cli.exe`，并通过 `python -m compileall backend\app`、`npm run build`；Vite 仍有 Three/OrbitControls chunk 体积警告。
+  - 已用无显式配置的小样本生成验证 metadata：`min_range_m=0.6`、`occupancy_resolution_m=0.25`、`horizontal_step_deg=2`、`vertical_step_deg=2`、`ray_count=5580`。
+  - 已存在输出目录中的 `_runtime_global_relocalization_config.yaml` 若仍写着旧值，会覆盖 C++ 默认值；需要通过前端重新确认/生成或手动更新运行配置。
+
+## 2026-07-14
+
+- 任务目标：撤销基于异常候选点非零 cell 统计的 sector 级稀疏化，只保留每条射线 first-return 约束。
+- 修改文件：
+  - `cpp/src/mapping/global_relocalization.cpp`
+  - `.agents/PROJECT_OVERVIEW.md`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 删除 `nearest_first_return_per_sector` 逻辑，恢复为每条射线取第一个命中点后写入对应 `ring/sector`，同一 descriptor cell 内按高度最大值聚合。
+  - 移除 metadata 中的 `descriptor_occlusion_policy: nearest_first_return_per_sector`，避免误导在线/离线一致性检查。
+  - 保留 ray casting 本身的 first-return 行为：命中第一个占据体素后立即返回，不继续沿同一射线写入后方结构。
+- 风险、限制或尚未验证项：
+  - 已按用户说明不再参考此前候选 77 的 `query_nonzero_cells/database_nonzero_cells` 异常统计。
+  - 后续仍需要重新编译并重新生成 DB 后，机器人端才能使用这版离线 descriptor。
+
+- 任务目标：让离线 Scan Context descriptor 只保留 first-return，并降低离线库相对在线 query 的过稠密问题。（已被上一条撤销 sector 级稀疏化，仅保留每射线 first-return）
+- 修改文件：
+  - `cpp/src/mapping/global_relocalization.cpp`
+  - `.agents/PROJECT_OVERVIEW.md`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 保持 ray casting 每条射线命中第一个占据体素后立即返回，不继续写入射线后方墙、柱子或边界。
+  - descriptor 写入新增 sector 级遮挡压缩：每个 Scan Context sector 只保留最近的 first-return cell，避免同一方位内多条 2 度射线和多条垂直射线把后方结构一起填进离线 descriptor。
+  - metadata 的 `scan_context` 新增 `descriptor_occlusion_policy: nearest_first_return_per_sector`，用于标记离线 descriptor 的稀疏化策略。
+- 风险、限制或尚未验证项：
+  - 已重新编译 `global_relocalization_cli.exe`，并通过 `python -m compileall backend\app`。
+  - 已用当前 `global_relocalization_db_3/reviewed_candidates.csv` 临时生成验证：`ray_count=5580`，`ring_keys.npy == descriptors.max(axis=2)`，`sector_keys.npy == descriptors.max(axis=1)`。
+  - 正确候选 `manual_77/original_candidate_id=77` 的离线非零 cell 为 `11`，已接近用户日志中的在线 `query_nonzero_cells=12`；当前 reviewed 文件共有 79 行，其中 64 个 `manual_added`、15 个 `auto`。
+
+- 任务目标：按在线调试要求调整全局重定位离线 Scan Context 采样密度和 key 聚合方式。
+- 修改文件：
+  - `cpp/include/ros_tool_suite/mapping/global_relocalization.hpp`
+  - `cpp/src/mapping/global_relocalization.cpp`
+  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
+  - `.agents/PROJECT_OVERVIEW.md`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 前端默认配置和 C++ 内置默认值均将 `virtual_lidar.horizontal_step_deg`、`virtual_lidar.vertical_step_deg` 从 `8.0` 改为 `2.0`。
+  - 离线 `ring_keys.npy` 改为每个 ring 对所有 sector 取最大值，`sector_keys.npy` 改为每个 sector 对所有 ring 取最大值。
+  - `metadata.yaml` 的 `scan_context` 字段同步改为 `ring_key: ring_max`、`sector_key: sector_max`。
+  - 保持人工点 z 语义：前端新打点导出 `z_frame=ground` 与地面 z，C++ 生成库时按 `base_link_height_offset_m` 转换为 base_link z。
+- 风险、限制或尚未验证项：
+  - 已重新编译 `global_relocalization_cli.exe`，并通过 `python -m compileall backend\app`、`npm run build`；Vite 仍有 Three/OrbitControls chunk 体积警告。
+  - 已用 `qidi_f15/map.pcd` 小规模生成验证：metadata 中 `horizontal_step_deg=2`、`vertical_step_deg=2`、`ray_count=5580`、`ring_key=ring_max`、`sector_key=sector_max`；`ring_keys.npy == descriptors.max(axis=2)` 且 `sector_keys.npy == descriptors.max(axis=1)`。
+  - 已存在输出目录中的 `_runtime_global_relocalization_config.yaml` 若仍写着 8 度，会覆盖 C++ 默认值；需要通过前端重新确认/生成或手动改运行配置后再生成。
+
+- 任务目标：让人工打点的 ground z 按机器人 base_link 高度转换后再生成全局重定位 v2 npy。
+- 修改文件：
+  - `cpp/src/mapping/global_relocalization.cpp`
+  - `backend/app/services/global_relocalization.py`
+  - `frontend/src/api/client.ts`
+  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
+  - `.agents/PROJECT_OVERVIEW.md`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 前端候选点新增 `z_frame` 语义，新打的人工点导出为 `ground`，从已有候选库加载的点默认视为 `base_link`。
+  - `reviewed_candidates.csv` 导出新增 `z_frame` 列，C++ 读取到 `z_frame=ground` 时使用 `candidate_sampling.base_link_height_offset_m` 将地面 z 转换到 map 下 base_link z。
+  - 兼容旧 reviewed CSV：没有 `z_frame` 且 `source=manual_added`、质量指标仍为 0 的旧人工点，会按 ground z 处理。
+  - 直接使用 `manual_candidates.yaml` 时，显式 z 也按地面 z 加 `base_link_height_offset_m`；`z:null` 仍先估计 ground z 再加偏移。
+  - 前端参数说明和手动 z 输入占位文案改为强调 `base_link_height_offset_m` 是机器人 base_link 离地高度，手动输入 z 为 ground z。
+- 风险、限制或尚未验证项：
+  - 已重新编译 `global_relocalization_cli.exe`，并通过 `python -m compileall backend\app`、`npm run build`；Vite 仍有 Three/OrbitControls chunk 体积警告。
+  - 已用 `global_relocalization_db_3/reviewed_candidates.csv` 生成到临时目录 `output_db3_ground_z_offset_check` 验证：304 个候选全部保留，manual 点 z 统一转换为 `0.35`，`ring_keys/sector_keys` 与 descriptor 均值一致。
+  - 转换后这批 manual 点仍有 210 个 `descriptor_nonzero_ratio < 0.03`，说明低分还与点周围可观测结构或 ray casting 参数有关，不只是 z 语义问题。
+
+- 任务目标：修复人工添加并锁定的全局重定位候选点未完整写入 v2 npy 的问题。
+- 修改文件：
+  - `cpp/src/mapping/global_relocalization.cpp`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 排查 `global_relocalization_db_3`，确认 `reviewed_candidates.csv` 有 304 行，其中 290 行为 `manual_added`，但旧输出 `candidates.npy/candidates.csv` 只有 99 行。
+  - 根因是写 npy 前仍按 `observability.min_*` 阈值过滤低观测质量点，且当前配置 `manual_edit.allow_force_add_low_observability=false`，导致 205 个人工点被拒绝。
+  - 调整 C++ 过滤逻辑：`locked=true` 的候选点代表人工审核强制保留，即使观测质量低也进入最终 `candidates.npy/descriptors.npy/ring_keys.npy/sector_keys.npy`；质量指标仍按实际 descriptor 写入。
+- 风险、限制或尚未验证项：
+  - 已重新编译 `global_relocalization_cli.exe`。
+  - 已用 `global_relocalization_db_3/reviewed_candidates.csv` 生成到临时目录 `output_db3_locked_keep_check` 验证：最终 `candidates.npy=(304,16)`、`descriptors.npy=(304,20,60)`、`ring_keys.npy=(304,20)`、`sector_keys.npy=(304,60)`，`rejected_candidates=0`，ring/sector key 均与 descriptor 均值一致。
+  - 未直接覆盖用户的 `global_relocalization_db_3`，需要重新点击确认候选点或重新运行 C++ 生成来刷新该目录。
+
+- 任务目标：根据新版 `GlobalRelocalization_ScanContext_Offline_Update.md` 补齐离线 Scan Context v2 数据库合约。
+- 修改文件：
+  - `cpp/include/ros_tool_suite/mapping/global_relocalization.hpp`
+  - `cpp/src/mapping/global_relocalization.cpp`
+  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
+  - `.agents/PROJECT_OVERVIEW.md`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 新增并解析 `virtual_lidar.occupancy_inflate_radius_m`，默认值为 `0.40`，前端参数草案同步暴露该项。
+  - synthetic LiDAR first-return ray casting 按占据体素膨胀半径做命中判断，用于贴近在线 query 的占据膨胀语义。
+  - `metadata.yaml` 按新版文档补齐 `format: v2_scan_context_places`、`num_places`、`candidate_pose_frame`、`synthetic_lidar`、`scan_context` 等合约字段，并保留兼容用的 `virtual_lidar` 字段。
+  - 确认候选点和自动生成路径都保持输出 `candidates.npy/descriptors.npy/ring_keys.npy/sector_keys.npy`，其中 `sector_keys.npy` 作为在线检索必需文件记录到项目地图。
+- 风险、限制或尚未验证项：
+  - 已重新编译 `global_relocalization_cli.exe`。
+  - 已运行 `python -m compileall backend\app`、`npm run build`；Vite 仍有 Three/OrbitControls chunk 体积警告。
+  - 已用 `qidi_f15/map.pcd` 小规模生成验证：`candidates.npy=(2,16)`、`descriptors.npy=(2,20,60)`、`ring_keys.npy=(2,20)`、`sector_keys.npy=(2,60)`；`ring_keys/sector_keys` 均与 descriptor 均值一致，metadata 包含 `synthetic_lidar.occupancy_inflate_radius_m=0.4`。
+
+- 任务目标：根据更新后的 `GlobalRelocalization_ScanContext_Offline_Update.md` 再次对齐离线 Scan Context 输出语义。
+- 修改文件：
+  - `cpp/include/ros_tool_suite/mapping/global_relocalization.hpp`
+  - `cpp/src/mapping/global_relocalization.cpp`
+  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
+  - `.agents/PROJECT_OVERVIEW.md`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 保持离线 virtual LiDAR 外参为 `[0,0,0]`，与在线 `/fallback_global_cloud_bl_exact` 的 base_link 语义一致。
+  - 将 `base_link_height_offset_m` 默认值改为 `0.35`，自动候选的 `candidates.npy` z 列不再默认等于地面点高度，而是 `ground_z + offset`。
+  - clearance 检查改为使用 `base_link z - offset` 作为地面附近检查高度，避免候选 z 抬到 base_link 后漏检低处障碍。
+  - 前端参数草案同步更新 `base_link_height_offset_m=0.35` 并明确该参数不是 LiDAR 外参。
+- 风险、限制或尚未验证项：
+  - 已重新编译 `global_relocalization_cli.exe`。
+  - 已运行 `python -m compileall backend\app`、`npm run build`；Vite 仍有 Three/OrbitControls chunk 体积警告。
+  - 已用 `qidi_f15/map.pcd` 小规模生成验证：`candidates.npy=(3,16)`、`descriptors.npy=(3,20,60)`、`ring_keys.npy=(3,20)`、`sector_keys.npy=(3,60)`；`ring_keys/sector_keys` 均与 descriptor 均值一致，metadata 显示 `lidar_to_base_translation_xyz=[0,0,0]` 与 `base_link_height_offset_m=0.35`。
+
+## 2026-07-10
+
+- 任务目标：按 `GlobalRelocalization_ScanContext_Offline_Update.md` 对齐离线 Scan Context 数据库生成逻辑。
+- 修改文件：
+  - `cpp/include/ros_tool_suite/mapping/global_relocalization.hpp`
+  - `cpp/src/mapping/global_relocalization.cpp`
+  - `cpp/src/global_relocalization_cli/main.cpp`
+  - `backend/app/services/cpp_runner.py`
+  - `backend/app/services/global_relocalization.py`
+  - `frontend/src/api/client.ts`
+  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
+  - `.agents/PROJECT_OVERVIEW.md`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 离线 virtual LiDAR 默认参数改为与当前在线 `fallback_global_localizer.yaml` query 一致：`min_range_m=0.30`、`vertical_fov_deg=59.0`、`lidar_to_base_translation_xyz=[0,0,0]`、`lidar_to_base_rpy_deg=[0,0,0]`。
+  - 新增 `candidate_sampling.base_link_height_offset_m`，自动候选和 `z:null` 人工候选会输出 `ground_z + offset` 作为候选 `base_link` z，避免把地面高度和 base/radar 中心高度混用。
+  - C++ 额外导出 `sector_keys.npy [P,num_sectors]`，生成方式为 `mean(descriptor[all_rings, sector])`；CLI、后端返回和 Python 兜底导出同步新增该路径。
+  - `metadata.yaml` 继续记录 virtual LiDAR 参数，并新增 `sector_key_shape` 与 `base_link_height_offset_m`，便于检查离线库与在线查询配置是否一致。
+  - 前端离线参数草案同步改为在线默认值，`lidar_to_base_translation_xyz` 从 `0,0,0.35` 改为 `0,0,0`。
+- 风险、限制或尚未验证项：
+  - 已重新编译 `global_relocalization_cli.exe`。
+  - 已运行 `python -m compileall backend\app`、`npm run build`；Vite 仍有 Three/OrbitControls chunk 体积警告。
+  - 已用 `qidi_f15/map.pcd` 小规模生成验证：`candidates.npy=(3,16)`、`descriptors.npy=(3,20,60)`、`ring_keys.npy=(3,20)`、`sector_keys.npy=(3,60)`；`ring_keys == descriptors.mean(axis=2)`，`sector_keys == descriptors.mean(axis=1)`。
+
+- 任务目标：统一全局重定位离线 virtual LiDAR 默认参数与在线 query 配置。
+- 修改文件：
+  - `cpp/include/ros_tool_suite/mapping/global_relocalization.hpp`
+  - `cpp/src/mapping/global_relocalization.cpp`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - C++ 默认离线 virtual LiDAR 参数改为 `min_range_m=0.50`、`vertical_fov_deg=60.0`、`lidar_to_base_translation_xyz=[0.0,0.0,0.35]`、`lidar_to_base_rpy_deg=[0.0,0.0,0.0]`，与当前建议的在线 query 参数一致。
+  - `metadata.yaml` 新增 `virtual_lidar` 参数块，方便后续检查离线库与在线查询配置是否一致。
+- 风险、限制或尚未验证项：
+  - 已重新编译 `global_relocalization_cli.exe`。
+  - 已小规模运行默认配置生成，metadata 显示 `min_range_m: 0.5`、`vertical_fov_deg: 60`、`lidar_to_base_translation_xyz: [0, 0, 0.35]`。
+
+- 任务目标：修复全局重定位“创建候选点”误用空 reviewed CSV 导致 npy 只有空 shape 的问题。
+- 修改文件：
+  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
+  - `backend/app/services/cpp_runner.py`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 前端在当前界面没有已加载候选点时，不再导出空 `reviewed_candidates.csv`，也不再把候选文件路径传给自动生成流程。
+  - 后端收到 `reviewed_candidates.csv` 时会先检查候选数量；若文件为空，则忽略该文件并回落到从 PCD 自动采样，避免生成空 `candidates.npy/descriptors.npy/ring_keys.npy`。
+- 风险、限制或尚未验证项：
+  - 已运行 `python -m compileall backend\app`、`npm run build`；Vite 仍有 Three/OrbitControls chunk 体积警告。
+  - 已模拟空 `reviewed_candidates.csv` 调用后端入口，命令未再携带 `--candidates`，输出 `accepted_places=3`，三份 npy 分别为 `(3,16)`、`(3,20,60)`、`(3,20)` 且非零。
+
+- 任务目标：修复全局重定位 manual additions 的 `z:null`、姿态字段解析和 ground z 估计问题。
+- 修改文件：
+  - `cpp/src/mapping/global_relocalization.cpp`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - manual additions 中 `z: null` 不再保留默认 0，而是按人工点 XY 查邻近 ground cell 并估计 ground z。
+  - manual YAML 解析补充 `roll_deg/pitch_deg/yaw_deg/yaw_expand_deg` 字段；v2 输出仍会把 yaw 统一 canonical 到 0。
+  - 修复 `yaw_expand_deg` 多行列表项被误识别为新增 addition 的问题。
+  - 自动候选和邻域 ground 支撑判断的 ground z 从 `sum_z/count` 改为 15% z 分位，降低墙点或高点抬高 base 的风险。
+- 风险、限制或尚未验证项：
+  - 已重新编译 `global_relocalization_cli.exe`。
+  - 已运行 `python -m compileall backend\app`、`npm run build`；Vite 仍有 Three/OrbitControls chunk 体积警告。
+  - 已用 `z: null` 的 manual YAML 验证：`manual_additions=1`，输出 z 为 `-0.802625` 而不是 0，`candidates.npy` 第 6 列仍为 0，descriptor/ring key 非零。
+  - 已用 `qidi_f15/map.pcd` 小规模自动采样验证：`accepted_places=3`，v2 输出未按 yaw 展开。
+
+- 任务目标：将全局重定位离线数据库输出改为 v2 place-level 格式，不再按 yaw 展开候选行。
+- 修改文件：
+  - `cpp/src/mapping/global_relocalization.cpp`
+  - `cpp/src/global_relocalization_cli/main.cpp`
+  - `backend/app/services/global_relocalization.py`
+  - `frontend/src/api/client.ts`
+  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
+  - `.agents/PROJECT_OVERVIEW.md`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - C++ 自动采样和 reviewed CSV 输入统一按 xyz 归并为 place，每个可站立位置只生成一条记录。
+  - `candidates.npy` 改为 v2 列定义：第 0 列 `place_id`，第 6 列 `canonical_yaw_deg`，当前固定为 `0.0`；descriptor/ring key 均在 canonical yaw=0 下计算。
+  - C++ 输出 `metadata.yaml` 标记 `format_version: 2`、`candidate_row_model: place_canonical_yaw`，并额外打印 `accepted_places`。
+  - 后端 CSV/npy 读取导出兼容 `place_id/canonical_yaw_deg` 与旧 `candidate_id/yaw_deg` 字段；前端候选点审核页可加载 v2 文件并显示 v2 CSV 预览。
+- 风险、限制或尚未验证项：
+  - 已重新编译 `global_relocalization_cli.exe`。
+  - 已运行 `python -m compileall backend\app`、`npm run build`；Vite 仍有 Three/OrbitControls chunk 体积警告。
+  - 已用 `qidi_f15/map.pcd` 小规模生成验证：`candidates.npy` 为 `(3,16)`，第 6 列全为 `0.0`；`descriptors.npy` 为 `(3,20,60)` 且非零数 215，`ring_keys.npy` 为 `(3,20)` 且非零数 23。
+  - 已用现有 `reviewed_candidates.csv` 验证 `--candidates` 模式：旧多 yaw 审核行被压成 `(78,16)` place-level 输出，第 6 列唯一值为 `0.0`，descriptor/ring key 均非零。
+
+- 任务目标：在导航测试主视图中支持 `geometry_msgs/msg/PoseArray` 话题可视化。
+- 修改文件：
+  - `frontend/src/lib/ros/displayRegistry.ts`
+  - `frontend/src/components/Nav3DViewer.vue`
+  - `frontend/src/components/ToolForm.vue`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - ROS 显示注册表新增 `pose_array` 类型识别，兼容 `geometry_msgs/msg/PoseArray` 与 `geometry_msgs/PoseArray`。
+  - 主 3D 视图新增 PoseArray 渲染逻辑，将 `message.poses` 批量显示为小型位姿箭头，并复用现有 TF/frame transform 管线。
+  - 默认话题列表新增 `/initialpose_candidates` 示例 PoseArray 话题，方便直接添加到主视图观察重定位候选姿态。
+- 风险、限制或尚未验证项：
+  - 已运行 `npm run build` 并通过；仍有 Vite 对 Three/OrbitControls chunk 体积的常规警告。
+  - 未连接真实 rosbridge/PoseArray 话题做端到端显示验证。
+
+- 任务目标：在 ROS 定位导航测试模块的“定位与导航控制”中接入自动定位按钮。
+- 修改文件：
+  - `frontend/src/lib/ros/liveAdapter.ts`
+  - `frontend/src/components/ToolForm.vue`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 为前端 ROS live adapter 增加 `callService` 能力，rosbridge provider 通过 `ROSLIB.Service.callService` 调用服务。
+  - 在定位与导航控制按钮组新增“自动定位”按钮。
+  - 按钮点击后调用 `/fallback_global_localization_trigger`，服务类型为 `std_srvs/srv/Trigger`，请求体为 `{}`，并把返回的 `success/message` 显示到控制反馈区。
+- 风险、限制或尚未验证项：
+  - 已运行 `npm run build` 并通过；仍有 Vite 对 Three/OrbitControls chunk 体积的常规警告。
+  - 未连接真实 rosbridge/ROS2 环境做端到端服务调用验证。
+
+## 2026-07-09
+
+- 任务目标：补齐全局重定位离线库的 virtual LiDAR ray casting、Scan Context descriptor 和 ring key 生成。
+- 修改文件：
+  - `cpp/include/ros_tool_suite/mapping/global_relocalization.hpp`
+  - `cpp/src/mapping/global_relocalization.cpp`
+  - `cpp/src/global_relocalization_cli/main.cpp`
+  - `backend/app/services/cpp_runner.py`
+  - `backend/app/api/routes.py`
+  - `.agents/PROJECT_OVERVIEW.md`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - C++ 配置补齐 MD 中的 `virtual_lidar`、`observability` 和 `descriptor` 参数。
+  - C++ 自动 PCD 生成路径新增 virtual LiDAR ray casting、单通道高度版 Scan Context descriptor、ring key 和观测质量指标计算，不再写空 shape 占位。
+  - C++ CLI 新增 `--candidates/--reviewed-candidates`，可直接使用 reviewed/current 候选点列表，基于输入 PCD 重新计算 `candidates.npy/descriptors.npy/ring_keys.npy`。
+  - 后端“确认候选点”在当前界面有候选点时，会写临时 reviewed CSV 并调用 C++ `--candidates` 模式，而不是 Python 写零 descriptor。
+  - 停用旧 `/final-export` Python 占位接口，避免误生成全 0 `descriptors.npy/ring_keys.npy`。
+- 风险、限制或尚未验证项：
+  - 已使用 VS Build Tools 重新编译 `cpp/build/global_relocalization_cli.exe`。
+  - 已用真实 `qidi_f15/map.pcd` + 当前 `reviewed_candidates.csv` 在临时目录验证：`descriptors.npy` shape 为 `(761, 20, 60)` 且非零数 59450，`ring_keys.npy` 非零数 5981。
+  - 已用真实 PCD 小规模自动采样验证：`candidates.npy/descriptors.npy/ring_keys.npy` 均更新且非零。
+  - 已运行 `python -m compileall backend\app` 和 `npm run build`；Vite 仍有 Three/OrbitControls chunk 体积警告。
+  - 当前 C++ descriptor 计算是单线程基础版，后续大规模精细库需要继续做并行优化；observability 过滤会丢弃低质量候选，数量可能少于 reviewed CSV 行数。
+
+- 任务目标：收敛“确认候选点”执行入口，避免最终候选库先保存后又被 C++ 自动生成覆盖。
+- 修改文件：
+  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
+  - `backend/app/services/cpp_runner.py`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 前端点击“确认候选点”时，如果界面已有候选点，会通过统一 `/run` 入口提交 `final_candidates_json`，不再单独调用 `/final-export` 后静默返回。
+  - 后端 `/run` 优先识别 `final_candidates_json`，直接按当前界面候选点写出最终候选库，并返回执行日志 `mode=current_view_final_export`。
+  - 只有没有当前候选点列表、也没有 reviewed CSV 兜底时，才继续调用 C++ CLI 从 PCD 自动采样。
+- 风险、限制或尚未验证项：
+  - 已运行 `python -m compileall backend\app`、`npm run build`。
+  - 已用当前 reviewed CSV 模拟 `/run` 验证，输出日志为 `mode=current_view_final_export`，生成的 `candidates.npy` 与传入候选数量一致。
+  - 需要重启后端并刷新前端页面后生效。
+
+- 任务目标：修复使用 `reviewed_candidates.csv` 点击确认候选点时仍走 C++ 自动采样、导致 `candidates.npy` 不变化的问题。
+- 修改文件：
+  - `backend/app/services/cpp_runner.py`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 在旧的 `/tools/global_relocalization_candidates/run` 路径增加兜底判断：当 `candidate_file` 指向 `reviewed_candidates.csv` 时，直接按该 CSV 写出最终候选库，不再调用 C++ 自动采样。
+  - 该兜底会输出 `candidates.csv`、`reviewed_candidates.csv`、`candidates.npy`、`descriptors.npy`、`ring_keys.npy` 和 `metadata.yaml`，用于兼容未刷新到最新前端逻辑的运行路径。
+- 风险、限制或尚未验证项：
+  - 已运行 `python -m compileall backend\app`。
+  - 已用当前 `output_global_relocalization/reviewed_candidates.csv` 在临时目录验证，导出的 `candidates.npy` 为 `(643, 16)`，`descriptors.npy` 为 `(643, 20, 60)`。
+  - 需要重启正在运行的后端进程后才会生效。
+
+- 任务目标：将“确认候选点”改为按当前审核后的候选列表直接写出最终候选库。
+- 修改文件：
+  - `backend/app/services/global_relocalization.py`
+  - `backend/app/api/routes.py`
+  - `frontend/src/api/client.ts`
+  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
+  - `.agents/PROJECT_OVERVIEW.md`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 新增 `/api/tools/global_relocalization_candidates/final-export`，按前端当前候选点列表写出 `candidates.csv`、`reviewed_candidates.csv`、`candidates.npy`、`descriptors.npy`、`ring_keys.npy` 和 `metadata.yaml`。
+  - `candidates.npy` 按最终审核列表重排为连续 `candidate_id`，保持 `[N,16]` 格式。
+  - `descriptors.npy/ring_keys.npy` 暂按最终候选点数量生成匹配 shape 的零占位数组，避免数量与候选点不一致。
+  - 前端“确认候选点”在已有候选点时直接调用最终导出接口；只有没有加载候选点时才回退到 C++ 从 PCD 自动生成。
+  - 修复 CSV 加载时丢失 `source/label/locked/original_candidate_id` 的问题，支持重新加载 `reviewed_candidates.csv` 后继续保存最终库。
+- 风险、限制或尚未验证项：
+  - 已运行 `python -m compileall backend\app`、`npm run build`，并用临时目录验证 `.npy` 输出 shape。
+  - `descriptors.npy/ring_keys.npy` 仍是零占位，不是真实 Scan Context 描述子。
+  - 未启动浏览器做完整交互复测。
+
+- 任务目标：修复全局重定位候选点运行时 `--manual` 已传入但人工编辑计数仍为 0 的问题。
+- 修改文件：
+  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
+  - `cpp/src/mapping/global_relocalization.cpp`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - “确认候选点”运行前自动导出当前人工编辑文件，并回填 `manual_file`，避免使用旧的空 `manual_candidates.yaml`。
+  - 前端人工加点导出按同一 xyz 分组合并，避免同一位置多个 yaw 被导出成重复 base 点。
+  - C++ 手工 YAML 解析支持 PyYAML 输出的多行 `candidate_ids`、人工 addition 条目和删除区域 `regions`。
+  - C++ 候选生成时应用删除区域过滤，并将删除 id 与删除区域一起计入 `manual_deletions`。
+- 风险、限制或尚未验证项：
+  - 已运行 `npm run build` 并通过；仍有 Vite 对 Three/OrbitControls chunk 体积的常规警告。
+  - 已使用 VS Build Tools 重新编译 `cpp/build/global_relocalization_cli.exe`。
+  - 未用真实浏览器完成端到端点击删除/加点复测；当前发现的旧 `manual_candidates.yaml` 内容为空，需重新在界面编辑后再运行。
+
+- 任务目标：补全全局重定位候选点页面的人工编辑文件输入，避免 C++ 离线生成漏带 `--manual`。
+- 修改文件：
+  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
+  - `frontend/src/styles.css`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 在路径区新增“人工编辑文件”输入框，可手动选择 `manual_candidates.yaml`。
+  - “导出人工编辑文件”成功后自动把返回的 `manual_path` 写入 `formValues.manual_file`，后续点击“确认候选点”会把该路径传给 C++ runner。
+  - 路径区网格改为自适应列宽，四个路径输入在不同窗口宽度下更稳定。
+- 风险、限制或尚未验证项：
+  - 已运行 `npm run build` 并通过；仍有 Vite 对 Three/OrbitControls chunk 体积的常规警告。
+  - 未启动浏览器做交互截图验证。
+
+- 任务目标：修复同位置多方向候选点箭头/中心球拾取错位和前后遮挡导致无法点击的问题。
+- 修改文件：
+  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 候选点选择从 Three.js 物体 raycaster 命中改为屏幕空间命中测试。
+  - 箭头按鼠标到方向线段/箭头端点的像素距离命中，中心球按鼠标到投影中心的像素距离命中。
+  - 箭头命中优先于中心球，避免相邻候选组或前景中心球抢占点击。
+- 风险、限制或尚未验证项：
+  - 已运行 `npm run build`；未做真实浏览器手动点击回归。
+  - 当前命中阈值为箭头 14px、中心球 22px；后续可按实际屏幕缩放继续微调。
+
+- 任务目标：解决同一 xyz 多 yaw 候选在三维中互相遮挡、无法选择指定方向的问题。
+- 修改文件：
+  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 新增候选点位置分组结构，按毫米级 xyz 将多个 yaw 候选合并为一个中心球和多个方向箭头。
+  - 点击中心球选择同一位置的全部方向候选；点击箭头只选择该 yaw 对应的单个候选。
+  - 手动加点默认生成 8 个 yaw 方向候选，而不是单个方向。
+  - 支持拖动中心球，按当前相机视角平面移动整组同位置候选点。
+  - 鼠标离开画布时会结束框选/拖动，避免相机控制被锁住。
+- 风险、限制或尚未验证项：
+  - 已运行 `npm run build`；未做真实浏览器截图验证。
+  - 当前 xyz 分组使用 0.001m 量化容差；如果数据噪声更大，后续可做成可配置容差。
+
+- 任务目标：调整全局重定位候选点编辑按钮布局和参数说明。
+- 修改文件：
+  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
+  - `frontend/src/styles.css`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 将选择、框选、手动加点、删除选中点、锁定保留、设为禁用区域移到三维视图左侧竖状按钮栏，并通过悬浮 title 显示说明。
+  - 将容易混淆的按钮文案语义改为“删除选中点 / 锁定保留 / 设为禁用区域”。
+  - 为所有离线参数名增加圆圈感叹号帮助图标，悬浮显示中文注释。
+- 风险、限制或尚未验证项：
+  - 已运行 `npm run build`；未做截图级浏览器验证。
+
+- 任务目标：补全候选点人工编辑的撤销/重做、最终排序重编号，以及三维视图右上角轴向视图控件。
+- 修改文件：
+  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
+  - `frontend/src/styles.css`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 新增编辑快照历史栈，支持 Ctrl+Z / Ctrl+Y 和右上角小按钮撤销重做。
+  - 增删、恢复、清空回收站、锁定/解锁、人工加点、删除区域和候选字段编辑均纳入历史记录。
+  - 导出和 CSV 预览前统一按 `x/y/z/roll/pitch/yaw/original_candidate_id` 排序，并重新编号 `candidate_id`，让同一 xyz 不同 yaw 尽量连续展示。
+  - 在三维画布右上角新增类 Blender Navigation Gizmo 的 X/Y/Z/Home 视图按钮。
+- 风险、限制或尚未验证项：
+  - 已运行 `npm run build` 和后端 compileall；未做真实浏览器截图验证。
+  - 当前排序用 0.001m 坐标量化归组；如果后续需要更严格的“同一点”判定，可以把容差做成界面参数。
+
+- 任务目标：将全局重定位候选点生成下沉到 C++，避免继续依赖慢速 Python 生成候选点。
+- 修改文件：
+  - `cpp/include/ros_tool_suite/mapping/global_relocalization.hpp`
+  - `cpp/src/mapping/global_relocalization.cpp`
+  - `cpp/src/global_relocalization_cli/main.cpp`
+  - `cpp/CMakeLists.txt`
+  - `backend/app/services/cpp_runner.py`
+  - `backend/app/api/routes.py`
+  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
+  - `scripts/install_local.ps1`
+  - `scripts/build_dist.ps1`
+  - `README.md`
+  - `.agents/PROJECT_OVERVIEW.md`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 新增 `global_relocalization_cli` C++ 目标，复用现有 PCDReader 读取 ASCII/binary PCD。
+  - C++ 生成器实现体素降采样、3D occupancy、ground 支撑检查、clearance 检查、候选 base 采样、manual additions/deletions、候选姿态展开和输出。
+  - 输出 `candidates.csv`、`candidates.npy [N,16]`、`metadata.yaml`、`debug/preview_candidates.pcd`，并生成空 shape 的 `descriptors.npy/ring_keys.npy` 占位文件。
+  - 后端工具执行改为调用 `cpp/build/global_relocalization_cli.exe`，安装/发行脚本将该 exe 纳入必需产物。
+- 风险、限制或尚未验证项：
+  - 已用 VS Build Tools 环境编译 `global_relocalization_cli.exe`，并用临时 PCD/YAML 跑通候选输出。
+  - 当前还没有实现 virtual LiDAR ray casting 和 Scan Context descriptor，因此生成结果不能直接作为在线 fallback_global_localizer 的最终数据库使用。
+  - 普通 PowerShell 直接跑 `cmake --build` 可能缺 MSVC 标准库 include，需要先进入 VS Developer shell 或执行 `VsDevCmd.bat`。
+
+- 任务目标：修复后端启动时报 `ModuleNotFoundError: No module named 'numpy'`。
+- 修改文件：
+  - `backend/app/services/global_relocalization.py`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 在项目 `.venv` 中安装 `numpy 2.5.1`。
+  - 将 `global_relocalization.py` 的 numpy 改为延迟导入，缺依赖时只影响全局重定位候选点相关接口，不阻断 FastAPI 主应用导入。
+- 风险、限制或尚未验证项：
+  - 已用 `.venv\Scripts\python.exe -c "import app.main"` 验证后端应用可导入。
+  - 8000 端口已有进程监听，未强行停止旧进程；未在本轮完整重启用户正在占用的后端服务。
+
+- 任务目标：按 `GlobalRelocalization_OfflineDB_Design_and_CPP_Prompt.md` 补全全局重定位候选点审核页的数据流、参数草案和人工编辑文件导出。
+- 修改文件：
+  - `backend/app/services/global_relocalization.py`
+  - `backend/app/api/routes.py`
+  - `backend/app/catalog.py`
+  - `backend/requirements.txt`
+  - `frontend/src/api/client.ts`
+  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
+  - `frontend/src/styles.css`
+  - `.agents/PROJECT_OVERVIEW.md`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 新增后端 PCD 预览接口，支持读取 ASCII/binary PCD 的 `x/y/z` 采样点。
+  - 新增候选点读取接口，支持 `candidates.csv` 与 `candidates.npy [N,16]`。
+  - 新增人工编辑导出接口，按 MD 推荐输出 `manual_candidates.yaml` 与 `reviewed_candidates.csv`。
+  - 前端补齐 MD 中的离线参数草案、人工新增点、删除规则、锁定点、质量指标显示、删除区域和 YAML 预览。
+  - `backend/requirements.txt` 增加 `numpy`，用于读取 `.npy` 和 binary PCD。
+- 风险、限制或尚未验证项：
+  - 已运行 `python -m compileall backend\app`、`npm run build` 和临时文件服务回路测试；构建仍有 Vite 对 Three/OrbitControls chunk 体积的常规警告。
+  - 当前仍未实现真实 Scan Context / ray casting / descriptors.npy / ring_keys.npy 生成，前端导出的人工编辑文件需要后续 C++ 离线工具消费。
+  - `manual_candidates.yaml` 中的 `z: null` 只表达“由 3D ground index 自动估计”，实际估计逻辑尚未接入当前工具箱。
+
+- 任务目标：新增“全局重定位候选点”地图处理工具页框架，用于后续基于 arXiv.2605.07741 的离线候选点生成与人工审核。
+- 修改文件：
+  - `backend/app/catalog.py`
+  - `backend/app/api/routes.py`
+  - `backend/data/tool_modules.json`（本地运行配置，未纳入版本控制）
+  - `data/tool_modules.json`
+  - `frontend/src/App.vue`
+  - `frontend/src/components/ToolForm.vue`
+  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
+  - `frontend/src/styles.css`
+  - `.agents/PROJECT_OVERVIEW.md`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 新增工具 key `global_relocalization_candidates`，默认启用并归入地图处理分区；同步更新本地运行配置以便当前开发服务立即显示。
+  - 新增三维候选点审核组件，支持 ASCII PCD 预览、CSV 候选点加载、点击选择、框选、删除到回收站、恢复、人工加点和 CSV 导出预览。
+  - 后端 `/tools/global_relocalization_candidates/run` 返回框架态摘要和日志，真实候选点生成与写回逻辑暂未接入。
+  - 新建项目地图，记录当前仓库主线结构和工具接入方式。
+- 风险、限制或尚未验证项：
+  - 已运行 `npm run build` 并通过；存在 Vite 对 Three/OrbitControls chunk 体积的常规警告。
+  - 当前点云预览只在浏览器端解析 ASCII PCD；binary PCD 和 `.npy` 写回需后续接入后端采样/转换接口。
+  - 当前人工补点导出为 `candidates_reviewed.csv`，尚未实现写回 `candidates.npy/descriptors.npy/ring_keys.npy` 的兼容流程。
