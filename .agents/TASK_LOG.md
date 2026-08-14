@@ -1,5 +1,80 @@
 # 任务日志
 
+## 2026-08-12
+
+- 任务目标：接入 SCAN-Planner 推荐测试话题到 `ros_nav_test`，让新的消息类型可以直接添加到三维主视图进行可视化调试。
+- 修改文件：
+  - `frontend/src/lib/ros/displayRegistry.ts`
+  - `frontend/src/components/ToolForm.vue`
+  - `frontend/src/components/Nav3DViewer.vue`
+  - `.agents/PROJECT_OVERVIEW.md`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 扩展主视图显示类型识别，新增 `visualization_msgs/msg/Marker`、`scan_planner_msgs/msg/Bspline`、`geometry_msgs/msg/Twist`；同时把 `nav_msgs/msg/Odometry` 归入现有位姿显示通道。
+  - 在导航测试页默认可选话题清单中加入 SCAN-Planner 推荐的关键话题，包括 `/lio/cloud_local_base_exact`、`/grid_map/occupancy_inflate`、`/self_inflation`、`/planning/bspline`、`/initial_path`、`/cmd_vel_scanplanner_raw`、`/global_list`、`/a_star_list`、`/init_list`、`/optimal_list`、`/grid_map/sliding_map_bbox` 和 `/planning/data_display`。
+  - 三维主视图新增 SCAN 相关渲染能力：
+    - `Marker` 支持 `ARROW / SPHERE / CYLINDER / LINE_STRIP / LINE_LIST / SPHERE_LIST`
+    - `Bspline` 按控制点、阶数和 knots 前端近似采样为折线
+    - `Twist` 基于当前主位姿绘制速度箭头
+  - 显示项配置面板同步支持为 `Marker / Bspline / Twist` 调整颜色，便于区分局部点云、膨胀占据图、机体包络和轨迹。
+- 风险、限制或尚未验证项：
+  - 已运行 `cd frontend && npm run build` 并通过；构建仍有 Vite 对 Three/OrbitControls chunk 体积的常规警告。
+  - `scan_planner_msgs/msg/Bspline` 当前采用前端近似采样，仅用于调试轨迹形态；若后续需要和 SCAN 内部轨迹求值逐点严格一致，建议再补一个后端或桥接侧精确转换通道。
+  - `planning/data_display` 已加入可选话题列表，但当前三维主视图未对 `scan_planner_msgs/msg/DataDisp` 做专门可视化，建议先作为小窗文本/原始消息观察。
+  - 2026-08-12 继续修复 `/self_inflation`：确认该话题会在同一 topic 下连续发布多个 `visualization_msgs/msg/Marker`，依赖 `ns + id` 区分前后双圆柱；前端已改为按 `ns + id` 管理同 topic 的多个 Marker，避免第二个圆柱覆盖第一个，同时修正 `CYLINDER` 几何轴向与 ROS `z` 轴对齐。
+
+## 2026-08-05
+
+- 任务目标：排查当前电脑网络条件下 ROS 定位导航测试页是否能拿到 rosbridge 数据。
+- 修改文件：
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 记录本次仅做网络与 rosbridge 协议连通性排查，未修改前后端业务代码。
+  - 当前页面保存的 ROS 数据源为 `ws://10.10.15.40:9090`，本机可 ping 通 `10.10.15.40` 且 TCP 9090 端口可连接。
+  - 本机无法 ping 通 `192.168.123.98`，且没有到 `192.168.123.0/24` 的直连路由；因此页面不能直接访问布在 `192.168.123.98` 的 bridge，除非 `10.10.15.40` 做端口转发或代理。
+  - 对 `ws://10.10.15.40:9090` 进行 WebSocket 握手和 rosapi 调用测试，30 秒内未收到握手响应；当前入口不像健康可用的 rosbridge。
+  - 用户补充确认：`10.10.15.40` 本机没有 rosbridge websocket，但 `10.10.15.40` 可以访问 `192.168.123.98` 上的 bridge；因此前端需要通过 SSH 隧道、端口转发或路由方式间接访问 `98:9090`。
+  - 进一步确认测试需求包含 Android 端，临时 SSH 本地隧道不适合；更合适的是在 `10.10.15.40` 上用 TCP 代理或 DNAT+SNAT 长期暴露 `192.168.123.98:9090`。
+- 风险、限制或尚未验证项：
+  - 未登录 `10.10.15.40` 或 `192.168.123.98` 查看 rosbridge 进程、端口监听、转发规则和 ROS graph。
+  - 尚未在浏览器页面内点击“检测数据源”做 UI 级复测；结论基于本机网络命令和 WebSocket 协议探测。
+
+## 2026-07-21
+
+- 任务目标：修复初始化定位 `/initialpose` 时发时不发的问题。
+- 修改文件：
+  - `frontend/src/components/ToolForm.vue`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 导航控制下发改为复用 `ros_nav_test` 页面共享 rosbridge 连接，不再每次单独新建 WebSocket 后立即关闭。
+  - 连接配置变化或组件卸载时释放导航控制共享连接，避免继续使用旧 rosbridge 地址。
+  - `/initialpose` 消息补充 ROS2 `header.stamp.sec/nanosec`，让消息更接近 RViz 下发格式。
+- 已确认：
+  - `cd frontend && npm run build` 构建通过。
+- 风险、限制或尚未验证项：
+  - 尚未连接真实 rosbridge / Nav2 / AMCL 环境验证初始化定位接收成功率。
+  - 若机器人端 `/initialpose` 订阅者自身未启动、QoS 不兼容或 rosbridge 网络严重阻塞，仍可能出现机器人端不处理的情况。
+
+- 任务目标：修复 main 分支 ROS 导航测试页在弱网或 rosbridge 不可达时持续重连、可能拖垮机器人侧网络连接的问题。
+- 修改文件：
+  - `frontend/src/lib/ros/liveAdapter.ts`
+  - `frontend/src/components/Nav3DViewer.vue`
+  - `frontend/src/components/NavTopicPanelList.vue`
+  - `frontend/src/components/ToolForm.vue`
+  - `.agents/PROJECT_OVERVIEW.md`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - `RosbridgeLiveAdapter` 增加连接序号校验，忽略已关闭或被替换的旧 WebSocket 回调。
+  - 连接超时和首次连接失败时立即关闭当前 socket，减少半关闭连接和重复重连对 rosbridge 的压力。
+  - 增加 `reconnectMaxAttempts`，自动重连达到上限后暂停；用户手动重连会重置计数。
+  - 为导航测试页的三维主视图、话题小窗和链路延迟窗口设置 3 秒起步、30 秒封顶、最多 4 次的共享连接重试策略。
+  - rosapi 服务调用增加超时保护，避免服务无响应时 Promise 长时间悬挂。
+- 已确认：
+  - `cd frontend && npm run build` 构建通过。
+- 风险、限制或尚未验证项：
+  - 尚未在真实机器人弱网环境下验证 SSH 断连问题是否消失。
+  - 当前仍保留用户手动重连能力；如果机器人端 rosbridge 本身不可用，页面会在有限重试后暂停而不是持续重试。
+
 ## 2026-07-20
 
 - 任务目标：在 ROS 定位导航测试三维主视图右下角显示机器狗当前位置（`base_link` 的 `x/y/z/yaw`）。
@@ -539,6 +614,23 @@
   - `frontend/src/styles.css`
   - `.agents/PROJECT_OVERVIEW.md`
   - `.agents/TASK_LOG.md`
+- 日期：2026-08-07
+- 任务目标：分析定位导航测试模块通过 rosbridge websocket 订阅点云时的积压原因，并把点云限频前移到 rosbridge 订阅层，降低主机端 rosbridge 负载与旧帧堆积。
+- 修改文件：
+  - `frontend/src/lib/ros/liveAdapter.ts`
+  - `frontend/src/components/Nav3DViewer.vue`
+  - `frontend/src/components/NavTopicPanelList.vue`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 确认共享订阅层当前仅做“同 topic 复用连接”，不会自动把页面中的 `hzLimit` 传给 rosbridge；原实现仍会按话题原始频率持续收包，再由页面侧二次丢帧。
+  - 为实时订阅抽象新增 `RosSubscriptionOptions`，支持把点云显示项/点云卡片的 `hzLimit` 转成 rosbridge `throttle_rate`，并为点云订阅增加 `queue_length=1`，尽量只保留最新帧。
+  - 共享连接层新增订阅参数合并逻辑；当多个页面模块复用同一 topic 时，只有在所有订阅方都声明了限流参数的情况下，才把限流参数安全地下推到共享 rosbridge 订阅，避免静默改变其他未声明订阅方的语义。
+  - 保留页面内现有 `hzLimit` 二次过滤逻辑，避免单次重建点云或 UI 渲染过重时重新放大浏览器侧压力。
+- 风险、限制或尚未验证项：
+  - 已运行 `npm run build` 并通过；构建仍有 Vite 对 Three/OrbitControls chunk 体积的常规警告。
+  - `queue_length=1` 与 `throttle_rate` 能显著减少桥接层和浏览器积压，但如果上游 ROS 节点本身发布频率极高、单帧点云极大，rosbridge 主机端仍可能需要继续做上游限频、压缩或独立转发。
+  - 当前仅对导航测试页中的点云主视图和点云卡片下推限流参数；延迟诊断订阅与非点云话题保持原语义未变。
+
 - 主要变更：
   - 新增后端 PCD 预览接口，支持读取 ASCII/binary PCD 的 `x/y/z` 采样点。
   - 新增候选点读取接口，支持 `candidates.csv` 与 `candidates.npy [N,16]`。
@@ -571,3 +663,38 @@
   - 已运行 `npm run build` 并通过；存在 Vite 对 Three/OrbitControls chunk 体积的常规警告。
   - 当前点云预览只在浏览器端解析 ASCII PCD；binary PCD 和 `.npy` 写回需后续接入后端采样/转换接口。
   - 当前人工补点导出为 `candidates_reviewed.csv`，尚未实现写回 `candidates.npy/descriptors.npy/ring_keys.npy` 的兼容流程。
+- 日期：2026-07-28
+- 任务目标：分析两次手动初始定位日志，判断一次成功、一次角度略偏后失败的逻辑归因。
+- 修改文件：
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 记录本次仅基于用户提供日志和仓库中运行时参数展示代码进行分析，未修改定位节点源码。
+- 风险、限制或尚未验证项：
+  - 仓库中未发现 `initialpose_bridge`、`lio_delta_pose_bridge`、`ndt_health_monitor` 等 ROS 节点源码；结论为基于日志时序的推断，尚未通过机器人现场话题和运行时参数复核。
+
+- 日期：2026-08-14
+- 任务目标：修复 ROS 定位导航模块三维视图里点云按 z 分层增强时的颜色方向，使高处点云显示更深，便于分辨障碍物。
+- 修改文件：
+  - `frontend/src/components/Nav3DViewer.vue`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 首次尝试通过亮度压深高点，但在红色系点云上会把主色观感破坏得过重。
+  - 根据实际界面反馈，改为以色相偏移和饱和度增强为主做 z 分层，亮度只保留很小的稳定扰动，尽量保住原始主色同时增强高处障碍物辨识度。
+  - 进一步将高度参考从全局 z 范围改为点云自身的中位高度面，并按“高于中位面”的相对高度重点增强颜色，降低整片地面一起变色导致的障碍物不明显问题。
+  - 为避免每帧全量排序带来的额外开销，改为只用固定上限采样点估计中位高度。
+  - 根据进一步反馈，撤掉局部 `x/y/z -> RGB` 混色，改为仅在当前选中主色与其补色之间做高度驱动的受控过渡，让地面保持主色、障碍物再向补色偏移。
+  - 更新函数注释，明确当前策略优先保证颜色体系稳定和可辨识度。
+- 风险、限制或尚未验证项：
+  - 本次未运行前端页面进行视觉复核；当前结论基于已确认代码逻辑，属于“已修改、尚未实际界面验证”。
+
+- 日期：2026-08-14
+- 任务目标：清理 ROS 导航测试页中话题选择小窗与链路延迟窗口的默认话题，并把配置保存时机收敛为页面刷新后自动保存一次默认态、退出模块时再保存一次当前态。
+- 修改文件：
+  - `frontend/src/components/ToolForm.vue`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 清空侧边小窗、完整小窗和链路延迟窗口的默认预置话题，避免页面进入后自动带出一批诊断话题。
+  - 将链路延迟窗口的话题文本纳入 `nav_layout_json` 一并保存和恢复，不再只保存主视图与小窗布局。
+  - 新增导航模块会话级自动保存控制：进入 `ros_nav_test` 后在配置加载完成时自动保存一次当前默认态，离开该模块或组件卸载时再自动保存一次当前配置。
+- 风险、限制或尚未验证项：
+  - 本次未实际切换模块并抓取后端保存文件验证保存时机，只基于前端代码路径完成修改，属于“已修改、尚未交互验证”。

@@ -159,6 +159,10 @@ function buildSharedRosConfig(): RosLiveConfig {
     provider: props.provider,
     url: props.url,
     timeoutMs: props.timeoutMs,
+    autoReconnect: true,
+    reconnectBaseDelayMs: 3000,
+    reconnectMaxDelayMs: 30000,
+    reconnectMaxAttempts: 4,
     sharedKey: `ros-nav-test:${props.provider}:${props.url}:${props.timeoutMs}`,
     adapterName: "ROS 测试工作台共享连接",
   };
@@ -1274,6 +1278,26 @@ function handlePanelMessage(panelId: string, message: any) {
   }
 }
 
+/**
+ * 功能说明：
+ * 为点云卡片生成 rosbridge 侧订阅限流参数，避免页面收到过多旧帧后再丢弃。
+ */
+function subscriptionOptionsForPanel(panel: NavPanelItem) {
+  if (!isPointCloudPanel(panel)) {
+    return undefined;
+  }
+  const hzLimit = safeHzLimit(panel);
+  if (hzLimit <= 0) {
+    return {
+      queueLength: 1,
+    };
+  }
+  return {
+    throttleRateMs: Math.max(1, Math.round(1000 / hzLimit)),
+    queueLength: 1,
+  };
+}
+
 function subscribeActivePanels() {
   activePanels.value.forEach((panel) => {
     if (unsubscribeMap.has(panel.id)) {
@@ -1281,7 +1305,7 @@ function subscribeActivePanels() {
     }
     const unsubscribe = adapter?.subscribe(panel.topic, panel.messageType, (message) => {
       handlePanelMessage(panel.id, message);
-    });
+    }, subscriptionOptionsForPanel(panel));
     if (unsubscribe) {
       unsubscribeMap.set(panel.id, unsubscribe);
     }
@@ -1414,7 +1438,7 @@ watch(
       }
       const unsubscribe = adapter?.subscribe(panel.topic, panel.messageType, (message) => {
         handlePanelMessage(panel.id, message);
-      });
+      }, subscriptionOptionsForPanel(panel));
       if (unsubscribe) {
         unsubscribeMap.set(panel.id, unsubscribe);
       }

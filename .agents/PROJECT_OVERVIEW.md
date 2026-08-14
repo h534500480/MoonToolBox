@@ -31,6 +31,14 @@ ROS Tool Suite 是一个面向 ROS 地图处理、定位导航调试、网络扫
 3. 如需专用页面，在 `frontend/src/components/ToolForm.vue` 中按 `tool.key` 分支挂载组件。
 4. 如需真实后端执行，在 `backend/app/api/routes.py` 的 `/tools/{tool_key}/run` 分支接入服务或 CLI。
 
+## ROS 实时连接
+
+- `frontend/src/lib/ros/liveAdapter.ts` 是前端 rosbridge 实时连接的统一封装，支持 mock、rosbridge、共享连接、topic 订阅、topic 发布和 rosapi 服务调用。
+- `ros_nav_test` 页面中的三维主视图、话题小窗和链路延迟窗口共用同一个 rosbridge shared key，避免同一页面重复建立 WebSocket。
+- 弱网或 rosbridge 不可达时，共享连接会主动关闭失败 socket，并使用有限次数的慢退避自动重连；达到上限后暂停，等待用户手动重连，避免持续重试影响机器人侧网络和 SSH 会话。
+- `frontend/src/lib/ros/displayRegistry.ts` 负责把 topic 类型映射到主视图显示类型；当前三维主视图除 `PointCloud2 / OccupancyGrid / Path / TF / Pose / PoseArray / LaserScan` 外，还支持 `visualization_msgs/msg/Marker`、`scan_planner_msgs/msg/Bspline` 和 `geometry_msgs/msg/Twist`，便于直接调试 SCAN-Planner 一类带自定义轨迹与 Marker 可视化的话题。
+- `frontend/src/components/Nav3DViewer.vue` 中的 Marker 支持当前已覆盖 SCAN-Planner 调试常用形状：`ARROW / SPHERE / CYLINDER / LINE_STRIP / LINE_LIST / SPHERE_LIST`；`scan_planner_msgs/msg/Bspline` 当前按前端近似采样成折线显示，用于快速判断局部轨迹走势，不追求与规划器内部求值完全一致。
+
 ## 全局重定位候选点工具
 
 工具 key 为 `global_relocalization_candidates`，属于地图处理分区。当前实现范围是离线数据库生成前的审核工作台：

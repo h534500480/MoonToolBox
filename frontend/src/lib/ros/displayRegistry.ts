@@ -7,7 +7,7 @@
  * 2. 根据 topic 名和消息类型推断显示类型，避免模板里堆判断。
  * 3. 后续新增 LaserScan、Marker、PointCloud2 时只扩展这里。
  */
-export type NavDisplayKind = "map" | "path" | "tf" | "pose" | "pose_array" | "pointcloud" | "laser" | "obstacle_zone" | "unknown";
+export type NavDisplayKind = "map" | "path" | "tf" | "pose" | "pose_array" | "pointcloud" | "laser" | "marker" | "bspline" | "twist" | "obstacle_zone" | "unknown";
 
 export interface NavViewerDisplay {
   topic: string;
@@ -17,6 +17,7 @@ export interface NavViewerDisplay {
   mapOpacity?: number;
   pointSize?: number;
   hzLimit?: number;
+  pointColorMode?: "solid" | "layered";
   color?: string;
   tfShowNames?: boolean;
   tfLabelSize?: number;
@@ -34,6 +35,15 @@ export function inferDisplayKind(topic: string, messageType: string): NavDisplay
   }
   if (messageType === "sensor_msgs/msg/LaserScan") {
     return "laser";
+  }
+  if (messageType === "visualization_msgs/msg/Marker" || messageType === "visualization_msgs/Marker") {
+    return "marker";
+  }
+  if (messageType === "scan_planner_msgs/msg/Bspline" || messageType === "scan_planner_msgs/Bspline") {
+    return "bspline";
+  }
+  if (messageType === "geometry_msgs/msg/Twist" || messageType === "geometry_msgs/Twist") {
+    return "twist";
   }
   if (messageType === "nav_msgs/OccupancyGrid" || messageType === "nav_msgs/msg/OccupancyGrid") {
     return "map";
@@ -62,6 +72,8 @@ export function inferDisplayKind(topic: string, messageType: string): NavDisplay
   if (
     messageType === "geometry_msgs/msg/PoseWithCovarianceStamped" ||
     messageType === "geometry_msgs/msg/PoseStamped" ||
+    messageType === "nav_msgs/msg/Odometry" ||
+    messageType === "nav_msgs/Odometry" ||
     messageType === "geometry_msgs/PoseWithCovarianceStamped" ||
     messageType === "geometry_msgs/PoseStamped"
   ) {
@@ -79,6 +91,15 @@ export function buildDisplayLabel(topic: string, kind: NavDisplayKind): string {
   }
   if (kind === "laser") {
     return `Laser: ${topic}`;
+  }
+  if (kind === "marker") {
+    return `Marker: ${topic}`;
+  }
+  if (kind === "bspline") {
+    return `Bspline: ${topic}`;
+  }
+  if (kind === "twist") {
+    return `Twist: ${topic}`;
   }
   if (kind === "map") {
     return `Map: ${topic}`;
