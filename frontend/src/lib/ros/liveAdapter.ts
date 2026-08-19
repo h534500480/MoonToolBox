@@ -145,8 +145,8 @@ class SharedRosSession {
         client.active = true;
         await this.baseAdapter.requestReconnect(reason);
       },
-      subscribe: (topicName: string, messageType: string, handler: RosMessageHandler) =>
-        this.subscribe(clientId, topicName, messageType, handler),
+      subscribe: (topicName: string, messageType: string, handler: RosMessageHandler, options?: RosSubscriptionOptions) =>
+        this.subscribe(clientId, topicName, messageType, handler, options),
       publish: (topicName: string, messageType: string, message: Record<string, unknown>) => {
         this.baseAdapter.publish(topicName, messageType, message);
       },

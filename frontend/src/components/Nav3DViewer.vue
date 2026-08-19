@@ -99,7 +99,7 @@ const latestMessageByTopic = new Map<string, any>();
 const sourceFrameByTopic = new Map<string, string>();
 const sourceStampMsByTopic = new Map<string, number | null>();
 const baseLocalMatrixByTopic = new Map<string, THREE.Matrix4>();
-const tfTransformHistoryByChildFrame = new Map<string, TfTransformSample[]>();
+const tfTransformHistoryByTopic = new Map<string, Map<string, TfTransformSample[]>>();
 const tfFrameSignatureByTopic = new Map<string, string>();
 const raycaster = new THREE.Raycaster();
 const interactionPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
@@ -279,7 +279,7 @@ function handleWebglContextRestored() {
 function teardownRenderer() {
   clearInteractionPreview();
   clearAllTopicVisuals();
-  tfTransformHistoryByChildFrame.clear();
+  tfTransformHistoryByTopic.clear();
   tfFrameNodeCacheByTopic.clear();
   if (renderer?.domElement) {
     renderer.domElement.removeEventListener("webglcontextlost", handleWebglContextLost);
@@ -329,6 +329,7 @@ function disposeTopic(topic: string) {
     tfGroupByTopic.delete(topic);
   }
   tfFrameNodeCacheByTopic.delete(topic);
+  tfTransformHistoryByTopic.delete(normalizeTfTopicKey(topic));
 
   const poseObject = poseObjectByTopic.get(topic);
   if (poseObject) {
@@ -413,6 +414,56 @@ function normalizeFrameId(frameId: unknown) {
   return String(frameId ?? "").trim().replace(/^\/+/, "");
 }
 
+function normalizeTfTopicKey(topic: unknown) {
+  return normalizeFrameId(topic);
+}
+
+function tfReferenceTopicKeys(topic: string) {
+  const normalizedTopic = normalizeTfTopicKey(topic);
+  if (normalizedTopic === "tf_static") {
+    return ["tf_static"];
+  }
+  if (normalizedTopic === "tf") {
+    return ["tf", "tf_static"];
+  }
+  return ["tf_static", normalizedTopic].filter((item, index, array) => item && array.indexOf(item) === index);
+}
+
+function tfHistoryMapForTopic(topic: string, createIfMissing = false) {
+  const topicKey = normalizeTfTopicKey(topic);
+  if (!topicKey) {
+    return null;
+  }
+  const existing = tfTransformHistoryByTopic.get(topicKey);
+  if (existing || !createIfMissing) {
+    return existing ?? null;
+  }
+  const created = new Map<string, TfTransformSample[]>();
+  tfTransformHistoryByTopic.set(topicKey, created);
+  return created;
+}
+
+function tfFramesForTopic(topic: string) {
+  const frameSet = new Set<string>();
+  tfReferenceTopicKeys(topic).forEach((topicKey) => {
+    const historyMap = tfTransformHistoryByTopic.get(topicKey);
+    historyMap?.forEach((_samples, frameName) => {
+      frameSet.add(frameName);
+    });
+  });
+  return Array.from(frameSet).sort((left, right) => left.localeCompare(right, "zh-CN"));
+}
+
+function tfSamplesForFrame(topic: string, frameId: string) {
+  const samples: TfTransformSample[] = [];
+  tfReferenceTopicKeys(topic).forEach((topicKey) => {
+    const historyMap = tfTransformHistoryByTopic.get(topicKey);
+    const topicSamples = historyMap?.get(frameId) ?? [];
+    samples.push(...topicSamples);
+  });
+  return samples;
+}
+
 function extractHeaderStampMs(message: any) {
   const sec = Number(message?.header?.stamp?.sec ?? Number.NaN);
   const nanosec = Number(message?.header?.stamp?.nanosec ?? Number.NaN);
@@ -443,8 +494,8 @@ function buildTransformMatrix(translation: any, rotation: any) {
   return matrix;
 }
 
-function selectTfTransformSample(frameId: string, targetStampMs: number | null) {
-  const samples = tfTransformHistoryByChildFrame.get(frameId) ?? [];
+function selectTfTransformSample(frameId: string, targetStampMs: number | null, tfTopic = "/tf") {
+  const samples = tfSamplesForFrame(tfTopic, frameId);
   if (samples.length === 0) {
     return null;
   }
@@ -468,7 +519,7 @@ function selectTfTransformSample(frameId: string, targetStampMs: number | null) 
   return bestSample ?? staticSample ?? samples[samples.length - 1] ?? null;
 }
 
-function resolveFrameTransformToFixed(frameId: unknown, targetStampMs: number | null = null, trail = new Set<string>()): THREE.Matrix4 | null {
+function resolveFrameTransformToFixed(frameId: unknown, targetStampMs: number | null = null, tfTopic = "/tf", trail = new Set<string>()): THREE.Matrix4 | null {
   const sourceFrame = normalizeFrameId(frameId);
   const fixedFrame = currentFixedFrame();
   if (!sourceFrame || sourceFrame === fixedFrame) {
@@ -477,12 +528,12 @@ function resolveFrameTransformToFixed(frameId: unknown, targetStampMs: number | 
   if (trail.has(sourceFrame)) {
     return null;
   }
-  const sample = selectTfTransformSample(sourceFrame, targetStampMs);
+  const sample = selectTfTransformSample(sourceFrame, targetStampMs, tfTopic);
   if (!sample) {
     return null;
   }
   trail.add(sourceFrame);
-  const parentMatrix = resolveFrameTransformToFixed(sample.parentFrame, targetStampMs, trail);
+  const parentMatrix = resolveFrameTransformToFixed(sample.parentFrame, targetStampMs, tfTopic, trail);
   trail.delete(sourceFrame);
   if (!parentMatrix) {
     return null;
@@ -518,8 +569,8 @@ function composeLocalMatrix(
   return matrix;
 }
 
-function applyObjectFrameTransform(topic: string, object: THREE.Object3D, frameId: unknown, targetStampMs: number | null = null) {
-  const transformMatrix = resolveFrameTransformToFixed(frameId, targetStampMs);
+function applyObjectFrameTransform(topic: string, object: THREE.Object3D, frameId: unknown, targetStampMs: number | null = null, tfTopic = "/tf") {
+  const transformMatrix = resolveFrameTransformToFixed(frameId, targetStampMs, tfTopic);
   const baseMatrix = baseLocalMatrixByTopic.get(topic) ?? new THREE.Matrix4().identity();
   const finalMatrix = transformMatrix ? transformMatrix.clone().multiply(baseMatrix) : baseMatrix.clone();
   const position = new THREE.Vector3();
@@ -726,7 +777,7 @@ function syncMapDisplayConfigs(displays: NavViewerDisplay[]) {
 }
 
 function emitTfFrames(topic: string) {
-  const frames = Array.from(tfTransformHistoryByChildFrame.keys()).sort((left, right) => left.localeCompare(right, "zh-CN"));
+  const frames = tfFramesForTopic(topic);
   const signature = frames.join("|");
   if (tfFrameSignatureByTopic.get(topic) === signature) {
     return;
@@ -1930,10 +1981,9 @@ function renderTf(topic: string) {
     tfGroupByTopic.set(topic, group);
   }
   const frameNodeMap = tfFrameNodeCacheByTopic.get(topic) ?? new Map<string, THREE.Group>();
-  const frames = Array.from(tfTransformHistoryByChildFrame.keys())
+  const frames = tfFramesForTopic(topic)
     .filter((frameName) => showAllFrames || visibleFrames.has(frameName))
-    .sort((left, right) => left.localeCompare(right, "zh-CN"))
-    .slice(0, 80);
+    .sort((left, right) => left.localeCompare(right, "zh-CN"));
   const activeFrames = new Set(frames);
 
   frameNodeMap.forEach((frameNode, frameName) => {
@@ -1943,7 +1993,7 @@ function renderTf(topic: string) {
   });
 
   frames.forEach((frameName) => {
-    const transformMatrix = resolveFrameTransformToFixed(frameName);
+    const transformMatrix = resolveFrameTransformToFixed(frameName, null, topic);
     if (!transformMatrix) {
       const hiddenNode = frameNodeMap.get(frameName);
       if (hiddenNode) {
@@ -2365,7 +2415,12 @@ function renderObstacleZone(topic: string, message: any) {
 
 function ingestTfMessage(topic: string, message: any) {
   const transforms = Array.isArray(message?.transforms) ? message.transforms : [];
-  const isStaticTopic = normalizeFrameId(topic) === "tf_static";
+  const normalizedTopic = normalizeTfTopicKey(topic);
+  const topicHistoryMap = tfHistoryMapForTopic(normalizedTopic, true);
+  if (!topicHistoryMap) {
+    return;
+  }
+  const isStaticTopic = normalizedTopic === "tf_static";
   const currentTimeMs = Date.now();
   transforms.forEach((item: any) => {
     const childFrame = normalizeFrameId(item?.child_frame_id);
@@ -2379,11 +2434,11 @@ function ingestTfMessage(topic: string, message: any) {
       stampMs: isStaticTopic ? null : extractHeaderStampMs(item),
       staticTransform: isStaticTopic,
     };
-    const history = tfTransformHistoryByChildFrame.get(childFrame) ?? [];
+    const history = topicHistoryMap.get(childFrame) ?? [];
     const nextHistory = [...history.filter((sample) => sample.staticTransform !== isStaticTopic), nextSample]
       .filter((sample) => sample.staticTransform || sample.stampMs === null || currentTimeMs - sample.stampMs <= maxTfHistoryAgeMs)
       .slice(-maxTfHistorySamplesPerFrame);
-    tfTransformHistoryByChildFrame.set(childFrame, nextHistory);
+    topicHistoryMap.set(childFrame, nextHistory);
   });
   emitTfFrames(topic);
   updateBaseLinkHud();
@@ -2520,7 +2575,7 @@ async function reconnectAndResubscribe() {
   supportTfUnsubscribeMap.forEach((unsubscribe) => unsubscribe());
   supportTfUnsubscribeMap.clear();
   clearAllTopicVisuals();
-  tfTransformHistoryByChildFrame.clear();
+  tfTransformHistoryByTopic.clear();
   props.displays
     .filter((display) => display.kind === "tf")
     .forEach((display) => emit("tfFramesChange", { topic: display.topic, frames: [] }));

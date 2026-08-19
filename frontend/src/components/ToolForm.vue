@@ -33,7 +33,13 @@ import type {
   ToolDefinition,
 } from "../types";
 import { buildDisplayLabel, inferDisplayKind, type NavViewerDisplay } from "../lib/ros/displayRegistry";
-import { createRosLiveAdapter, createSharedRosLiveAdapter, getSharedRosSessionStats, type SharedRosSessionStats } from "../lib/ros/liveAdapter";
+import {
+  createRosLiveAdapter,
+  createSharedRosLiveAdapter,
+  getSharedRosSessionStats,
+  type RosSubscriptionOptions,
+  type SharedRosSessionStats,
+} from "../lib/ros/liveAdapter";
 
 const Nav3DViewer = defineAsyncComponent(() => import("./Nav3DViewer.vue"));
 const NavTopicPanelList = defineAsyncComponent(() => import("./NavTopicPanelList.vue"));
@@ -251,6 +257,29 @@ function normalizeNavDelayTopicsInput(value: string) {
       seen.add(item);
       return true;
     });
+}
+
+/**
+ * 功能说明：
+ * 为链路延迟窗口生成 rosbridge 订阅限流参数，避免诊断窗口绕过主视图限流。
+ *
+ * 注意事项：
+ * 1. 点云和地图消息体积大，只用于延迟趋势判断时不需要全量频率。
+ * 2. TF 高频且前端只看最新时间戳，保留最新一帧即可。
+ */
+function subscriptionOptionsForNavDelay(definition: NavDelayTopicDefinition): RosSubscriptionOptions {
+  const topic = definition.topic;
+  const messageType = definition.messageType;
+  if (messageType === "sensor_msgs/msg/PointCloud2" || messageType === "sensor_msgs/PointCloud2") {
+    return { throttleRateMs: 500, queueLength: 1 };
+  }
+  if (messageType === "nav_msgs/msg/OccupancyGrid" || messageType === "nav_msgs/OccupancyGrid") {
+    return { throttleRateMs: 2000, queueLength: 1 };
+  }
+  if (messageType === "tf2_msgs/msg/TFMessage" || messageType === "tf2_msgs/TFMessage" || topic === "/tf" || topic === "/tf_static") {
+    return { throttleRateMs: topic === "/tf_static" ? 5000 : 200, queueLength: 1 };
+  }
+  return { queueLength: 1 };
 }
 
 function fallbackNavDelayLabel(topic: string) {
@@ -1269,7 +1298,7 @@ async function reconnectNavDelayPanel() {
       }
       const unsubscribe = navDelayAdapter?.subscribe(definition.topic, definition.messageType, (message) => {
         handleNavDelayMessage(definition, message);
-      });
+      }, subscriptionOptionsForNavDelay(definition));
       if (unsubscribe) {
         navDelayUnsubscribeMap.set(definition.topic, unsubscribe);
         subscribedTopics.push(definition.topic);

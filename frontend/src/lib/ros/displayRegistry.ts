@@ -57,7 +57,7 @@ export function inferDisplayKind(topic: string, messageType: string): NavDisplay
   if (topic.includes("plan") || topic.endsWith("/path")) {
     return "path";
   }
-  if (messageType === "tf2_msgs/TFMessage" || topic === "/tf" || topic === "/tf_static") {
+  if (messageType === "tf2_msgs/TFMessage" || messageType === "tf2_msgs/msg/TFMessage" || topic === "/tf" || topic === "/tf_static") {
     return "tf";
   }
   if (topic === "/geneox_mid360_obstacle" || topic.endsWith("/geneox_mid360_obstacle")) {

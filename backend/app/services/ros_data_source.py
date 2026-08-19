@@ -185,35 +185,61 @@ class RosbridgeRosDataSourceAdapter(BaseRosDataSourceAdapter):
         service_name = config.options.get("rosapi_service", "/rosapi/topics_and_raw_types").strip() or "/rosapi/topics_and_raw_types"
         timeout = self._timeout_seconds(config)
 
+        topic_type_map: Dict[str, str] = {}
         service_response = self._call_service(ws, service_name, {}, timeout)
         if service_response and service_response.get("result") is True:
             values = service_response.get("values", {}) or {}
             topics = values.get("topics", []) or []
             types = values.get("types", []) or []
-            typed_topics = [
-                RosTopicItem(name=str(topic), type=str(types[index] if index < len(types) else ""))
-                for index, topic in enumerate(topics)
-            ]
+            for index, topic in enumerate(topics):
+                topic_name = str(topic)
+                topic_type_map[topic_name] = str(types[index] if index < len(types) else "")
+
+        fallback_response = self._call_service(ws, "/rosapi/topics", {}, timeout)
+        fallback_topics: List[str] = []
+        if fallback_response and fallback_response.get("result") is True:
+            fallback_values = fallback_response.get("values", {}) or {}
+            fallback_topics = [str(topic) for topic in (fallback_values.get("topics", []) or [])]
+            for topic_name in fallback_topics:
+                topic_type_map.setdefault(topic_name, "")
+
+        if not topic_type_map:
+            return None
+
+        for topic_name, topic_type in list(topic_type_map.items()):
+            if topic_type:
+                continue
+            resolved_type = self._call_topic_type_service(ws, topic_name, timeout)
+            if resolved_type:
+                topic_type_map[topic_name] = resolved_type
+
+        typed_topics = [
+            RosTopicItem(name=topic_name, type=topic_type_map[topic_name])
+            for topic_name in sorted(topic_type_map.keys())
+        ]
+        raw_type_topic_count = sum(1 for topic_type in topic_type_map.values() if topic_type)
+        if raw_type_topic_count == len(typed_topics):
             return RosTopicListResponse(
                 provider=self.provider,
                 status="success",
-                message=f"已通过 {service_name} 获取 {len(typed_topics)} 个 topic。",
+                message=f"已通过 {service_name} 及 rosapi 补充查询获取 {len(typed_topics)} 个 topic。",
                 topics=typed_topics,
             )
-
-        fallback_response = self._call_service(ws, "/rosapi/topics", {}, timeout)
-        if not fallback_response or fallback_response.get("result") is not True:
-            return None
-
-        fallback_values = fallback_response.get("values", {}) or {}
-        topics = fallback_values.get("topics", []) or []
-        typed_topics = [RosTopicItem(name=str(topic), type="") for topic in topics]
         return RosTopicListResponse(
             provider=self.provider,
             status="partial",
-            message="已通过 /rosapi/topics 获取 topic 名称，但没有拿到消息类型。",
+            message=f"已获取 {len(typed_topics)} 个 topic，其中 {raw_type_topic_count} 个拿到了消息类型。",
             topics=typed_topics,
         )
+
+    def _call_topic_type_service(self, ws, topic_name: str, timeout: float) -> str:
+        """补查单个 topic 的消息类型，避免 rosapi 批量接口遗漏部分新话题。"""
+
+        response = self._call_service(ws, "/rosapi/topic_type", {"topic": topic_name}, timeout)
+        if not response or response.get("result") is not True:
+            return ""
+        values = response.get("values", {}) or {}
+        return str(values.get("type", "") or "")
 
     def _call_service(self, ws, service: str, args: Dict[str, object], timeout: float) -> Optional[Dict[str, object]]:
         request_id = f"svc:{service}:{uuid.uuid4().hex}"

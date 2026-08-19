@@ -698,3 +698,29 @@
   - 新增导航模块会话级自动保存控制：进入 `ros_nav_test` 后在配置加载完成时自动保存一次当前默认态，离开该模块或组件卸载时再自动保存一次当前配置。
 - 风险、限制或尚未验证项：
   - 本次未实际切换模块并抓取后端保存文件验证保存时机，只基于前端代码路径完成修改，属于“已修改、尚未交互验证”。
+
+- 日期：2026-08-17
+- 任务目标：修复 ROS 导航测试页“刷新话题”时漏掉 `/fallback_global_*` 一类实际存在 topic 的问题。
+- 修改文件：
+  - `backend/app/services/ros_data_source.py`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 调整 rosbridge 话题查询逻辑，不再只依赖 `/rosapi/topics_and_raw_types` 单次返回结果。
+  - 新增 `/rosapi/topics` 名单补齐和 `/rosapi/topic_type` 单 topic 类型补查，避免 rosapi 批量接口遗漏部分新话题或漏掉消息类型时，前端话题选择窗直接看不到这些 topic。
+- 风险、限制或尚未验证项：
+  - 已通过 `python -m compileall backend\\app\\services\\ros_data_source.py` 做语法校验。
+  - 尚未连接现场 rosbridge 实际验证 `/fallback_global_candidate_poses`、`/fallback_global_pose` 等话题是否已在前端刷新列表中出现；若 rosapi 本身也拿不到这些 topic，则仍需继续排查机器人侧 rosbridge/rosapi 配置。
+
+- 日期：2026-08-18
+- 任务目标：修复 TFMessage 类型显示项对非 `/tf` 话题不通用，以及 `/tf` 节点筛选/显示不完整的问题。
+- 修改文件：
+  - `frontend/src/lib/ros/displayRegistry.ts`
+  - `frontend/src/components/ToolForm.vue`
+  - `frontend/src/components/Nav3DViewer.vue`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 补齐 `tf2_msgs/msg/TFMessage` 的统一识别逻辑，让 `/display/tf` 一类非标准命名 TF 话题也会被识别成 TF 显示项。
+  - 将 TF 历史缓存从全局 child frame 共享改为按 topic 维护，并在 TF 渲染时按当前显示项的话题范围解析节点列表和坐标链路，避免不同 TF 话题之间互相串节点筛选结果。
+  - 保留 `/tf_static` 作为 TF 解析的静态补充源，同时去掉前端对 TF 节点渲染数量的固定截断，优先保证调试时看到完整节点集合。
+- 风险、限制或尚未验证项：
+  - 本次未实际连接页面验证 `/display/tf` 与 `/tf` 的节点筛选行为，只完成了代码级修正，属于“已修改、尚未交互验证”。
