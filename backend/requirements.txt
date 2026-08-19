@@ -5,3 +5,4 @@ pyyaml
 pillow
 websockets
 pystray
+numpy

@@ -12,6 +12,7 @@ venv/
 # Frontend
 frontend/node_modules/
 frontend/dist/
+frontend/android/.gradle/
 .pnpm-store/
 npm-debug.log*
 

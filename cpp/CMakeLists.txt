@@ -23,6 +23,13 @@ add_executable(pcd_tile_cli
 )
 target_include_directories(pcd_tile_cli PRIVATE ${COMMON_INCLUDE_DIR})
 
+add_executable(global_relocalization_cli
+    src/global_relocalization_cli/main.cpp
+    src/mapping/global_relocalization.cpp
+    src/mapping/pcd_reader.cpp
+)
+target_include_directories(global_relocalization_cli PRIVATE ${COMMON_INCLUDE_DIR})
+
 add_executable(network_scan_cli
     src/network_cli/main.cpp
     src/network/scanner.cpp

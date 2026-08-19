@@ -82,7 +82,7 @@
 
 - Vue 前端骨架
 - FastAPI 后端骨架
-- `pcd_map_cli / pcd_tile_cli / network_scan_cli / costmap_cli`
+- `pcd_map_cli / pcd_tile_cli / global_relocalization_cli / network_scan_cli / costmap_cli`
 - `frontend -> backend -> pcd_map_cli` 真实执行链路
 - 左侧工具分区、收藏、拖拽归类
 - 分区和收藏通过 `backend/data/tool_preferences.json` 持久化
@@ -231,7 +231,7 @@ npm run cap:open:android
 - CMake
 - 可用的 C++ 编译环境，例如 Visual Studio Build Tools；如果安装了 Ninja 会自动使用 Ninja
 
-如果 `cpp/build/` 里已经带有 `pcd_map_cli.exe`、`pcd_tile_cli.exe`、`network_scan_cli.exe`、`costmap_cli.exe`，安装脚本会跳过 C++ 构建，此时目标机器不需要 CMake。
+如果 `cpp/build/` 里已经带有 `pcd_map_cli.exe`、`pcd_tile_cli.exe`、`global_relocalization_cli.exe`、`network_scan_cli.exe`、`costmap_cli.exe`，安装脚本会跳过 C++ 构建，此时目标机器不需要 CMake。
 
 ## 构建单目录发行版
 

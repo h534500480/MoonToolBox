@@ -24,8 +24,13 @@ from app.models import (
 )
 from app.services.costmap_playback import run_costmap
 from app.services.browser_bridge import list_tabs, start_browser
-from app.services.cpp_runner import run_pcd_map, run_pcd_tile
+from app.services.cpp_runner import run_global_relocalization_candidates, run_pcd_map, run_pcd_tile
 from app.services.dialogs import browse_local_path
+from app.services.global_relocalization import (
+    export_manual_candidates,
+    load_candidates,
+    preview_pcd_points,
+)
 from app.services.mtslash_exporter import (
     fetch_mtslash_browser_favorites,
     fetch_mtslash_favorites,
@@ -179,6 +184,43 @@ def get_pcd_tile_preview(path: str, tile_size: float = 20.0):
     return preview_pcd_tile(path=path, tile_size=tile_size)
 
 
+@router.get("/tools/global_relocalization_candidates/pcd-preview")
+def get_global_relocalization_pcd_preview(path: str, max_points: int = 90000):
+    if not is_tool_enabled("global_relocalization_candidates"):
+        raise HTTPException(status_code=404, detail="Tool not enabled")
+    try:
+        return preview_pcd_points(path=path, max_points=max_points)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/tools/global_relocalization_candidates/candidates")
+def get_global_relocalization_candidates(path: str, max_candidates: int = 200000):
+    if not is_tool_enabled("global_relocalization_candidates"):
+        raise HTTPException(status_code=404, detail="Tool not enabled")
+    try:
+        return load_candidates(path=path, max_candidates=max_candidates)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/tools/global_relocalization_candidates/manual-export")
+def post_global_relocalization_manual_export(payload: dict):
+    if not is_tool_enabled("global_relocalization_candidates"):
+        raise HTTPException(status_code=404, detail="Tool not enabled")
+    try:
+        return export_manual_candidates(payload)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/tools/global_relocalization_candidates/final-export")
+def post_global_relocalization_final_export(payload: dict):
+    if not is_tool_enabled("global_relocalization_candidates"):
+        raise HTTPException(status_code=404, detail="Tool not enabled")
+    raise HTTPException(status_code=400, detail="final-export 已停用；请使用“确认候选点”，该入口会调用 C++ 基于 PCD 生成真实 descriptors.npy/ring_keys.npy。")
+
+
 @router.post("/tools/mtslash_export/login-captcha")
 def post_mtslash_login_captcha():
     if not is_tool_enabled("mtslash_export"):
@@ -258,6 +300,8 @@ def run_tool(tool_key: str, request: ToolRunRequest):
             return run_pcd_map(values)
         if tool_key == "pcd_tile":
             return run_pcd_tile(values)
+        if tool_key == "global_relocalization_candidates":
+            return run_global_relocalization_candidates(values)
         if tool_key == "network_scan":
             return run_network_scan(values)
         if tool_key == "costmap":

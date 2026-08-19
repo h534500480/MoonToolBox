@@ -33,10 +33,17 @@ import type {
   ToolDefinition,
 } from "../types";
 import { buildDisplayLabel, inferDisplayKind, type NavViewerDisplay } from "../lib/ros/displayRegistry";
-import { createRosLiveAdapter, createSharedRosLiveAdapter, getSharedRosSessionStats, type SharedRosSessionStats } from "../lib/ros/liveAdapter";
+import {
+  createRosLiveAdapter,
+  createSharedRosLiveAdapter,
+  getSharedRosSessionStats,
+  type RosSubscriptionOptions,
+  type SharedRosSessionStats,
+} from "../lib/ros/liveAdapter";
 
 const Nav3DViewer = defineAsyncComponent(() => import("./Nav3DViewer.vue"));
 const NavTopicPanelList = defineAsyncComponent(() => import("./NavTopicPanelList.vue"));
+const GlobalRelocalizationCandidateTool = defineAsyncComponent(() => import("./GlobalRelocalizationCandidateTool.vue"));
 
 const props = defineProps<{
   tool: ToolDefinition;
@@ -118,9 +125,11 @@ interface SavedNavPanelLayout {
   sidePanels: NavPanelItem[];
   fullPanels: NavPanelItem[];
   mainDisplays: NavViewerDisplay[];
+  navDelayTopicsText?: string;
   hasSidePanels: boolean;
   hasFullPanels: boolean;
   hasMainDisplays: boolean;
+  hasNavDelayTopicsText?: boolean;
 }
 
 interface NavDelayTopicDefinition {
@@ -196,6 +205,9 @@ function defaultMainDisplayColor(topic: string, kind: NavViewerDisplay["kind"]) 
   if (kind === "path") {
     return "#f6a237";
   }
+  if (kind === "bspline") {
+    return "#ff5f76";
+  }
   if (kind === "pose") {
     if (topic.includes("ekf")) {
       return "#7bdff2";
@@ -216,6 +228,27 @@ function defaultMainDisplayColor(topic: string, kind: NavViewerDisplay["kind"]) 
   }
   if (topic.includes("cloud_registered_body")) {
     return "#f6a237";
+  }
+  if (kind === "marker") {
+    if (topic.includes("self_inflation")) {
+      return "#4cc9f0";
+    }
+    if (topic.includes("optimal")) {
+      return "#ff5f76";
+    }
+    if (topic.includes("a_star")) {
+      return "#ffd166";
+    }
+    if (topic.includes("global")) {
+      return "#2ec4b6";
+    }
+    return "#8ea1ba";
+  }
+  if (kind === "twist") {
+    if (topic.includes("scanplanner")) {
+      return "#ff8c42";
+    }
+    return "#31d28a";
   }
   return "#ffffff";
 }
@@ -239,6 +272,29 @@ function normalizeNavDelayTopicsInput(value: string) {
     });
 }
 
+/**
+ * 功能说明：
+ * 为链路延迟窗口生成 rosbridge 订阅限流参数，避免诊断窗口绕过主视图限流。
+ *
+ * 注意事项：
+ * 1. 点云和地图消息体积大，只用于延迟趋势判断时不需要全量频率。
+ * 2. TF 高频且前端只看最新时间戳，保留最新一帧即可。
+ */
+function subscriptionOptionsForNavDelay(definition: NavDelayTopicDefinition): RosSubscriptionOptions {
+  const topic = definition.topic;
+  const messageType = definition.messageType;
+  if (messageType === "sensor_msgs/msg/PointCloud2" || messageType === "sensor_msgs/PointCloud2") {
+    return { throttleRateMs: 500, queueLength: 1 };
+  }
+  if (messageType === "nav_msgs/msg/OccupancyGrid" || messageType === "nav_msgs/OccupancyGrid") {
+    return { throttleRateMs: 2000, queueLength: 1 };
+  }
+  if (messageType === "tf2_msgs/msg/TFMessage" || messageType === "tf2_msgs/TFMessage" || topic === "/tf" || topic === "/tf_static") {
+    return { throttleRateMs: topic === "/tf_static" ? 5000 : 200, queueLength: 1 };
+  }
+  return { queueLength: 1 };
+}
+
 function fallbackNavDelayLabel(topic: string) {
   return topic.split("/").filter(Boolean).pop() || topic;
 }
@@ -251,15 +307,7 @@ const NAV_RECORDING_CHART_MAX_SAMPLES = 4000;
 const NAV_DELAY_WINDOW_MS = 10_000;
 const NAV_DELAY_MAX_SAMPLES = 180;
 const ROSBRIDGE_TIMEOUT_MIN_MS = 8000;
-const NAV_DELAY_DEFAULT_TOPICS = [
-  "/cloud_registered_body",
-  "/cloud_registered_bl",
-  "/points_aligned",
-  "/fastlio/odom",
-  "/odometry/filtered",
-  "/ndt_pose",
-  "/ekf_pose_with_covariance",
-];
+const NAV_DELAY_DEFAULT_TOPICS: string[] = [];
 const NAV_DELAY_TOPIC_COLORS = [
   "#2f8cff",
   "#31d28a",
@@ -282,11 +330,24 @@ const defaultNavTopicOptions: NavTopicOption[] = [
   { key: "/cloud_registered_bl", label: "NDT 输入点云", type: "sensor_msgs/msg/PointCloud2", note: "NDT 实际输入点云，适合和 points_aligned 对比。" },
   { key: "/cloud_registered_body", label: "FAST-LIO 输出点云", type: "sensor_msgs/msg/PointCloud2", note: "结构参考点云，也是 scan 链路上游。" },
   { key: "/ndt_pose", label: "NDT 位姿", type: "geometry_msgs/msg/PoseStamped", note: "文档明确推荐优先接入，用于显示定位箭头。" },
+  { key: "/initialpose_candidates", label: "候选位姿数组", type: "geometry_msgs/msg/PoseArray", note: "用于观察自动定位或重定位候选点，主视图会按位姿箭头批量显示。" },
   { key: "/odometry/filtered", label: "融合里程计", type: "nav_msgs/msg/Odometry", note: "查看导航运动和位姿连续性。" },
   { key: "/plan", label: "当前路径", type: "nav_msgs/msg/Path", note: "文档建议作为几何验证主视图的常规叠加项。" },
   { key: "/tf", label: "TF 树", type: "tf2_msgs/msg/TFMessage", note: "查看 base_link 与地图坐标系链路。" },
   { key: "/scan", label: "LaserScan", type: "sensor_msgs/msg/LaserScan", note: "文档建议用于查看 Nav2 局部避障输入。" },
   { key: "/geneox_mid360_obstacle", label: "冷静区/危险区", type: "std_msgs/msg/UInt8", note: "按文档推荐在主视图中绑定定位位姿绘制冷静区、危险区和忽略区。" },
+  { key: "/lio/cloud_local_base_exact", label: "SCAN 局部点云", type: "sensor_msgs/msg/PointCloud2", note: "SCAN-Planner 原始局部点云，用于确认前方障碍是否真的被感知到。" },
+  { key: "/grid_map/occupancy_inflate", label: "SCAN 膨胀占据点云", type: "sensor_msgs/msg/PointCloud2", note: "观察障碍是否真正进入 SCAN 的碰撞占据图。" },
+  { key: "/self_inflation", label: "SCAN 机体包络", type: "visualization_msgs/msg/Marker", note: "双圆柱机体包络，判断碰撞模型与障碍相对位置。" },
+  { key: "/planning/bspline", label: "SCAN B-spline 轨迹", type: "scan_planner_msgs/msg/Bspline", note: "SCAN 实际输出的局部轨迹，主视图会按采样折线显示。" },
+  { key: "/initial_path", label: "SCAN 参考路径", type: "nav_msgs/msg/Path", note: "Nav2 给 SCAN 的参考路径，用来看全局参考是否本身绕不开障碍。" },
+  { key: "/cmd_vel_scanplanner_raw", label: "SCAN 原始控制", type: "geometry_msgs/msg/Twist", note: "SCAN controller 原始控制输出，便于判断是否已经尝试避障。" },
+  { key: "/global_list", label: "SCAN 全局参考可视化", type: "visualization_msgs/msg/Marker", note: "规划器全局参考点与折线可视化。" },
+  { key: "/a_star_list", label: "SCAN A* 初始路径", type: "visualization_msgs/msg/Marker", note: "搜索阶段初始路径，可与最终轨迹对比。" },
+  { key: "/init_list", label: "SCAN 优化前轨迹", type: "visualization_msgs/msg/Marker", note: "优化前的轨迹点和折线。" },
+  { key: "/optimal_list", label: "SCAN 优化后轨迹", type: "visualization_msgs/msg/Marker", note: "优化后的轨迹点和折线，部分场景下可能不稳定。" },
+  { key: "/grid_map/sliding_map_bbox", label: "SCAN 局部地图窗口", type: "visualization_msgs/msg/Marker", note: "滑动局部地图窗口范围，用来确认障碍是否落入规划窗口。" },
+  { key: "/planning/data_display", label: "SCAN 规划诊断", type: "scan_planner_msgs/msg/DataDisp", note: "规划内部诊断数据，目前建议放在小窗里看原始数值。" },
   { key: "/ndt_status", label: "NDT 状态", type: "std_msgs/msg/UInt8", note: "0 unknown / 1 healthy / 2 degraded / 3 lost。" },
   { key: "/iteration_num", label: "NDT 迭代数", type: "autoware_internal_debug_msgs/msg/Int32Stamped", note: "判断是否接近失配或吃满迭代。" },
   { key: "/exe_time_ms", label: "NDT 耗时", type: "autoware_internal_debug_msgs/msg/Float32Stamped", note: "判断环境复杂度和性能抖动。" },
@@ -298,103 +359,11 @@ const defaultNavTopicOptions: NavTopicOption[] = [
 ];
 
 function createDefaultNavSidePanels(): NavPanelItem[] {
-  return [
-    {
-      id: "panel-ndt-status",
-      title: "NDT 状态窗",
-      topic: "/ndt_status",
-      type: "状态卡片",
-      messageType: "std_msgs/msg/UInt8",
-      collapsed: false,
-      paused: false,
-    },
-    {
-      id: "panel-ndt-iter",
-      title: "NDT 迭代数窗",
-      topic: "/iteration_num",
-      type: "诊断卡片",
-      messageType: "autoware_internal_debug_msgs/msg/Int32Stamped",
-      collapsed: false,
-      paused: false,
-    },
-    {
-      id: "panel-ndt-delay",
-      title: "NDT 耗时窗",
-      topic: "/exe_time_ms",
-      type: "诊断卡片",
-      messageType: "autoware_internal_debug_msgs/msg/Float32Stamped",
-      collapsed: false,
-      paused: false,
-    },
-    {
-      id: "panel-ndt-score",
-      title: "NDT 评分窗",
-      topic: "/ndt_score",
-      type: "诊断卡片",
-      messageType: "std_msgs/msg/Float32",
-      collapsed: false,
-      paused: false,
-    },
-    {
-      id: "panel-nav2-status",
-      title: "Nav2 状态窗",
-      topic: "/nav2_status",
-      type: "状态卡片",
-      messageType: "std_msgs/msg/String",
-      collapsed: false,
-      paused: false,
-    },
-    {
-      id: "panel-nav2-context",
-      title: "任务上下文窗",
-      topic: "/nav2_goal_context",
-      type: "状态卡片",
-      messageType: "std_msgs/msg/String",
-      collapsed: true,
-      paused: true,
-    },
-    {
-      id: "panel-ndt-observation",
-      title: "NDT 观测窗",
-      topic: "/fastlio_ndt_observation_debug",
-      type: "日志卡片",
-      messageType: "std_msgs/msg/String",
-      collapsed: false,
-      paused: false,
-    },
-  ];
+  return [];
 }
 
 function createDefaultNavFullPanels(): NavPanelItem[] {
-  return [
-    {
-      id: "full-panel-ndt-status",
-      title: "NDT 状态窗",
-      topic: "/ndt_status",
-      type: "状态卡片",
-      messageType: "std_msgs/msg/UInt8",
-      collapsed: false,
-      paused: false,
-    },
-    {
-      id: "full-panel-ndt-iter",
-      title: "NDT 迭代数窗",
-      topic: "/iteration_num",
-      type: "诊断卡片",
-      messageType: "autoware_internal_debug_msgs/msg/Int32Stamped",
-      collapsed: false,
-      paused: false,
-    },
-    {
-      id: "full-panel-ndt-score",
-      title: "NDT 评分窗",
-      topic: "/ndt_score",
-      type: "诊断卡片",
-      messageType: "std_msgs/msg/Float32",
-      collapsed: false,
-      paused: false,
-    },
-  ];
+  return [];
 }
 
 const selectedNavTopics = ref<string[]>([]);
@@ -464,15 +433,25 @@ const navInteractionMode = ref<"none" | "initialpose" | "navgoal">("none");
 const navControlLoading = ref(false);
 const navControlMessage = ref("");
 const navGoalSequence = ref(1);
+const manualInitialPoseX = ref("");
+const manualInitialPoseY = ref("");
+const manualInitialPoseZ = ref("0");
+const manualInitialPoseYaw = ref("");
 let costmapTimer: number | undefined;
 let rosSharedStatsTimer: number | undefined;
 let navDelayAdapter: ReturnType<typeof createSharedRosLiveAdapter> | null = null;
+let navControlAdapter: ReturnType<typeof createSharedRosLiveAdapter> | null = null;
+let navSessionAutoSaved = false;
+let navExitSaveInFlight: Promise<void> | null = null;
 const navDelayUnsubscribeMap = new Map<string, () => void>();
 const navDelaySampleMap = new Map<string, NavDelaySample[]>();
 
 watch(
   () => props.tool,
-  (tool) => {
+  (tool, previousTool) => {
+    if (previousTool?.key === "ros_nav_test") {
+      saveRosNavConfigOnExit();
+    }
     Object.keys(formValues).forEach((key) => delete formValues[key]);
     tool.fields.forEach((field) => {
       formValues[field.key] = field.value ?? "";
@@ -499,6 +478,7 @@ watch(
     rosRuntimeLogs.value = [];
     rosReconnectToken.value = 0;
     rosDataSourceConfigLoaded.value = false;
+    navSessionAutoSaved = false;
     rosRuntimeParams.value = null;
     rosRuntimeParamsMessage.value = "";
     navDelayPanelCollapsed.value = false;
@@ -590,6 +570,7 @@ watch(
 watch(
   () => [props.tool.key, formValues.ros_provider, formValues.ros_bridge_url, formValues.timeout_ms],
   () => {
+    disconnectNavControlAdapter();
     if (props.tool.key !== "ros_nav_test") {
       return;
     }
@@ -816,6 +797,34 @@ function triggerRosReconnect() {
 
 function buildRosSharedSessionKey() {
   return `ros-nav-test:${formValues.ros_provider || "rosbridge"}:${formValues.ros_bridge_url || ""}:${normalizeRosBridgeTimeoutMs(formValues.timeout_ms)}`;
+}
+
+function disconnectNavControlAdapter() {
+  navControlAdapter?.disconnect();
+  navControlAdapter = null;
+}
+
+async function ensureNavControlAdapterConnected() {
+  if (!navControlAdapter) {
+    navControlAdapter = createSharedRosLiveAdapter({
+      ...buildRosLiveConfig(),
+      adapterName: "导航控制下发",
+      autoReconnect: false,
+      sharedKey: buildRosSharedSessionKey(),
+      onError: (event) => {
+        appendRosRuntimeLog(
+          event.recoverable ? "warning" : "error",
+          `${event.scope}: ${event.message}${event.detail ? ` (${event.detail})` : ""}`
+        );
+      },
+    });
+  }
+  const snapshot = navControlAdapter.getConnectionSnapshot();
+  if (snapshot.connected) {
+    return navControlAdapter;
+  }
+  await navControlAdapter.requestReconnect("导航控制下发前确认 rosbridge 连接");
+  return navControlAdapter;
 }
 
 function refreshRosSharedStats() {
@@ -1273,6 +1282,10 @@ async function reconnectNavDelayPanel() {
     provider: formValues.ros_provider || "rosbridge",
     url: formValues.ros_bridge_url || "",
     timeoutMs: Number(normalizeRosBridgeTimeoutMs(formValues.timeout_ms)),
+    autoReconnect: true,
+    reconnectBaseDelayMs: 3000,
+    reconnectMaxDelayMs: 30000,
+    reconnectMaxAttempts: 4,
     sharedKey: buildRosSharedSessionKey(),
     adapterName: "链路延迟窗口",
     onStatusChange: (snapshot) => {
@@ -1298,7 +1311,7 @@ async function reconnectNavDelayPanel() {
       }
       const unsubscribe = navDelayAdapter?.subscribe(definition.topic, definition.messageType, (message) => {
         handleNavDelayMessage(definition, message);
-      });
+      }, subscriptionOptionsForNavDelay(definition));
       if (unsubscribe) {
         navDelayUnsubscribeMap.set(definition.topic, unsubscribe);
         subscribedTopics.push(definition.topic);
@@ -1458,6 +1471,7 @@ function buildRosDataSourceConfig() {
       paused: false,
     })),
     mainDisplays: navMainDisplays.value.map((display) => ({ ...display })),
+    navDelayTopicsText: navDelayTopicsApplied.value,
   };
   return {
     provider: (formValues.ros_provider || "rosbridge").trim() || "rosbridge",
@@ -1515,6 +1529,7 @@ function sanitizeNavViewerDisplay(raw: unknown): NavViewerDisplay | null {
     mapOpacity: typeof display.mapOpacity === "number" ? display.mapOpacity : undefined,
     pointSize: typeof display.pointSize === "number" ? display.pointSize : undefined,
     hzLimit: typeof display.hzLimit === "number" ? display.hzLimit : undefined,
+    pointColorMode: display.pointColorMode === "layered" ? "layered" : "solid",
     color: typeof display.color === "string" && display.color.trim() ? display.color.trim() : undefined,
     tfShowNames: typeof display.tfShowNames === "boolean" ? display.tfShowNames : undefined,
     tfLabelSize: typeof display.tfLabelSize === "number" ? display.tfLabelSize : undefined,
@@ -1533,6 +1548,7 @@ function parseSavedNavLayout(rawValue: string | undefined): SavedNavPanelLayout 
     const hasSidePanels = Array.isArray(parsed.sidePanels);
     const hasFullPanels = Array.isArray(parsed.fullPanels);
     const hasMainDisplays = Array.isArray(parsed.mainDisplays);
+    const hasNavDelayTopicsText = typeof parsed.navDelayTopicsText === "string";
     const sidePanels = Array.isArray(parsed.sidePanels)
       ? parsed.sidePanels
         .map((item, index) => sanitizeNavPanelItem(item, "side-panel", index))
@@ -1552,9 +1568,11 @@ function parseSavedNavLayout(rawValue: string | undefined): SavedNavPanelLayout 
       sidePanels,
       fullPanels,
       mainDisplays,
+      navDelayTopicsText: hasNavDelayTopicsText ? String(parsed.navDelayTopicsText ?? "") : "",
       hasSidePanels,
       hasFullPanels,
       hasMainDisplays,
+      hasNavDelayTopicsText,
     };
   } catch {
     return null;
@@ -1608,7 +1626,10 @@ function topicOptionToDisplay(option: NavTopicOption): NavViewerDisplay {
     mapOpacity: kind === "map" ? 0.94 : undefined,
     pointSize: kind === "pointcloud" ? 0.08 : undefined,
     hzLimit: kind === "pointcloud" ? 5 : undefined,
-    color: kind === "pointcloud" || kind === "path" || kind === "pose" ? defaultMainDisplayColor(option.key, kind) : undefined,
+    pointColorMode: kind === "pointcloud" ? "solid" : undefined,
+    color: kind === "pointcloud" || kind === "path" || kind === "pose" || kind === "marker" || kind === "bspline" || kind === "twist"
+      ? defaultMainDisplayColor(option.key, kind)
+      : undefined,
     tfShowNames: kind === "tf" ? true : undefined,
     tfLabelSize: kind === "tf" ? 0.5 : undefined,
     tfVisibleFrames: kind === "tf" ? [] : undefined,
@@ -1660,6 +1681,9 @@ async function loadRosDataSourceConfigForNav() {
       navSidePanels.value = savedLayout.hasSidePanels ? savedLayout.sidePanels : createDefaultNavSidePanels();
       navFullPanels.value = savedLayout.hasFullPanels ? savedLayout.fullPanels : createDefaultNavFullPanels();
       navMainDisplays.value = savedLayout.hasMainDisplays ? savedLayout.mainDisplays : [];
+      const navDelayTopicsText = savedLayout.hasNavDelayTopicsText ? (savedLayout.navDelayTopicsText || "") : defaultNavDelayTopicsText();
+      navDelayTopicsInput.value = navDelayTopicsText;
+      navDelayTopicsApplied.value = navDelayTopicsText;
     }
   } catch {
     // 配置读取失败时保留表单默认值，避免阻断页面使用。
@@ -1669,10 +1693,14 @@ async function loadRosDataSourceConfigForNav() {
     }
     rosDataSourceConfigLoaded.value = true;
     void reconnectNavDelayPanel();
+    if (!navSessionAutoSaved) {
+      navSessionAutoSaved = true;
+      void saveRosNavConfig({ successMessage: "", failurePrefix: "导航模块默认配置自动保存失败" });
+    }
   }
 }
 
-async function saveRosNavConfig() {
+async function saveRosNavConfig(options?: { successMessage?: string; failurePrefix?: string }) {
   rosDataSourceSaving.value = true;
   try {
     const saved = await saveRosDataSourceConfig(buildRosDataSourceConfig());
@@ -1680,12 +1708,29 @@ async function saveRosNavConfig() {
     formValues.ros_bridge_url = saved.options.url || formValues.ros_bridge_url || "";
     formValues.ros_api_service = saved.options.rosapi_service || formValues.ros_api_service || "";
     formValues.timeout_ms = normalizeRosBridgeTimeoutMs(saved.options.timeout_ms || formValues.timeout_ms);
-    rosTopicsMessage.value = "ROS 数据源配置已保存。";
+    if (options?.successMessage !== undefined) {
+      rosTopicsMessage.value = options.successMessage;
+    } else {
+      rosTopicsMessage.value = "ROS 数据源配置已保存。";
+    }
   } catch (error) {
-    rosTopicsMessage.value = `ROS 数据源配置保存失败: ${(error as Error).message}`;
+    const prefix = options?.failurePrefix || "ROS 数据源配置保存失败";
+    rosTopicsMessage.value = `${prefix}: ${(error as Error).message}`;
   } finally {
     rosDataSourceSaving.value = false;
   }
+}
+
+function saveRosNavConfigOnExit() {
+  if (navExitSaveInFlight || !rosDataSourceConfigLoaded.value) {
+    return;
+  }
+  navExitSaveInFlight = saveRosNavConfig({
+    successMessage: "",
+    failurePrefix: "退出导航模块前自动保存失败",
+  }).finally(() => {
+    navExitSaveInFlight = null;
+  });
 }
 
 async function inspectRosNavSource() {
@@ -1813,9 +1858,15 @@ function yawToQuaternion(yaw: number) {
 }
 
 async function publishRosMessage(topicName: string, messageType: string, message: Record<string, unknown>) {
+  const adapter = await ensureNavControlAdapterConnected();
+  adapter.publish(topicName, messageType, message);
+  appendRosRuntimeLog("info", `消息下发成功: ${topicName} (${messageType})`);
+}
+
+async function callRosService(serviceName: string, serviceType: string, args: Record<string, unknown>) {
   const adapter = createRosLiveAdapter({
     ...buildRosLiveConfig(),
-    adapterName: `下发 ${topicName}`,
+    adapterName: `调用 ${serviceName}`,
     autoReconnect: false,
     onError: (event) => {
       appendRosRuntimeLog(
@@ -1826,8 +1877,9 @@ async function publishRosMessage(topicName: string, messageType: string, message
   });
   try {
     await adapter.connect();
-    adapter.publish(topicName, messageType, message);
-    appendRosRuntimeLog("info", `消息下发成功: ${topicName} (${messageType})`);
+    const response = await adapter.callService(serviceName, serviceType, args);
+    appendRosRuntimeLog("info", `服务调用成功: ${serviceName} (${serviceType})`);
+    return response;
   } finally {
     adapter.disconnect();
   }
@@ -1837,6 +1889,15 @@ function nextRequestPlanId() {
   const requestPlanId = `web_test_${String(navGoalSequence.value).padStart(3, "0")}`;
   navGoalSequence.value += 1;
   return requestPlanId;
+}
+
+function rosHeaderStampNow() {
+  const nowMs = Date.now();
+  const sec = Math.floor(nowMs / 1000);
+  return {
+    sec,
+    nanosec: (nowMs - sec * 1000) * 1_000_000,
+  };
 }
 
 function enterInitialPoseMode() {
@@ -1849,10 +1910,11 @@ function enterNavGoalMode() {
   navControlMessage.value = navInteractionMode.value === "navgoal" ? "已进入导航目标模式，请在主视图点击并拖动方向。" : "已退出导航目标模式。";
 }
 
-async function publishInitialPose(x: number, y: number, yaw: number) {
+async function publishInitialPose(x: number, y: number, yaw: number, z = 0) {
   const orientation = yawToQuaternion(yaw);
   await publishRosMessage("/initialpose", "geometry_msgs/msg/PoseWithCovarianceStamped", {
     header: {
+      stamp: rosHeaderStampNow(),
       frame_id: formValues.fixed_frame || "map",
     },
     pose: {
@@ -1860,7 +1922,7 @@ async function publishInitialPose(x: number, y: number, yaw: number) {
         position: {
           x,
           y,
-          z: 0,
+          z,
         },
         orientation,
       },
@@ -1874,6 +1936,31 @@ async function publishInitialPose(x: number, y: number, yaw: number) {
       ],
     },
   });
+}
+
+function parseManualInitialPoseValue(value: string, label: string) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${label} 不是有效数值`);
+  }
+  return parsed;
+}
+
+async function submitManualInitialPose() {
+  navControlLoading.value = true;
+  try {
+    const x = parseManualInitialPoseValue(manualInitialPoseX.value, "x");
+    const y = parseManualInitialPoseValue(manualInitialPoseY.value, "y");
+    const z = parseManualInitialPoseValue(manualInitialPoseZ.value || "0", "z");
+    const yaw = parseManualInitialPoseValue(manualInitialPoseYaw.value, "yaw");
+    await publishInitialPose(x, y, yaw, z);
+    navInteractionMode.value = "none";
+    navControlMessage.value = `已下发手动初始化定位: (${x.toFixed(3)}, ${y.toFixed(3)}, ${z.toFixed(3)}, yaw=${yaw.toFixed(2)})`;
+  } catch (error) {
+    navControlMessage.value = `手动初始化定位失败: ${(error as Error).message}`;
+  } finally {
+    navControlLoading.value = false;
+  }
 }
 
 async function publishNavGoal(x: number, y: number, yaw: number) {
@@ -1922,6 +2009,22 @@ async function sendNavControlCommand(command: "pause" | "resume" | "cancel") {
     navControlMessage.value = `已发送导航控制: ${command}`;
   } catch (error) {
     navControlMessage.value = `控制下发失败: ${(error as Error).message}`;
+  } finally {
+    navControlLoading.value = false;
+  }
+}
+
+async function triggerAutoLocalization() {
+  navControlLoading.value = true;
+  try {
+    const response = await callRosService("/fallback_global_localization_trigger", "std_srvs/srv/Trigger", {});
+    const success = response?.success === true;
+    const message = typeof response?.message === "string" && response.message.trim() ? response.message : "";
+    navControlMessage.value = success
+      ? `已触发自动定位${message ? `: ${message}` : ""}`
+      : `自动定位触发返回失败${message ? `: ${message}` : ""}`;
+  } catch (error) {
+    navControlMessage.value = `自动定位触发失败: ${(error as Error).message}`;
   } finally {
     navControlLoading.value = false;
   }
@@ -2643,6 +2746,10 @@ function updateMainDisplayHzLimit(topic: string, rawValue: string) {
   updateMainDisplayConfig(topic, { hzLimit });
 }
 
+function updateMainDisplayPointColorMode(topic: string, rawValue: string) {
+  updateMainDisplayConfig(topic, { pointColorMode: rawValue === "layered" ? "layered" : "solid" });
+}
+
 function updateMainDisplayColor(topic: string, rawValue: string) {
   const display = navMainDisplays.value.find((item) => item.topic === topic);
   const fallbackColor = defaultMainDisplayColor(topic, display?.kind || "unknown");
@@ -2795,9 +2902,13 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  if (props.tool.key === "ros_nav_test") {
+    saveRosNavConfigOnExit();
+  }
   stopCostmapPlayback();
   stopRosSharedStatsPolling();
   disconnectNavDelayPanel();
+  disconnectNavControlAdapter();
 });
 </script>
 
@@ -2812,7 +2923,10 @@ onBeforeUnmount(() => {
     </header>
 
     <div class="tool-layout" :class="`tool-layout-${tool.key}`">
-      <section v-if="tool.key !== 'mtslash_export' && (tool.key !== 'ros_nav_test' || shouldShowRosAppSection('runtime'))" class="panel tool-form-panel">
+      <section
+        v-if="tool.key !== 'mtslash_export' && tool.key !== 'global_relocalization_candidates' && (tool.key !== 'ros_nav_test' || shouldShowRosAppSection('runtime'))"
+        class="panel tool-form-panel"
+      >
         <div class="section-head">
           <div class="result-title">参数配置</div>
           <div class="section-subtitle">支持手动输入和本地浏览选择</div>
@@ -2924,7 +3038,19 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <template v-if="tool.key === 'pcd_map'">
+      <template v-if="tool.key === 'global_relocalization_candidates'">
+        <GlobalRelocalizationCandidateTool
+          :tool="tool"
+          :loading="loading"
+          :summary="summary"
+          :logs="logs"
+          :result-data="resultData"
+          @run="emit('run', $event)"
+          @clear-logs="clearToolLogs"
+        />
+      </template>
+
+      <template v-else-if="tool.key === 'pcd_map'">
         <section class="result-panel">
           <div class="result-title">地图结果</div>
           <p class="summary">{{ summary }}</p>
@@ -3218,12 +3344,20 @@ data: [0, 0, 100, ...]</pre>
               <button class="primary-btn" type="button" :disabled="navControlLoading" @click="enterInitialPoseMode">
                 {{ navInteractionMode === "initialpose" ? "退出初始化定位" : "初始化定位" }}
               </button>
+              <button class="primary-btn" type="button" :disabled="navControlLoading" @click="triggerAutoLocalization">自动定位</button>
               <button class="primary-btn" type="button" :disabled="navControlLoading" @click="enterNavGoalMode">
                 {{ navInteractionMode === "navgoal" ? "退出导航目标" : "导航目标" }}
               </button>
               <button class="secondary-btn" type="button" :disabled="navControlLoading" @click="sendNavControlCommand('pause')">暂停</button>
               <button class="secondary-btn" type="button" :disabled="navControlLoading" @click="sendNavControlCommand('resume')">继续</button>
               <button class="secondary-btn" type="button" :disabled="navControlLoading" @click="sendNavControlCommand('cancel')">取消</button>
+            </div>
+            <div class="manual-initial-pose-row">
+              <input v-model="manualInitialPoseX" class="field-input compact-input" type="number" step="0.001" placeholder="x" />
+              <input v-model="manualInitialPoseY" class="field-input compact-input" type="number" step="0.001" placeholder="y" />
+              <input v-model="manualInitialPoseZ" class="field-input compact-input" type="number" step="0.001" placeholder="z" />
+              <input v-model="manualInitialPoseYaw" class="field-input compact-input" type="number" step="0.01" placeholder="yaw(rad)" />
+              <button class="primary-btn" type="button" :disabled="navControlLoading" @click="submitManualInitialPose">确认初始化</button>
             </div>
           </div>
           <div class="section-subtitle nav-control-feedback">
@@ -3299,8 +3433,19 @@ data: [0, 0, 100, ...]</pre>
                     @input="updateMainDisplayHzLimit(display.topic, ($event.target as HTMLInputElement).value)"
                   />
                 </label>
+                <label class="nav-display-config-item">
+                  <span class="kv-key">配色</span>
+                  <select
+                    class="field-input nav-display-config-input"
+                    :value="display.pointColorMode ?? 'solid'"
+                    @change="updateMainDisplayPointColorMode(display.topic, ($event.target as HTMLSelectElement).value)"
+                  >
+                    <option value="solid">纯色</option>
+                    <option value="layered">分层增强</option>
+                  </select>
+                </label>
               </div>
-                <div v-else-if="display.kind === 'path' || display.kind === 'pose'" class="nav-display-config-row">
+                <div v-else-if="display.kind === 'path' || display.kind === 'pose' || display.kind === 'marker' || display.kind === 'bspline' || display.kind === 'twist'" class="nav-display-config-row">
                   <label class="nav-display-config-item">
                     <span class="kv-key">颜色</span>
                     <input

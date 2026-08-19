@@ -30,6 +30,7 @@ const emit = defineEmits<{
 const mountRef = ref<HTMLDivElement | null>(null);
 const connectionLabel = ref("未连接");
 const sceneStatus = ref("等待显示项");
+const baseLinkHudText = ref("等待 rosbridge 连接");
 
 interface NavPoseAnchor {
   topic: string;
@@ -91,13 +92,15 @@ const poseObjectByTopic = new Map<string, THREE.Object3D>();
 const poseAnchorByTopic = new Map<string, NavPoseAnchor>();
 const pointCloudByTopic = new Map<string, THREE.Points>();
 const laserByTopic = new Map<string, THREE.Points>();
+const markerObjectByTopic = new Map<string, THREE.Object3D>();
+const twistObjectByTopic = new Map<string, THREE.Object3D>();
 const obstacleZoneGroupByTopic = new Map<string, THREE.Group>();
 const lastMessageTimeByTopic = new Map<string, number>();
 const latestMessageByTopic = new Map<string, any>();
 const sourceFrameByTopic = new Map<string, string>();
 const sourceStampMsByTopic = new Map<string, number | null>();
 const baseLocalMatrixByTopic = new Map<string, THREE.Matrix4>();
-const tfTransformHistoryByChildFrame = new Map<string, TfTransformSample[]>();
+const tfTransformHistoryByTopic = new Map<string, Map<string, TfTransformSample[]>>();
 const tfFrameSignatureByTopic = new Map<string, string>();
 const raycaster = new THREE.Raycaster();
 const interactionPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
@@ -129,6 +132,12 @@ const interactionHintText = computed(() => {
     return "导航目标模式: 左键点击地图并拖动方向，松开后下发 /nav2_goal_request。";
   }
   return "";
+});
+const baseLinkHudTone = computed(() => {
+  if (connectionLabel.value !== "已连接") {
+    return "warning";
+  }
+  return baseLinkHudText.value.includes("等待") || baseLinkHudText.value.includes("不可用") ? "warning" : "success";
 });
 
 function initializeScene() {
@@ -282,7 +291,7 @@ function handleWebglContextRestored() {
 function teardownRenderer() {
   clearInteractionPreview();
   clearAllTopicVisuals();
-  tfTransformHistoryByChildFrame.clear();
+  tfTransformHistoryByTopic.clear();
   tfFrameNodeCacheByTopic.clear();
   if (renderer?.domElement) {
     renderer.domElement.removeEventListener("webglcontextlost", handleWebglContextLost);
@@ -332,6 +341,7 @@ function disposeTopic(topic: string) {
     tfGroupByTopic.delete(topic);
   }
   tfFrameNodeCacheByTopic.delete(topic);
+  tfTransformHistoryByTopic.delete(normalizeTfTopicKey(topic));
 
   const poseObject = poseObjectByTopic.get(topic);
   if (poseObject) {
@@ -350,6 +360,18 @@ function disposeTopic(topic: string) {
   if (laser) {
     clearThreeObject(laser);
     laserByTopic.delete(topic);
+  }
+
+  const markerObject = markerObjectByTopic.get(topic);
+  if (markerObject) {
+    clearThreeObject(markerObject);
+    markerObjectByTopic.delete(topic);
+  }
+
+  const twistObject = twistObjectByTopic.get(topic);
+  if (twistObject) {
+    clearThreeObject(twistObject);
+    twistObjectByTopic.delete(topic);
   }
 
   const obstacleZone = obstacleZoneGroupByTopic.get(topic);
@@ -378,8 +400,11 @@ function clearAllTopicVisuals() {
     ...poseObjectByTopic.keys(),
     ...pointCloudByTopic.keys(),
     ...laserByTopic.keys(),
+    ...markerObjectByTopic.keys(),
+    ...twistObjectByTopic.keys(),
     ...obstacleZoneGroupByTopic.keys(),
   ].forEach((topic) => disposeTopic(topic));
+  updateBaseLinkHud();
 }
 
 function replaceObjectGeometry<T extends THREE.Object3D & { geometry?: THREE.BufferGeometry | THREE.Geometry | null }>(
@@ -399,6 +424,56 @@ function getDisplayByTopic(topic: string) {
 
 function normalizeFrameId(frameId: unknown) {
   return String(frameId ?? "").trim().replace(/^\/+/, "");
+}
+
+function normalizeTfTopicKey(topic: unknown) {
+  return normalizeFrameId(topic);
+}
+
+function tfReferenceTopicKeys(topic: string) {
+  const normalizedTopic = normalizeTfTopicKey(topic);
+  if (normalizedTopic === "tf_static") {
+    return ["tf_static"];
+  }
+  if (normalizedTopic === "tf") {
+    return ["tf", "tf_static"];
+  }
+  return ["tf_static", normalizedTopic].filter((item, index, array) => item && array.indexOf(item) === index);
+}
+
+function tfHistoryMapForTopic(topic: string, createIfMissing = false) {
+  const topicKey = normalizeTfTopicKey(topic);
+  if (!topicKey) {
+    return null;
+  }
+  const existing = tfTransformHistoryByTopic.get(topicKey);
+  if (existing || !createIfMissing) {
+    return existing ?? null;
+  }
+  const created = new Map<string, TfTransformSample[]>();
+  tfTransformHistoryByTopic.set(topicKey, created);
+  return created;
+}
+
+function tfFramesForTopic(topic: string) {
+  const frameSet = new Set<string>();
+  tfReferenceTopicKeys(topic).forEach((topicKey) => {
+    const historyMap = tfTransformHistoryByTopic.get(topicKey);
+    historyMap?.forEach((_samples, frameName) => {
+      frameSet.add(frameName);
+    });
+  });
+  return Array.from(frameSet).sort((left, right) => left.localeCompare(right, "zh-CN"));
+}
+
+function tfSamplesForFrame(topic: string, frameId: string) {
+  const samples: TfTransformSample[] = [];
+  tfReferenceTopicKeys(topic).forEach((topicKey) => {
+    const historyMap = tfTransformHistoryByTopic.get(topicKey);
+    const topicSamples = historyMap?.get(frameId) ?? [];
+    samples.push(...topicSamples);
+  });
+  return samples;
 }
 
 function extractHeaderStampMs(message: any) {
@@ -431,8 +506,8 @@ function buildTransformMatrix(translation: any, rotation: any) {
   return matrix;
 }
 
-function selectTfTransformSample(frameId: string, targetStampMs: number | null) {
-  const samples = tfTransformHistoryByChildFrame.get(frameId) ?? [];
+function selectTfTransformSample(frameId: string, targetStampMs: number | null, tfTopic = "/tf") {
+  const samples = tfSamplesForFrame(tfTopic, frameId);
   if (samples.length === 0) {
     return null;
   }
@@ -456,7 +531,7 @@ function selectTfTransformSample(frameId: string, targetStampMs: number | null) 
   return bestSample ?? staticSample ?? samples[samples.length - 1] ?? null;
 }
 
-function resolveFrameTransformToFixed(frameId: unknown, targetStampMs: number | null = null, trail = new Set<string>()): THREE.Matrix4 | null {
+function resolveFrameTransformToFixed(frameId: unknown, targetStampMs: number | null = null, tfTopic = "/tf", trail = new Set<string>()): THREE.Matrix4 | null {
   const sourceFrame = normalizeFrameId(frameId);
   const fixedFrame = currentFixedFrame();
   if (!sourceFrame || sourceFrame === fixedFrame) {
@@ -465,12 +540,12 @@ function resolveFrameTransformToFixed(frameId: unknown, targetStampMs: number | 
   if (trail.has(sourceFrame)) {
     return null;
   }
-  const sample = selectTfTransformSample(sourceFrame, targetStampMs);
+  const sample = selectTfTransformSample(sourceFrame, targetStampMs, tfTopic);
   if (!sample) {
     return null;
   }
   trail.add(sourceFrame);
-  const parentMatrix = resolveFrameTransformToFixed(sample.parentFrame, targetStampMs, trail);
+  const parentMatrix = resolveFrameTransformToFixed(sample.parentFrame, targetStampMs, tfTopic, trail);
   trail.delete(sourceFrame);
   if (!parentMatrix) {
     return null;
@@ -506,8 +581,8 @@ function composeLocalMatrix(
   return matrix;
 }
 
-function applyObjectFrameTransform(topic: string, object: THREE.Object3D, frameId: unknown, targetStampMs: number | null = null) {
-  const transformMatrix = resolveFrameTransformToFixed(frameId, targetStampMs);
+function applyObjectFrameTransform(topic: string, object: THREE.Object3D, frameId: unknown, targetStampMs: number | null = null, tfTopic = "/tf") {
+  const transformMatrix = resolveFrameTransformToFixed(frameId, targetStampMs, tfTopic);
   const baseMatrix = baseLocalMatrixByTopic.get(topic) ?? new THREE.Matrix4().identity();
   const finalMatrix = transformMatrix ? transformMatrix.clone().multiply(baseMatrix) : baseMatrix.clone();
   const position = new THREE.Vector3();
@@ -526,6 +601,8 @@ function updateTopicTransforms() {
   poseObjectByTopic.forEach((object, topic) => applyObjectFrameTransform(topic, object, sourceFrameByTopic.get(topic), sourceStampMsByTopic.get(topic) ?? null));
   pointCloudByTopic.forEach((object, topic) => applyObjectFrameTransform(topic, object, sourceFrameByTopic.get(topic), sourceStampMsByTopic.get(topic) ?? null));
   laserByTopic.forEach((object, topic) => applyObjectFrameTransform(topic, object, sourceFrameByTopic.get(topic), sourceStampMsByTopic.get(topic) ?? null));
+  markerObjectByTopic.forEach((object, topic) => applyObjectFrameTransform(topic, object, sourceFrameByTopic.get(topic), sourceStampMsByTopic.get(topic) ?? null));
+  twistObjectByTopic.forEach((object, topic) => applyObjectFrameTransform(topic, object, sourceFrameByTopic.get(topic), sourceStampMsByTopic.get(topic) ?? null));
   obstacleZoneGroupByTopic.forEach((object, topic) => applyObjectFrameTransform(topic, object, sourceFrameByTopic.get(topic), sourceStampMsByTopic.get(topic) ?? null));
 }
 
@@ -549,12 +626,24 @@ function pointColorForDisplay(display: NavViewerDisplay) {
   return display.color || pointColorForTopic(display.topic);
 }
 
+function pointColorModeForDisplay(display: NavViewerDisplay) {
+  return display.pointColorMode === "layered" ? "layered" : "solid";
+}
+
 function pathColorForDisplay(display: NavViewerDisplay) {
   return display.color || "#f6a237";
 }
 
 function poseColorForDisplay(display: NavViewerDisplay) {
   return display.color || "#2f8cff";
+}
+
+function markerColorForDisplay(display: NavViewerDisplay) {
+  return display.color || "#8ea1ba";
+}
+
+function twistColorForDisplay(display: NavViewerDisplay) {
+  return display.color || "#31d28a";
 }
 
 function mapOpacityForDisplay(display: NavViewerDisplay) {
@@ -575,15 +664,19 @@ function syncPointCloudDisplayConfigs(displays: NavViewerDisplay[]) {
     if (!points || !material || Array.isArray(material)) {
       return;
     }
+    material.vertexColors = pointColorModeForDisplay(display) === "layered";
+    material.color = new THREE.Color(pointColorModeForDisplay(display) === "layered" ? "#ffffff" : pointColorForDisplay(display));
     material.size = safePointCloudSize(display);
-    material.color = new THREE.Color(pointColorForDisplay(display));
+    material.opacity = 0.96;
+    material.transparent = true;
+    material.depthWrite = false;
     material.needsUpdate = true;
   });
 }
 
 function syncPathDisplayConfigs(displays: NavViewerDisplay[]) {
   displays.forEach((display) => {
-    if (display.kind !== "path") {
+    if (display.kind !== "path" && display.kind !== "bspline") {
       return;
     }
     const line = pathLineByTopic.get(display.topic);
@@ -596,9 +689,59 @@ function syncPathDisplayConfigs(displays: NavViewerDisplay[]) {
   });
 }
 
+function syncMarkerDisplayConfigs(displays: NavViewerDisplay[]) {
+  displays.forEach((display) => {
+    if (display.kind !== "marker") {
+      return;
+    }
+    const root = markerObjectByTopic.get(display.topic);
+    if (!root) {
+      return;
+    }
+    const color = new THREE.Color(markerColorForDisplay(display));
+    root.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      const material = mesh.material;
+      if (!material) {
+        return;
+      }
+      if (Array.isArray(material)) {
+        material.forEach((item) => {
+          if ("color" in item) {
+            (item as THREE.Material & { color: THREE.Color }).color = color;
+            item.needsUpdate = true;
+          }
+        });
+        return;
+      }
+      if ("color" in material) {
+        (material as THREE.Material & { color: THREE.Color }).color = color;
+        material.needsUpdate = true;
+      }
+    });
+  });
+}
+
+function syncTwistDisplayConfigs(displays: NavViewerDisplay[]) {
+  displays.forEach((display) => {
+    if (display.kind !== "twist") {
+      return;
+    }
+    const root = twistObjectByTopic.get(display.topic) as THREE.Group | undefined;
+    if (!root) {
+      return;
+    }
+    const arrow = root.getObjectByName("twist-arrow") as THREE.ArrowHelper | null;
+    if (!arrow) {
+      return;
+    }
+    arrow.setColor(new THREE.Color(twistColorForDisplay(display)));
+  });
+}
+
 function syncPoseDisplayConfigs(displays: NavViewerDisplay[]) {
   displays.forEach((display) => {
-    if (display.kind !== "pose") {
+    if (display.kind !== "pose" && display.kind !== "pose_array") {
       return;
     }
     const group = poseObjectByTopic.get(display.topic);
@@ -606,18 +749,18 @@ function syncPoseDisplayConfigs(displays: NavViewerDisplay[]) {
       return;
     }
     const color = new THREE.Color(poseColorForDisplay(display));
-    const body = group.getObjectByName("pose-body") as THREE.Mesh | null;
-    const bodyMaterial = body?.material;
-    if (body && bodyMaterial && !Array.isArray(bodyMaterial) && "color" in bodyMaterial) {
-      (bodyMaterial as THREE.MeshStandardMaterial).color = color;
-      bodyMaterial.needsUpdate = true;
-    }
-    const tail = group.getObjectByName("pose-tail") as THREE.Mesh | null;
-    const tailMaterial = tail?.material;
-    if (tail && tailMaterial && !Array.isArray(tailMaterial) && "color" in tailMaterial) {
-      (tailMaterial as THREE.MeshBasicMaterial).color = color;
-      tailMaterial.needsUpdate = true;
-    }
+    group.traverse((child) => {
+      if (child.name !== "pose-body" && child.name !== "pose-tail") {
+        return;
+      }
+      const mesh = child as THREE.Mesh;
+      const material = mesh.material;
+      if (!material || Array.isArray(material) || !("color" in material)) {
+        return;
+      }
+      (material as THREE.MeshStandardMaterial | THREE.MeshBasicMaterial).color = color;
+      material.needsUpdate = true;
+    });
   });
 }
 
@@ -646,7 +789,7 @@ function syncMapDisplayConfigs(displays: NavViewerDisplay[]) {
 }
 
 function emitTfFrames(topic: string) {
-  const frames = Array.from(tfTransformHistoryByChildFrame.keys()).sort((left, right) => left.localeCompare(right, "zh-CN"));
+  const frames = tfFramesForTopic(topic);
   const signature = frames.join("|");
   if (tfFrameSignatureByTopic.get(topic) === signature) {
     return;
@@ -672,6 +815,27 @@ function shouldConsumeDisplayMessage(display: NavViewerDisplay) {
   }
   lastMessageTimeByTopic.set(display.topic, now);
   return true;
+}
+
+/**
+ * 功能说明：
+ * 把界面上的点云刷新频率限制转换成 rosbridge 订阅参数，
+ * 让限流尽量发生在桥接层而不是浏览器收包之后。
+ */
+function subscriptionOptionsForDisplay(display: NavViewerDisplay) {
+  if (display.kind !== "pointcloud") {
+    return undefined;
+  }
+  const hzLimit = Math.max(0, Math.round(Number(display.hzLimit ?? 0) || 0));
+  if (hzLimit <= 0) {
+    return {
+      queueLength: 1,
+    };
+  }
+  return {
+    throttleRateMs: Math.max(1, Math.round(1000 / hzLimit)),
+    queueLength: 1,
+  };
 }
 
 function renderOccupancyGrid(topic: string, message: any) {
@@ -744,9 +908,13 @@ function renderOccupancyGrid(topic: string, message: any) {
       label: topic,
     }),
     side: THREE.DoubleSide,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: 1,
+    polygonOffsetUnits: 1,
   });
   const plane = new THREE.Mesh(geometry, material);
-  plane.position.set((width * resolution) / 2, (height * resolution) / 2, -0.02);
+  plane.position.set((width * resolution) / 2, (height * resolution) / 2, -0.05);
 
   const root = new THREE.Group();
   root.position.set(originX, originY, originZ);
@@ -818,6 +986,116 @@ function renderPath(topic: string, message: any) {
   line.visible = true;
 }
 
+/**
+ * 功能说明：
+ * 将 SCAN 的 B-spline 控制点消息近似采样为折线，便于在主视图快速核对局部规划轨迹。
+ *
+ * 注意事项：
+ * 1. 这里优先保证调试可视化，不追求和规划器内部 De Boor 求值完全一致。
+ * 2. 若 knots 异常或控制点太少，则自动退化为控制点折线，避免页面无显示。
+ */
+function sampleBsplinePositions(message: any) {
+  const controlPoints = Array.isArray(message?.pos_pts) ? message.pos_pts : [];
+  const order = Math.max(1, Math.round(Number(message?.order ?? 0) || 0));
+  if (controlPoints.length <= 0) {
+    return [];
+  }
+  if (controlPoints.length <= 2 || order <= 1) {
+    return controlPoints.flatMap((point: any) => [Number(point?.x ?? 0), Number(point?.y ?? 0), Number(point?.z ?? 0)]);
+  }
+
+  const degree = Math.max(1, order - 1);
+  const knots = Array.isArray(message?.knots)
+    ? message.knots.map((value: unknown) => Number(value)).filter((value: number) => Number.isFinite(value))
+    : [];
+  const expectedKnotCount = controlPoints.length + order;
+  if (knots.length < expectedKnotCount) {
+    return controlPoints.flatMap((point: any) => [Number(point?.x ?? 0), Number(point?.y ?? 0), Number(point?.z ?? 0)]);
+  }
+
+  const start = knots[Math.min(degree, knots.length - 1)];
+  const end = knots[Math.max(degree, knots.length - degree - 1)];
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+    return controlPoints.flatMap((point: any) => [Number(point?.x ?? 0), Number(point?.y ?? 0), Number(point?.z ?? 0)]);
+  }
+
+  const points = controlPoints.map((point: any) => new THREE.Vector3(
+    Number(point?.x ?? 0),
+    Number(point?.y ?? 0),
+    Number(point?.z ?? 0),
+  ));
+  const sampleCount = Math.max(24, Math.min(240, controlPoints.length * 12));
+  const positions: number[] = [];
+
+  function findSpan(t: number) {
+    let low = degree;
+    let high = points.length;
+    let mid = Math.floor((low + high) / 2);
+    while (t < knots[mid] || t >= knots[mid + 1]) {
+      if (t < knots[mid]) {
+        high = mid;
+      } else {
+        low = mid;
+      }
+      mid = Math.floor((low + high) / 2);
+    }
+    return mid;
+  }
+
+  function evaluatePoint(t: number) {
+    const clampedT = Math.min(end - 1e-6, Math.max(start, t));
+    const span = findSpan(clampedT);
+    const work = Array.from({ length: degree + 1 }, (_, index) => points[span - degree + index].clone());
+    for (let level = 1; level <= degree; level += 1) {
+      for (let index = degree; index >= level; index -= 1) {
+        const knotLeft = knots[span - degree + index];
+        const knotRight = knots[span + 1 + index - level];
+        const denominator = knotRight - knotLeft;
+        const alpha = denominator > 1e-6 ? (clampedT - knotLeft) / denominator : 0;
+        work[index].lerp(work[index - 1], 1 - alpha);
+      }
+    }
+    return work[degree];
+  }
+
+  for (let index = 0; index < sampleCount; index += 1) {
+    const ratio = sampleCount === 1 ? 0 : index / (sampleCount - 1);
+    const point = evaluatePoint(start + (end - start) * ratio);
+    positions.push(point.x, point.y, point.z);
+  }
+  return positions;
+}
+
+function renderBspline(display: NavViewerDisplay, message: any) {
+  const topic = display.topic;
+  const sampledPositions = sampleBsplinePositions(message);
+  if (sampledPositions.length < 6) {
+    return;
+  }
+  const latestDisplay = getDisplayByTopic(topic) || display;
+  let line = pathLineByTopic.get(topic);
+  if (!line) {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(sampledPositions, 3));
+    const material = new THREE.LineBasicMaterial({ color: pathColorForDisplay(latestDisplay) });
+    line = new THREE.Line(geometry, material);
+    scene?.add(line);
+    pathLineByTopic.set(topic, line);
+  } else {
+    replaceObjectGeometry(line, new THREE.BufferGeometry().setAttribute("position", new THREE.Float32BufferAttribute(sampledPositions, 3)));
+    const material = line.material;
+    if (material && !Array.isArray(material)) {
+      material.color = new THREE.Color(pathColorForDisplay(latestDisplay));
+      material.needsUpdate = true;
+    }
+  }
+  sourceFrameByTopic.set(topic, normalizeFrameId(message?.header?.frame_id) || currentFixedFrame());
+  sourceStampMsByTopic.set(topic, extractHeaderStampMs(message));
+  cacheTopicLocalMatrix(topic, composeLocalMatrix());
+  applyObjectFrameTransform(topic, line, sourceFrameByTopic.get(topic), sourceStampMsByTopic.get(topic) ?? null);
+  line.visible = true;
+}
+
 function normalizePointCloudBytes(data: unknown): Uint8Array | null {
   if (data instanceof Uint8Array) {
     return data;
@@ -855,6 +1133,67 @@ function pointColorForTopic(topic: string) {
     return "#f6a237";
   }
   return "#ffffff";
+}
+
+/**
+ * 功能说明：
+ * 基于点的高度和水平离散度生成轻量级顶点颜色，
+ * 在不引入屏幕后处理的前提下增强点云的形状辨识度。
+ *
+ * 注意事项：
+ * 1. 保留显示项主色，障碍物只在主色和补色之间做受控过渡，避免颜色体系失控。
+ * 2. 高度分层基于点云自身的中位高度参考面，而不是简单依赖世界坐标 z 的全局范围。
+ * 3. 为了避免每帧全量排序，统计只使用固定上限采样点估计参考面和局部范围。
+ */
+function buildPointCloudColorBuffer(positions: number[], baseColorText: string) {
+  const pointCount = Math.floor(positions.length / 3);
+  const colors = new Float32Array(pointCount * 3);
+  if (pointCount <= 0) {
+    return colors;
+  }
+
+  const statsSampleCount = Math.min(pointCount, 1024);
+  const statsSampleStep = Math.max(1, Math.floor(pointCount / statsSampleCount));
+  const zSamples: number[] = [];
+  for (let index = 0; index < positions.length; index += 3) {
+    const z = positions[index + 2];
+    if (((index / 3) % statsSampleStep) === 0 && zSamples.length < statsSampleCount) {
+      zSamples.push(z);
+    }
+  }
+
+  const baseColor = new THREE.Color(baseColorText);
+  const baseHsl = { h: 0, s: 0, l: 0 };
+  baseColor.getHSL(baseHsl);
+  const sortedZValues = [...zSamples].sort((left, right) => left - right);
+  const medianIndex = Math.floor(sortedZValues.length / 2);
+  const medianZ = sortedZValues[medianIndex];
+  const upperQuartileZ = sortedZValues[Math.min(sortedZValues.length - 1, Math.floor(sortedZValues.length * 0.75))];
+  const upperReferenceRange = Math.max(0.08, upperQuartileZ - medianZ, sortedZValues[sortedZValues.length - 1] - medianZ);
+  const complementaryColor = new THREE.Color().setHSL(
+    (baseHsl.h + 0.5) % 1,
+    Math.min(1, Math.max(0.45, baseHsl.s * 0.95 + 0.06)),
+    Math.min(0.68, Math.max(0.26, baseHsl.l * 0.9)),
+  );
+  const color = new THREE.Color();
+
+  for (let pointIndex = 0, index = 0; index < positions.length; index += 3, pointIndex += 1) {
+    const z = positions[index + 2];
+    const relativeHeight = (z - medianZ) / upperReferenceRange;
+    const positiveHeightRatio = Math.min(1, Math.max(0, relativeHeight));
+    const negativeHeightRatio = Math.min(1, Math.max(0, -relativeHeight * 0.45));
+    const obstacleBlend = positiveHeightRatio * positiveHeightRatio;
+    color.copy(baseColor).lerp(complementaryColor, Math.min(0.82, obstacleBlend * 0.78));
+    const currentHsl = color.getHSL({ h: 0, s: 0, l: 0 });
+    const saturation = Math.min(1, Math.max(0.38, currentHsl.s + obstacleBlend * 0.08 - negativeHeightRatio * 0.04));
+    const lightness = Math.min(0.72, Math.max(0.24, currentHsl.l - obstacleBlend * 0.06 - negativeHeightRatio * 0.02));
+    color.setHSL(currentHsl.h, saturation, lightness);
+    const offset = pointIndex * 3;
+    colors[offset] = color.r;
+    colors[offset + 1] = color.g;
+    colors[offset + 2] = color.b;
+  }
+  return colors;
 }
 
 function extractCustomPointCloudPositions(message: any) {
@@ -928,6 +1267,8 @@ function renderPointCloud(display: NavViewerDisplay, message: any) {
   if (positions.length === 0) {
     return;
   }
+  const useLayeredColors = pointColorModeForDisplay(latestDisplay) === "layered";
+  const pointColors = useLayeredColors ? buildPointCloudColorBuffer(positions, pointColorForDisplay(latestDisplay)) : null;
 
   let points = pointCloudByTopic.get(topic);
   if (!points) {
@@ -935,11 +1276,19 @@ function renderPointCloud(display: NavViewerDisplay, message: any) {
     const attribute = new THREE.Float32BufferAttribute(positions, 3);
     attribute.setUsage(THREE.DynamicDrawUsage);
     geometry.setAttribute("position", attribute);
+    if (pointColors) {
+      geometry.setAttribute("color", new THREE.BufferAttribute(pointColors, 3));
+    }
     geometry.computeBoundingSphere();
     const material = new THREE.PointsMaterial({
-      color: pointColorForDisplay(latestDisplay),
+      color: useLayeredColors ? "#ffffff" : pointColorForDisplay(latestDisplay),
       size: safePointCloudSize(latestDisplay),
       sizeAttenuation: true,
+      vertexColors: useLayeredColors,
+      transparent: true,
+      opacity: 0.96,
+      depthWrite: true,
+      depthTest: true,
     });
     points = new THREE.Points(geometry, material);
     scene.add(points);
@@ -947,8 +1296,14 @@ function renderPointCloud(display: NavViewerDisplay, message: any) {
   } else {
     const geometry = points.geometry;
     const existingAttribute = geometry.getAttribute("position");
+    const existingColorAttribute = geometry.getAttribute("color");
     const nextPointCount = positions.length / 3;
-    if (existingAttribute && existingAttribute instanceof THREE.BufferAttribute && existingAttribute.itemSize === 3 && existingAttribute.array.length === positions.length) {
+    if (
+      existingAttribute
+      && existingAttribute instanceof THREE.BufferAttribute
+      && existingAttribute.itemSize === 3
+      && existingAttribute.array.length === positions.length
+    ) {
       (existingAttribute.array as Float32Array).set(positions);
       existingAttribute.needsUpdate = true;
       existingAttribute.count = nextPointCount;
@@ -959,11 +1314,34 @@ function renderPointCloud(display: NavViewerDisplay, message: any) {
       geometry.setAttribute("position", nextAttribute);
       geometry.setDrawRange(0, nextPointCount);
     }
+    if (pointColors) {
+      if (
+        existingColorAttribute
+        && existingColorAttribute instanceof THREE.BufferAttribute
+        && existingColorAttribute.itemSize === 3
+        && existingColorAttribute.array.length === pointColors.length
+      ) {
+        (existingColorAttribute.array as Float32Array).set(pointColors);
+        existingColorAttribute.needsUpdate = true;
+        existingColorAttribute.count = nextPointCount;
+      } else {
+        geometry.setAttribute("color", new THREE.BufferAttribute(pointColors, 3));
+      }
+    } else {
+      if (existingColorAttribute) {
+        geometry.deleteAttribute("color");
+      }
+    }
     geometry.computeBoundingSphere();
     const material = points.material;
     if (material && !Array.isArray(material)) {
-      material.color = new THREE.Color(pointColorForDisplay(latestDisplay));
+      material.color = new THREE.Color(useLayeredColors ? "#ffffff" : pointColorForDisplay(latestDisplay));
       material.size = safePointCloudSize(latestDisplay);
+      material.vertexColors = useLayeredColors;
+      material.opacity = 0.96;
+      material.transparent = true;
+      material.depthWrite = true;
+      material.depthTest = true;
       material.needsUpdate = true;
     }
   }
@@ -1116,6 +1494,48 @@ function quaternionToYaw(rotation: any) {
   const sinyCosp = 2 * (w * z + x * y);
   const cosyCosp = 1 - 2 * (y * y + z * z);
   return Math.atan2(sinyCosp, cosyCosp);
+}
+
+function formatHudCoordinate(value: number) {
+  return Number.isFinite(value) ? value.toFixed(3) : "-";
+}
+
+function updateBaseLinkHud() {
+  if (connectionLabel.value !== "已连接") {
+    baseLinkHudText.value = "等待 rosbridge 连接";
+    return;
+  }
+
+  const baseLinkTransform = resolveFrameTransformToFixed("base_link");
+  if (baseLinkTransform) {
+    const position = new THREE.Vector3();
+    const quaternion = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    baseLinkTransform.decompose(position, quaternion, scale);
+    baseLinkHudText.value = [
+      `frame: ${currentFixedFrame()} <- base_link`,
+      `x: ${formatHudCoordinate(position.x)}`,
+      `y: ${formatHudCoordinate(position.y)}`,
+      `z: ${formatHudCoordinate(position.z)}`,
+      `yaw: ${formatHudCoordinate(quaternionToYaw(quaternion))} rad`,
+    ].join(" | ");
+    return;
+  }
+
+  const poseAnchor = resolvePrimaryPoseAnchor();
+  if (poseAnchor) {
+    baseLinkHudText.value = [
+      `frame: ${poseAnchor.frameId}`,
+      `x: ${formatHudCoordinate(poseAnchor.x)}`,
+      `y: ${formatHudCoordinate(poseAnchor.y)}`,
+      `z: ${formatHudCoordinate(poseAnchor.z)}`,
+      `yaw: ${formatHudCoordinate(poseAnchor.yaw)} rad`,
+      "来源: pose",
+    ].join(" | ");
+    return;
+  }
+
+  baseLinkHudText.value = "base_link 位姿暂不可用";
 }
 
 function createCircleLine(radius: number, color: string, dashed = false) {
@@ -1355,29 +1775,18 @@ function renderPose(topic: string, message: any) {
   let group = poseObjectByTopic.get(topic) as THREE.Group | undefined;
   if (!group) {
     group = new THREE.Group();
-    const body = new THREE.Mesh(
-      new THREE.ConeGeometry(0.22, 0.68, 18),
-      new THREE.MeshStandardMaterial({ color: poseColorForDisplay(display) })
-    );
-    body.name = "pose-body";
-    group.add(body);
-
-    const tail = new THREE.Mesh(
-      new THREE.CircleGeometry(0.12, 16),
-      new THREE.MeshBasicMaterial({ color: poseColorForDisplay(display) })
-    );
-    tail.name = "pose-tail";
-    group.add(tail);
+    group.add(createPoseMarker(poseColorForDisplay(display), 1));
     scene.add(group);
     poseObjectByTopic.set(topic, group);
   }
 
-  const body = group.getObjectByName("pose-body") as THREE.Mesh | null;
+  const marker = group.children[0] as THREE.Group | undefined;
+  const body = marker?.getObjectByName("pose-body") as THREE.Mesh | null;
   if (body) {
     body.rotation.z = yaw - Math.PI / 2;
     body.position.set(Number(position.x ?? 0), Number(position.y ?? 0), 0.34);
   }
-  const tail = group.getObjectByName("pose-tail") as THREE.Mesh | null;
+  const tail = marker?.getObjectByName("pose-tail") as THREE.Mesh | null;
   if (tail) {
     tail.position.set(Number(position.x ?? 0), Number(position.y ?? 0), 0.02);
   }
@@ -1396,6 +1805,79 @@ function renderPose(topic: string, message: any) {
     yaw,
   });
   refreshAllObstacleZones();
+  updateBaseLinkHud();
+}
+
+function createPoseMarker(color: string, scale: number) {
+  const marker = new THREE.Group();
+  const body = new THREE.Mesh(
+    new THREE.ConeGeometry(0.22 * scale, 0.68 * scale, 18),
+    new THREE.MeshStandardMaterial({ color })
+  );
+  body.name = "pose-body";
+  marker.add(body);
+
+  const tail = new THREE.Mesh(
+    new THREE.CircleGeometry(0.12 * scale, 16),
+    new THREE.MeshBasicMaterial({ color })
+  );
+  tail.name = "pose-tail";
+  marker.add(tail);
+  return marker;
+}
+
+function renderPoseArray(topic: string, message: any) {
+  if (!scene) {
+    return;
+  }
+  const poses = Array.isArray(message?.poses) ? message.poses : [];
+  const frameId = normalizeFrameId(message?.header?.frame_id) || currentFixedFrame();
+  const display = getDisplayByTopic(topic) ?? {
+    topic,
+    messageType: "geometry_msgs/msg/PoseArray",
+    kind: "pose_array" as const,
+    label: topic,
+  };
+
+  let group = poseObjectByTopic.get(topic) as THREE.Group | undefined;
+  if (!group) {
+    group = new THREE.Group();
+    scene.add(group);
+    poseObjectByTopic.set(topic, group);
+  }
+  while (group.children.length > poses.length) {
+    const child = group.children.pop();
+    if (child) {
+      clearThreeObject(child);
+    }
+  }
+  while (group.children.length < poses.length) {
+    group.add(createPoseMarker(poseColorForDisplay(display), 0.72));
+  }
+
+  poses.forEach((pose: any, index: number) => {
+    const position = pose?.position ?? {};
+    const orientation = pose?.orientation ?? {};
+    const yaw = quaternionToYaw(orientation);
+    const marker = group!.children[index] as THREE.Group;
+    marker.visible = true;
+    const body = marker.getObjectByName("pose-body") as THREE.Mesh | null;
+    if (body) {
+      body.rotation.z = yaw - Math.PI / 2;
+      body.position.set(Number(position.x ?? 0), Number(position.y ?? 0), 0.25);
+    }
+    const tail = marker.getObjectByName("pose-tail") as THREE.Mesh | null;
+    if (tail) {
+      tail.position.set(Number(position.x ?? 0), Number(position.y ?? 0), 0.018);
+    }
+  });
+
+  sourceFrameByTopic.set(topic, frameId);
+  sourceStampMsByTopic.set(topic, extractHeaderStampMs(message));
+  cacheTopicLocalMatrix(topic, composeLocalMatrix());
+  applyObjectFrameTransform(topic, group, frameId, sourceStampMsByTopic.get(topic) ?? null);
+  group.visible = true;
+  updateBaseLinkHud();
 }
 
 function buildTfLabelSprite(label: string, sizeScale: number) {
@@ -1524,10 +2006,9 @@ function renderTf(topic: string) {
     tfGroupByTopic.set(topic, group);
   }
   const frameNodeMap = tfFrameNodeCacheByTopic.get(topic) ?? new Map<string, THREE.Group>();
-  const frames = Array.from(tfTransformHistoryByChildFrame.keys())
+  const frames = tfFramesForTopic(topic)
     .filter((frameName) => showAllFrames || visibleFrames.has(frameName))
-    .sort((left, right) => left.localeCompare(right, "zh-CN"))
-    .slice(0, 80);
+    .sort((left, right) => left.localeCompare(right, "zh-CN"));
   const activeFrames = new Set(frames);
 
   frameNodeMap.forEach((frameNode, frameName) => {
@@ -1537,7 +2018,7 @@ function renderTf(topic: string) {
   });
 
   frames.forEach((frameName) => {
-    const transformMatrix = resolveFrameTransformToFixed(frameName);
+    const transformMatrix = resolveFrameTransformToFixed(frameName, null, topic);
     if (!transformMatrix) {
       const hiddenNode = frameNodeMap.get(frameName);
       if (hiddenNode) {
@@ -1600,6 +2081,331 @@ function renderLaser(topic: string, message: any) {
   laserByTopic.set(topic, points);
 }
 
+function markerLifetimeMs(message: any) {
+  const sec = Number(message?.lifetime?.sec ?? 0);
+  const nanosec = Number(message?.lifetime?.nanosec ?? 0);
+  if (!Number.isFinite(sec) || !Number.isFinite(nanosec)) {
+    return 0;
+  }
+  return Math.max(0, sec * 1000 + nanosec / 1e6);
+}
+
+function markerColor(message: any, fallbackColor: string) {
+  const alpha = Number(message?.color?.a ?? 1);
+  const red = Number(message?.color?.r ?? Number.NaN);
+  const green = Number(message?.color?.g ?? Number.NaN);
+  const blue = Number(message?.color?.b ?? Number.NaN);
+  if ([red, green, blue].every((value) => Number.isFinite(value))) {
+    return {
+      color: new THREE.Color(
+        Math.min(1, Math.max(0, red)),
+        Math.min(1, Math.max(0, green)),
+        Math.min(1, Math.max(0, blue)),
+      ),
+      opacity: Math.min(1, Math.max(0, Number.isFinite(alpha) ? alpha : 1)),
+    };
+  }
+  return {
+    color: new THREE.Color(fallbackColor),
+    opacity: 1,
+  };
+}
+
+function markerQuaternion(message: any) {
+  return new THREE.Quaternion(
+    Number(message?.pose?.orientation?.x ?? 0),
+    Number(message?.pose?.orientation?.y ?? 0),
+    Number(message?.pose?.orientation?.z ?? 0),
+    Number(message?.pose?.orientation?.w ?? 1),
+  );
+}
+
+function markerPosition(message: any) {
+  return new THREE.Vector3(
+    Number(message?.pose?.position?.x ?? 0),
+    Number(message?.pose?.position?.y ?? 0),
+    Number(message?.pose?.position?.z ?? 0),
+  );
+}
+
+function buildMarkerLine(points: any[], color: THREE.Color, opacity: number, closed = false, lineWidth = 0.05) {
+  const positions = points.flatMap((point: any) => [
+    Number(point?.x ?? 0),
+    Number(point?.y ?? 0),
+    Number(point?.z ?? 0),
+  ]);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  const material = new THREE.LineBasicMaterial({
+    color,
+    transparent: opacity < 1,
+    opacity,
+  });
+  const line = closed
+    ? new THREE.LineLoop(geometry, material)
+    : new THREE.Line(geometry, material);
+  line.userData.lineWidth = lineWidth;
+  return line;
+}
+
+function buildMarkerSphereList(points: any[], scale: any, colors: any[], fallbackColor: THREE.Color, fallbackOpacity: number) {
+  const group = new THREE.Group();
+  const radius = Math.max(0.01, Number(scale?.x ?? 0.1) / 2);
+  points.forEach((point: any, index: number) => {
+    const colorInfo = colors[index]
+      ? markerColor({ color: colors[index] }, fallbackColor.getStyle())
+      : { color: fallbackColor, opacity: fallbackOpacity };
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(radius, 12, 10),
+      new THREE.MeshStandardMaterial({
+        color: colorInfo.color,
+        transparent: colorInfo.opacity < 1,
+        opacity: colorInfo.opacity,
+      }),
+    );
+    mesh.position.set(Number(point?.x ?? 0), Number(point?.y ?? 0), Number(point?.z ?? 0));
+    group.add(mesh);
+  });
+  return group;
+}
+
+function buildMarkerArrow(message: any, color: THREE.Color, opacity: number) {
+  const group = new THREE.Group();
+  const points = Array.isArray(message?.points) ? message.points : [];
+  const start = points.length >= 1 ? new THREE.Vector3(Number(points[0]?.x ?? 0), Number(points[0]?.y ?? 0), Number(points[0]?.z ?? 0)) : new THREE.Vector3();
+  const end = points.length >= 2 ? new THREE.Vector3(Number(points[1]?.x ?? 0), Number(points[1]?.y ?? 0), Number(points[1]?.z ?? 0)) : new THREE.Vector3(0.4, 0, 0);
+  const direction = end.clone().sub(start);
+  const length = Math.max(0.05, direction.length());
+  const normalized = direction.lengthSq() > 1e-8 ? direction.normalize() : new THREE.Vector3(1, 0, 0);
+  const arrow = new THREE.ArrowHelper(
+    normalized,
+    start,
+    length,
+    color,
+    Math.max(0.08, Number(message?.scale?.z ?? 0.18)),
+    Math.max(0.04, Number(message?.scale?.y ?? 0.12)),
+  );
+  arrow.name = "marker-arrow";
+  arrow.line.material.transparent = opacity < 1;
+  arrow.line.material.opacity = opacity;
+  arrow.cone.material.transparent = opacity < 1;
+  arrow.cone.material.opacity = opacity;
+  group.add(arrow);
+  return group;
+}
+
+function buildMarkerObject(display: NavViewerDisplay, message: any) {
+  const fallback = markerColor(message, markerColorForDisplay(display));
+  const type = Number(message?.type ?? -1);
+  const points = Array.isArray(message?.points) ? message.points : [];
+  if (type === 0) {
+    return buildMarkerArrow(message, fallback.color, fallback.opacity);
+  }
+  if (type === 2) {
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(Math.max(0.01, Number(message?.scale?.x ?? 0.15) / 2), 18, 14),
+      new THREE.MeshStandardMaterial({
+        color: fallback.color,
+        transparent: fallback.opacity < 1,
+        opacity: fallback.opacity,
+      }),
+    );
+    mesh.position.copy(markerPosition(message));
+    mesh.quaternion.copy(markerQuaternion(message));
+    return mesh;
+  }
+  if (type === 3) {
+    const geometry = new THREE.CylinderGeometry(
+      Math.max(0.01, Number(message?.scale?.x ?? 0.2) / 2),
+      Math.max(0.01, Number(message?.scale?.y ?? Number(message?.scale?.x ?? 0.2)) / 2),
+      Math.max(0.01, Number(message?.scale?.z ?? 0.3)),
+      24,
+    );
+    // ROS Marker 的圆柱沿 z 轴，Three.js CylinderGeometry 默认沿 y 轴，这里先把几何朝向对齐。
+    geometry.rotateX(Math.PI / 2);
+    const mesh = new THREE.Mesh(
+      geometry,
+      new THREE.MeshStandardMaterial({
+        color: fallback.color,
+        transparent: fallback.opacity < 1,
+        opacity: fallback.opacity,
+        depthWrite: false,
+        depthTest: false,
+      }),
+    );
+    mesh.renderOrder = 40;
+    mesh.position.copy(markerPosition(message));
+    mesh.quaternion.copy(markerQuaternion(message));
+    return mesh;
+  }
+  if (type === 4 && points.length >= 2) {
+    return buildMarkerLine(points, fallback.color, fallback.opacity, false, Number(message?.scale?.x ?? 0.05));
+  }
+  if (type === 5 && points.length >= 2) {
+    return buildMarkerLine(points, fallback.color, fallback.opacity, false, Number(message?.scale?.x ?? 0.05));
+  }
+  if (type === 7 && points.length >= 1) {
+    return buildMarkerSphereList(points, message?.scale, Array.isArray(message?.colors) ? message.colors : [], fallback.color, fallback.opacity);
+  }
+  return null;
+}
+
+function markerEntryKey(message: any) {
+  const namespace = String(message?.ns ?? "").trim();
+  const id = Number(message?.id ?? 0);
+  return `${namespace}:${id}`;
+}
+
+function ensureMarkerTopicGroup(topic: string) {
+  let group = markerObjectByTopic.get(topic) as THREE.Group | undefined;
+  if (group) {
+    return group;
+  }
+  group = new THREE.Group();
+  group.name = `marker-topic-${topic}`;
+  group.userData.markerEntries = new Map<string, THREE.Object3D>();
+  scene?.add(group);
+  markerObjectByTopic.set(topic, group);
+  return group;
+}
+
+function removeMarkerEntry(topic: string, entryKey: string) {
+  const group = markerObjectByTopic.get(topic) as THREE.Group | undefined;
+  const entryMap = group?.userData?.markerEntries as Map<string, THREE.Object3D> | undefined;
+  if (!group || !entryMap) {
+    return;
+  }
+  const existing = entryMap.get(entryKey);
+  if (!existing) {
+    return;
+  }
+  group.remove(existing);
+  existing.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (mesh.geometry) {
+      mesh.geometry.dispose();
+    }
+    const material = mesh.material;
+    if (Array.isArray(material)) {
+      material.forEach((item) => disposeMaterialResources(item));
+    } else {
+      disposeMaterialResources(material ?? null);
+    }
+  });
+  entryMap.delete(entryKey);
+  if (entryMap.size <= 0) {
+    disposeTopic(topic);
+  }
+}
+
+function renderMarker(display: NavViewerDisplay, message: any) {
+  if (!scene) {
+    return;
+  }
+  const topic = display.topic;
+  const action = Number(message?.action ?? 0);
+  const entryKey = markerEntryKey(message);
+  if (action === 3) {
+    disposeTopic(topic);
+    return;
+  }
+  if (action === 2) {
+    removeMarkerEntry(topic, entryKey);
+    return;
+  }
+  const markerObject = buildMarkerObject(display, message);
+  if (!markerObject) {
+    return;
+  }
+  const group = ensureMarkerTopicGroup(topic);
+  const entryMap = group.userData.markerEntries as Map<string, THREE.Object3D>;
+  const previous = entryMap.get(entryKey);
+  if (previous) {
+    group.remove(previous);
+    previous.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (mesh.geometry) {
+        mesh.geometry.dispose();
+      }
+      const material = mesh.material;
+      if (Array.isArray(material)) {
+        material.forEach((item) => disposeMaterialResources(item));
+      } else {
+        disposeMaterialResources(material ?? null);
+      }
+    });
+  }
+  group.add(markerObject);
+  entryMap.set(entryKey, markerObject);
+  sourceFrameByTopic.set(topic, normalizeFrameId(message?.header?.frame_id) || currentFixedFrame());
+  sourceStampMsByTopic.set(topic, extractHeaderStampMs(message));
+  cacheTopicLocalMatrix(topic, composeLocalMatrix());
+  applyObjectFrameTransform(topic, group, sourceFrameByTopic.get(topic), sourceStampMsByTopic.get(topic) ?? null);
+  group.visible = true;
+
+  const lifetimeMs = markerLifetimeMs(message);
+  const shouldAutoRemove = lifetimeMs > 0 && lifetimeMs >= 800;
+  if (shouldAutoRemove) {
+    window.setTimeout(() => {
+      const latestGroup = markerObjectByTopic.get(topic) as THREE.Group | undefined;
+      const latestEntryMap = latestGroup?.userData?.markerEntries as Map<string, THREE.Object3D> | undefined;
+      if (latestEntryMap?.get(entryKey) === markerObject) {
+        removeMarkerEntry(topic, entryKey);
+      }
+    }, lifetimeMs + 80);
+  }
+}
+
+function renderTwist(display: NavViewerDisplay, message: any) {
+  if (!scene) {
+    return;
+  }
+  const anchor = resolvePrimaryPoseAnchor();
+  if (!anchor) {
+    sceneStatus.value = `等待位姿后绘制速度箭头: ${display.topic}`;
+    return;
+  }
+  const linearX = Number(message?.linear?.x ?? 0);
+  const linearY = Number(message?.linear?.y ?? 0);
+  const linearZ = Number(message?.linear?.z ?? 0);
+  const speedVector = new THREE.Vector3(linearX, linearY, linearZ);
+  const speed = speedVector.length();
+  const topic = display.topic;
+
+  let group = twistObjectByTopic.get(topic) as THREE.Group | undefined;
+  if (!group) {
+    group = new THREE.Group();
+    group.name = "twist-group";
+    const arrow = new THREE.ArrowHelper(
+      new THREE.Vector3(1, 0, 0),
+      new THREE.Vector3(),
+      0.3,
+      twistColorForDisplay(display),
+      0.18,
+      0.1,
+    );
+    arrow.name = "twist-arrow";
+    group.add(arrow);
+    scene.add(group);
+    twistObjectByTopic.set(topic, group);
+  }
+
+  const arrow = group.getObjectByName("twist-arrow") as THREE.ArrowHelper | null;
+  if (arrow) {
+    const direction = speed > 1e-6 ? speedVector.clone().normalize() : new THREE.Vector3(1, 0, 0);
+    arrow.setDirection(direction);
+    arrow.setLength(Math.max(0.18, speed), 0.18, 0.1);
+    arrow.setColor(new THREE.Color(twistColorForDisplay(display)));
+  }
+  group.position.set(anchor.x, anchor.y, Math.max(anchor.z + 0.18, 0.18));
+  group.quaternion.setFromAxisAngle(new THREE.Vector3(0, 0, 1), anchor.yaw);
+  sourceFrameByTopic.set(topic, anchor.frameId);
+  sourceStampMsByTopic.set(topic, extractHeaderStampMs(message));
+  cacheTopicLocalMatrix(topic, composeLocalMatrix(group.position.clone(), group.quaternion.clone()));
+  applyObjectFrameTransform(topic, group, anchor.frameId, sourceStampMsByTopic.get(topic) ?? null);
+  group.visible = true;
+}
+
 function renderObstacleZone(topic: string, message: any) {
   if (!scene) {
     return;
@@ -1634,7 +2440,12 @@ function renderObstacleZone(topic: string, message: any) {
 
 function ingestTfMessage(topic: string, message: any) {
   const transforms = Array.isArray(message?.transforms) ? message.transforms : [];
-  const isStaticTopic = normalizeFrameId(topic) === "tf_static";
+  const normalizedTopic = normalizeTfTopicKey(topic);
+  const topicHistoryMap = tfHistoryMapForTopic(normalizedTopic, true);
+  if (!topicHistoryMap) {
+    return;
+  }
+  const isStaticTopic = normalizedTopic === "tf_static";
   const currentTimeMs = Date.now();
   transforms.forEach((item: any) => {
     const childFrame = normalizeFrameId(item?.child_frame_id);
@@ -1648,13 +2459,14 @@ function ingestTfMessage(topic: string, message: any) {
       stampMs: isStaticTopic ? null : extractHeaderStampMs(item),
       staticTransform: isStaticTopic,
     };
-    const history = tfTransformHistoryByChildFrame.get(childFrame) ?? [];
+    const history = topicHistoryMap.get(childFrame) ?? [];
     const nextHistory = [...history.filter((sample) => sample.staticTransform !== isStaticTopic), nextSample]
       .filter((sample) => sample.staticTransform || sample.stampMs === null || currentTimeMs - sample.stampMs <= maxTfHistoryAgeMs)
       .slice(-maxTfHistorySamplesPerFrame);
-    tfTransformHistoryByChildFrame.set(childFrame, nextHistory);
+    topicHistoryMap.set(childFrame, nextHistory);
   });
   emitTfFrames(topic);
+  updateBaseLinkHud();
 }
 
 function ensureSupportTfSubscriptions() {
@@ -1695,7 +2507,7 @@ function ensureDisplaySubscription(display: NavViewerDisplay) {
     }
     latestMessageByTopic.set(latestDisplay.topic, message);
     renderDisplayMessage(latestDisplay, message);
-  });
+  }, subscriptionOptionsForDisplay(display));
 
   unsubscribeMap.set(display.topic, unsubscribe);
 }
@@ -1709,6 +2521,11 @@ function renderDisplayMessage(display: NavViewerDisplay, message: any) {
   if (display.kind === "path") {
     renderPath(display.topic, message);
     sceneStatus.value = `已更新路径: ${display.topic}`;
+    return;
+  }
+  if (display.kind === "bspline") {
+    renderBspline(display, message);
+    sceneStatus.value = `已更新 B-spline 轨迹: ${display.topic}`;
     return;
   }
   if (display.kind === "pointcloud") {
@@ -1732,8 +2549,23 @@ function renderDisplayMessage(display: NavViewerDisplay, message: any) {
     sceneStatus.value = `已更新位姿: ${display.topic}`;
     return;
   }
+  if (display.kind === "pose_array") {
+    renderPoseArray(display.topic, message);
+    sceneStatus.value = `已更新位姿数组: ${display.topic}`;
+    return;
+  }
   if (display.kind === "obstacle_zone") {
     renderObstacleZone(display.topic, message);
+    return;
+  }
+  if (display.kind === "marker") {
+    renderMarker(display, message);
+    sceneStatus.value = `已更新 Marker: ${display.topic}`;
+    return;
+  }
+  if (display.kind === "twist") {
+    renderTwist(display, message);
+    sceneStatus.value = `已更新速度箭头: ${display.topic}`;
     return;
   }
   sceneStatus.value = `暂不支持可视化: ${display.topic}`;
@@ -1752,6 +2584,10 @@ function buildSharedRosConfig(): RosLiveConfig {
     provider: props.provider,
     url: props.url,
     timeoutMs: props.timeoutMs,
+    autoReconnect: true,
+    reconnectBaseDelayMs: 3000,
+    reconnectMaxDelayMs: 30000,
+    reconnectMaxAttempts: 4,
     sharedKey: buildSharedRosKey("ros-nav-test", props.provider, props.url, props.timeoutMs),
     adapterName: "ROS 测试工作台共享连接",
   };
@@ -1764,7 +2600,7 @@ async function reconnectAndResubscribe() {
   supportTfUnsubscribeMap.forEach((unsubscribe) => unsubscribe());
   supportTfUnsubscribeMap.clear();
   clearAllTopicVisuals();
-  tfTransformHistoryByChildFrame.clear();
+  tfTransformHistoryByTopic.clear();
   props.displays
     .filter((display) => display.kind === "tf")
     .forEach((display) => emit("tfFramesChange", { topic: display.topic, frames: [] }));
@@ -1776,6 +2612,7 @@ async function reconnectAndResubscribe() {
     onStatusChange: (snapshot) => {
       connectionLabel.value = snapshot.connected ? "已连接" : snapshot.reconnecting ? "重连中" : "未连接";
       sceneStatus.value = snapshot.message;
+      updateBaseLinkHud();
       if (snapshot.connected) {
         ensureSupportTfSubscriptions();
         props.displays.forEach((display) => ensureDisplaySubscription(display));
@@ -1792,6 +2629,7 @@ async function reconnectAndResubscribe() {
   if (!props.url && props.provider !== "mock") {
     connectionLabel.value = "未配置地址";
     sceneStatus.value = "请先填写 rosbridge 地址";
+    updateBaseLinkHud();
     emitRosLog("warning", "三维主视图未配置 rosbridge 地址，未启动连接。");
     return;
   }
@@ -1801,6 +2639,7 @@ async function reconnectAndResubscribe() {
     const snapshot = rosAdapter.getConnectionSnapshot();
     connectionLabel.value = snapshot.connected ? "已连接" : "未连接";
     sceneStatus.value = snapshot.message;
+    updateBaseLinkHud();
     ensureSupportTfSubscriptions();
     props.displays.forEach((display) => ensureDisplaySubscription(display));
     emitRosLog("info", `三维主视图连接成功: ${snapshot.message}`);
@@ -1808,6 +2647,7 @@ async function reconnectAndResubscribe() {
     connectionLabel.value = "连接失败";
     sceneStatus.value = (error as Error).message;
     clearAllTopicVisuals();
+    updateBaseLinkHud();
     emitRosLog("error", `三维主视图连接失败: ${(error as Error).message}`);
   }
 }
@@ -1856,6 +2696,8 @@ watch(
       syncPointCloudDisplayConfigs(nextDisplays);
       syncPathDisplayConfigs(nextDisplays);
       syncPoseDisplayConfigs(nextDisplays);
+      syncMarkerDisplayConfigs(nextDisplays);
+      syncTwistDisplayConfigs(nextDisplays);
       nextDisplays
         .filter((display) => display.kind === "tf")
         .forEach((display) => renderTf(display.topic));
@@ -1925,6 +2767,10 @@ onBeforeUnmount(() => {
 
     <div class="nav-viewer-stage">
       <div ref="mountRef" class="nav-viewer-canvas-host"></div>
+      <div class="nav-viewer-base-link-hud" :class="`tone-${baseLinkHudTone}`">
+        <span class="nav-viewer-base-link-title">机器狗位置</span>
+        <span class="nav-viewer-base-link-text">{{ baseLinkHudText }}</span>
+      </div>
       <button class="nav-viewer-focus-button" type="button" aria-label="定位图示" title="定位图示" @click="handleFocusButtonClick">
         <svg class="nav-viewer-focus-icon" viewBox="0 0 128 128" aria-hidden="true">
           <defs>

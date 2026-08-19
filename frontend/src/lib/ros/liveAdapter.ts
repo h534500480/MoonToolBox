@@ -41,11 +41,24 @@ export interface RosAdapterErrorEvent {
 
 export type RosMessageHandler = (message: any) => void;
 
+/**
+ * 功能说明：
+ * 描述单个 topic 订阅在 rosbridge 侧的限流参数。
+ *
+ * 注意事项：
+ * 1. 这些参数作用在 rosbridge -> 浏览器 这一段链路，优先于页面内二次丢帧。
+ * 2. `throttleRateMs` 越大，rosbridge 推送频率越低；`queueLength` 越小，越接近“只保留最新帧”。
+ */
+export interface RosSubscriptionOptions {
+  throttleRateMs?: number;
+  queueLength?: number;
+}
+
 export interface RosLiveAdapter {
   connect(): Promise<void>;
   disconnect(): void;
   requestReconnect(reason?: string): Promise<void>;
-  subscribe(topicName: string, messageType: string, handler: RosMessageHandler): () => void;
+  subscribe(topicName: string, messageType: string, handler: RosMessageHandler, options?: RosSubscriptionOptions): () => void;
   publish(topicName: string, messageType: string, message: Record<string, unknown>): void;
   callService<T>(serviceName: string, serviceType: string, request: Record<string, unknown>, timeoutMs?: number): Promise<T>;
   getConnectionSnapshot(): RosConnectionSnapshot;
@@ -70,8 +83,9 @@ interface SharedRosClientRecord {
 interface SharedSubscriptionRecord {
   topicName: string;
   messageType: string;
-  handlers: Map<string, Set<RosMessageHandler>>;
+  handlers: Map<string, Map<RosMessageHandler, RosSubscriptionOptions | undefined>>;
   unsubscribe: (() => void) | null;
+  appliedOptions?: RosSubscriptionOptions;
 }
 
 class SharedRosSession {
@@ -131,8 +145,8 @@ class SharedRosSession {
         client.active = true;
         await this.baseAdapter.requestReconnect(reason);
       },
-      subscribe: (topicName: string, messageType: string, handler: RosMessageHandler) =>
-        this.subscribe(clientId, topicName, messageType, handler),
+      subscribe: (topicName: string, messageType: string, handler: RosMessageHandler, options?: RosSubscriptionOptions) =>
+        this.subscribe(clientId, topicName, messageType, handler, options),
       publish: (topicName: string, messageType: string, message: Record<string, unknown>) => {
         this.baseAdapter.publish(topicName, messageType, message);
       },
@@ -187,34 +201,31 @@ class SharedRosSession {
     }
   }
 
-  private subscribe(clientId: string, topicName: string, messageType: string, handler: RosMessageHandler): () => void {
+  private subscribe(
+    clientId: string,
+    topicName: string,
+    messageType: string,
+    handler: RosMessageHandler,
+    options?: RosSubscriptionOptions,
+  ): () => void {
     const subscriptionKey = this.subscriptionKey(topicName, messageType);
     let record = this.topicSubscriptions.get(subscriptionKey);
     if (!record) {
       record = {
         topicName,
         messageType,
-        handlers: new Map<string, Set<RosMessageHandler>>(),
+        handlers: new Map<string, Map<RosMessageHandler, RosSubscriptionOptions | undefined>>(),
         unsubscribe: null,
+        appliedOptions: undefined,
       };
       this.topicSubscriptions.set(subscriptionKey, record);
     }
 
-    const clientHandlers = record.handlers.get(clientId) ?? new Set<RosMessageHandler>();
-    clientHandlers.add(handler);
+    const clientHandlers = record.handlers.get(clientId) ?? new Map<RosMessageHandler, RosSubscriptionOptions | undefined>();
+    clientHandlers.set(handler, options);
     record.handlers.set(clientId, clientHandlers);
 
-    if (!record.unsubscribe) {
-      record.unsubscribe = this.baseAdapter.subscribe(topicName, messageType, (message) => {
-        const latestRecord = this.topicSubscriptions.get(subscriptionKey);
-        if (!latestRecord) {
-          return;
-        }
-        latestRecord.handlers.forEach((handlerSet) => {
-          handlerSet.forEach((item) => item(message));
-        });
-      });
-    }
+    this.ensureSharedSubscription(record, subscriptionKey);
 
     return () => {
       const latestRecord = this.topicSubscriptions.get(subscriptionKey);
@@ -226,16 +237,69 @@ class SharedRosSession {
         return;
       }
       latestClientHandlers.delete(handler);
-      if (latestClientHandlers.size > 0) {
+      if (latestClientHandlers.size <= 0) {
+        latestRecord.handlers.delete(clientId);
+      }
+      if (latestRecord.handlers.size <= 0) {
+        latestRecord.unsubscribe?.();
+        this.topicSubscriptions.delete(subscriptionKey);
         return;
       }
-      latestRecord.handlers.delete(clientId);
-      if (latestRecord.handlers.size > 0) {
-        return;
-      }
-      latestRecord.unsubscribe?.();
-      this.topicSubscriptions.delete(subscriptionKey);
+      this.ensureSharedSubscription(latestRecord, subscriptionKey);
     };
+  }
+
+  private ensureSharedSubscription(record: SharedSubscriptionRecord, subscriptionKey: string) {
+    const nextOptions = this.mergeSharedSubscriptionOptions(record);
+    const shouldReuseExisting =
+      record.unsubscribe
+      && this.sameSubscriptionOptions(record.appliedOptions, nextOptions);
+    if (shouldReuseExisting) {
+      return;
+    }
+    record.unsubscribe?.();
+    record.unsubscribe = this.baseAdapter.subscribe(record.topicName, record.messageType, (message) => {
+      const latestRecord = this.topicSubscriptions.get(subscriptionKey);
+      if (!latestRecord) {
+        return;
+      }
+      latestRecord.handlers.forEach((handlerMap) => {
+        handlerMap.forEach((_, subscribedHandler) => subscribedHandler(message));
+      });
+    }, nextOptions);
+    record.appliedOptions = nextOptions;
+  }
+
+  private mergeSharedSubscriptionOptions(record: SharedSubscriptionRecord): RosSubscriptionOptions | undefined {
+    const optionList = Array.from(record.handlers.values())
+      .flatMap((handlerMap) => Array.from(handlerMap.values()));
+    if (optionList.length <= 0) {
+      return undefined;
+    }
+
+    const allHavePositiveThrottle = optionList.every(
+      (options) => Number.isFinite(options?.throttleRateMs) && Number(options?.throttleRateMs) > 0,
+    );
+    const allHavePositiveQueueLength = optionList.every(
+      (options) => Number.isFinite(options?.queueLength) && Number(options?.queueLength) > 0,
+    );
+
+    const merged: RosSubscriptionOptions = {};
+    if (allHavePositiveThrottle) {
+      merged.throttleRateMs = Math.min(...optionList.map((options) => Number(options?.throttleRateMs)));
+    }
+    if (allHavePositiveQueueLength) {
+      merged.queueLength = Math.min(...optionList.map((options) => Math.round(Number(options?.queueLength))));
+    }
+    return Object.keys(merged).length > 0 ? merged : undefined;
+  }
+
+  private sameSubscriptionOptions(
+    left?: RosSubscriptionOptions,
+    right?: RosSubscriptionOptions,
+  ) {
+    return (left?.throttleRateMs ?? 0) === (right?.throttleRateMs ?? 0)
+      && (left?.queueLength ?? 0) === (right?.queueLength ?? 0);
   }
 
   private subscriptionKey(topicName: string, messageType: string) {
@@ -352,6 +416,7 @@ interface SubscriptionRecord {
   topicName: string;
   messageType: string;
   handler: RosMessageHandler;
+  options?: RosSubscriptionOptions;
   topic: ROSLIB.Topic | null;
 }
 
@@ -398,6 +463,7 @@ class RosbridgeLiveAdapter implements RosLiveAdapter {
   }
 
   requestReconnect(reason = "手动触发重连"): Promise<void> {
+    this.reconnectAttempt = 0;
     this.reportError({
       scope: this.adapterScope(),
       message: reason,
@@ -414,7 +480,7 @@ class RosbridgeLiveAdapter implements RosLiveAdapter {
     return this.connect();
   }
 
-  subscribe(topicName: string, messageType: string, handler: RosMessageHandler): () => void {
+  subscribe(topicName: string, messageType: string, handler: RosMessageHandler, options?: RosSubscriptionOptions): () => void {
     const id = `sub-${this.subscriptionSequence}`;
     this.subscriptionSequence += 1;
     const record: SubscriptionRecord = {
@@ -422,6 +488,7 @@ class RosbridgeLiveAdapter implements RosLiveAdapter {
       topicName,
       messageType,
       handler,
+      options,
       topic: null,
     };
     this.subscriptions.set(id, record);
@@ -643,7 +710,7 @@ class RosbridgeLiveAdapter implements RosLiveAdapter {
     });
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = 0;
-      this.requestReconnect(`自动重连第 ${this.reconnectAttempt} 次`).catch((error) => {
+      this.reconnectFromTimer(`自动重连第 ${this.reconnectAttempt} 次`).catch((error) => {
           this.reportError({
             scope: this.adapterScope(),
             message: "自动重连失败",
@@ -653,6 +720,24 @@ class RosbridgeLiveAdapter implements RosLiveAdapter {
           });
       });
     }, delayMs);
+  }
+
+  private reconnectFromTimer(reason: string): Promise<void> {
+    this.reportError({
+      scope: this.adapterScope(),
+      message: reason,
+      detail: this.config.url || "未配置地址",
+      recoverable: true,
+      attempt: this.reconnectAttempt,
+    });
+    this.manualDisconnect = false;
+    this.clearReconnectTimer();
+    this.closeRosSocket();
+    this.connectPromise = null;
+    this.connected = false;
+    this.reconnecting = false;
+    this.detachAllTopicHandles();
+    return this.connect();
   }
 
   private restoreSubscriptions() {
@@ -668,7 +753,8 @@ class RosbridgeLiveAdapter implements RosLiveAdapter {
       name: record.topicName,
       messageType: record.messageType,
       queue_size: 1,
-      throttle_rate: 0,
+      queue_length: Math.max(1, Math.round(Number(record.options?.queueLength ?? 0) || 0)) || undefined,
+      throttle_rate: Math.max(0, Math.round(Number(record.options?.throttleRateMs ?? 0) || 0)),
     });
     topic.subscribe(record.handler);
     record.topic = topic;
@@ -697,25 +783,23 @@ class RosbridgeLiveAdapter implements RosLiveAdapter {
       return;
     }
     const ros = this.ros;
+    this.ros = null;
     try {
       ros.close();
     } catch {
       // 保持断开流程可继续，不因重复关闭中断。
     }
-    this.ros = null;
   }
 
   private closeActiveRosSocket(ros: ROSLIB.Ros, connectionId: number) {
     if (!this.isActiveRos(ros, connectionId)) {
       return;
     }
+    this.ros = null;
     try {
       ros.close();
     } catch {
       // 连接失败路径中关闭 socket 失败时继续进入重试控制。
-    }
-    if (this.ros === ros) {
-      this.ros = null;
     }
   }
 

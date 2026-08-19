@@ -121,7 +121,7 @@ if ($LASTEXITCODE -ne 0) {
   throw ".venv is missing runtime Python dependencies. Run .\scripts\install_local.cmd and fix any pip errors first."
 }
 
-$RequiredExes = @("pcd_map_cli.exe", "pcd_tile_cli.exe", "network_scan_cli.exe", "costmap_cli.exe")
+$RequiredExes = @("pcd_map_cli.exe", "pcd_tile_cli.exe", "global_relocalization_cli.exe", "network_scan_cli.exe", "costmap_cli.exe")
 foreach ($ExeName in $RequiredExes) {
   Require-Path (Join-Path "cpp\build" $ExeName) "Run .\scripts\install_local.cmd first."
 }
