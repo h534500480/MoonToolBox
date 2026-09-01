@@ -54,7 +54,8 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "[3/3] Building installer..."
-& $Iscc ".\scripts\installer.iss"
+$PackageSourceDir = "..\release\_staging\MoonToolBox"
+& $Iscc "/DPackageSourceDir=$PackageSourceDir" ".\scripts\installer.iss"
 if ($LASTEXITCODE -ne 0) {
   throw "Inno Setup compiler failed with exit code $LASTEXITCODE"
 }

@@ -3,6 +3,7 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 
 import { saveNavRecording } from "../api/client";
+import { isPointCloudMessageType } from "../lib/ros/displayRegistry";
 import { createSharedRosLiveAdapter, type RosLiveConfig } from "../lib/ros/liveAdapter";
 
 interface NavPanelItem {
@@ -190,7 +191,7 @@ function formatTimestampWithMs(timeMs: number) {
 }
 
 function isPointCloudPanel(panel: NavPanelItem) {
-  return panel.messageType === "sensor_msgs/msg/PointCloud2";
+  return isPointCloudMessageType(panel.messageType);
 }
 
 function isImuPanel(panel: NavPanelItem) {
@@ -307,7 +308,7 @@ function normalizePointCloudBytes(data: unknown): Uint8Array | null {
 }
 
 function resolveFieldOffset(fields: any[], fieldName: string) {
-  const match = fields.find((field) => field?.name === fieldName);
+  const match = fields.find((field) => String(field?.name ?? "").toLowerCase() === fieldName);
   return typeof match?.offset === "number" ? match.offset : -1;
 }
 
@@ -338,8 +339,9 @@ function buildPointCloudPreview(message: any): PointCloudPreview | null {
       break;
     }
 
-    const x = view.getFloat32(base + xOffset, true);
-    const y = view.getFloat32(base + yOffset, true);
+    const littleEndian = message?.is_bigendian !== true;
+    const x = view.getFloat32(base + xOffset, littleEndian);
+    const y = view.getFloat32(base + yOffset, littleEndian);
     if (!Number.isFinite(x) || !Number.isFinite(y)) {
       continue;
     }

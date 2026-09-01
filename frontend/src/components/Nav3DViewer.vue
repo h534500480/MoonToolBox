@@ -3,12 +3,23 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 
+import { raycastRosNavOfflineMap } from "../api/client";
 import type { NavViewerDisplay } from "../lib/ros/displayRegistry";
 import { createSharedRosLiveAdapter, type RosLiveConfig } from "../lib/ros/liveAdapter";
 
 interface NavViewerExpose {
   focusOnNdtPose: () => { ok: boolean; message: string };
+  attachOfflineMapPointCloud: (payload: OfflineMapPointCloudPayload) => { ok: boolean; message: string };
+  clearOfflineMapPointCloud: () => void;
+  setOfflineMapDisplayMode: (mode: "voxel" | "pointcloud") => { ok: boolean; message: string };
+  attachInitialPosePointCloud: (payload: InitialPosePointCloudPayload) => { ok: boolean; message: string };
+  attachInitialPoseLatestPointCloud: (topic: string) => { ok: boolean; message: string };
+  updateInitialPosePointCloudSize: (pointSize: number) => { ok: boolean; message: string };
+  getInitialPoseCandidate: () => InitialPoseCandidatePayload | null;
+  clearInitialPoseCandidate: () => void;
+  setInitialPoseTransformMode: (mode: "translate" | "rotate") => { ok: boolean; message: string };
 }
 
 const props = defineProps<{
@@ -19,13 +30,76 @@ const props = defineProps<{
   displays: NavViewerDisplay[];
   interactionMode?: "none" | "initialpose" | "navgoal";
   reconnectToken?: number;
+  initialPoseBaseHeightOffsetM?: number;
+  initialPoseGroundNormalRadiusM?: number;
+  initialPoseGroundMaxSlopeDeg?: number;
 }>();
 
 const emit = defineEmits<{
-  interactionComplete: [payload: { mode: "initialpose" | "navgoal"; x: number; y: number; yaw: number }];
+  interactionComplete: [payload: { mode: "initialpose" | "navgoal"; x: number; y: number; z?: number; roll?: number; pitch?: number; yaw: number }];
   tfFramesChange: [payload: { topic: string; frames: string[] }];
   rosLog: [payload: { source: string; level: "info" | "warning" | "error"; message: string }];
 }>();
+
+interface InitialPosePointCloudPayload {
+  topic: string;
+  message: any;
+  color?: string;
+  pointSize?: number;
+  pointColorMode?: "solid" | "layered";
+}
+
+interface InitialPoseCandidatePayload {
+  x: number;
+  y: number;
+  z: number;
+  roll: number;
+  pitch: number;
+  yaw: number;
+}
+
+interface BoundsPayload {
+  xmin: number;
+  xmax: number;
+  ymin: number;
+  ymax: number;
+  zmin: number;
+  zmax: number;
+}
+
+interface PointCloudRenderResult {
+  ok: boolean;
+  message: string;
+  warningSignature?: string;
+}
+
+interface OfflineMapInfoPayload {
+  yaml_path: string;
+  image_path: string;
+  resolution: number;
+  origin: number[];
+  width: number;
+  height: number;
+  bounds: BoundsPayload;
+}
+
+interface OfflineMapPointCloudPayload {
+  pcd: {
+    path: string;
+    input_points: number;
+    sampled_count: number;
+    voxel_leaf_m: number;
+    input_bounds: BoundsPayload;
+    sampled_bounds: BoundsPayload;
+    points: number[][];
+  };
+  occupancy?: {
+    voxel_m: number;
+    occupied_count: number;
+    voxels: number[][];
+  };
+  map: OfflineMapInfoPayload | null;
+}
 
 const mountRef = ref<HTMLDivElement | null>(null);
 const connectionLabel = ref("未连接");
@@ -69,6 +143,8 @@ let renderer: THREE.WebGLRenderer | null = null;
 let scene: THREE.Scene | null = null;
 let camera: THREE.PerspectiveCamera | null = null;
 let controls: OrbitControls | null = null;
+let transformControls: TransformControls | null = null;
+let transformControlsHelper: THREE.Object3D | null = null;
 let animationFrame = 0;
 let rosAdapter: ReturnType<typeof createSharedRosLiveAdapter> | null = null;
 let resizeObserver: ResizeObserver | null = null;
@@ -77,7 +153,23 @@ let lastViewportWidth = 0;
 let lastViewportHeight = 0;
 let interactionStartPoint: THREE.Vector3 | null = null;
 let interactionCurrentPoint: THREE.Vector3 | null = null;
+let interactionStartGroundNormal: THREE.Vector3 | null = null;
+let interactionStartGroundMessage = "";
 let interactionPreviewGroup: THREE.Group | null = null;
+let initialPoseCandidateGroup: THREE.Group | null = null;
+let initialPosePointCloud: THREE.Points | null = null;
+let offlineMapGroup: THREE.Group | null = null;
+let offlineMapPoints: THREE.Points | null = null;
+let offlineMapVoxelMesh: THREE.InstancedMesh | null = null;
+let offlineMapRawPositions: Float32Array | null = null;
+let offlineMapVoxelCenters: Float32Array | null = null;
+let offlineMapVoxelSize = 0.1;
+let offlineMapOriginalBounds: BoundsPayload | null = null;
+let offlineMapClipBounds: BoundsPayload | null = null;
+let offlineClipDragStartX = 0;
+let offlineClipDragStartY = 0;
+let offlineClipDragFace: keyof BoundsPayload | null = null;
+let offlineClipDragStartValue = 0;
 let webglContextLost = false;
 
 const unsubscribeMap = new Map<string, () => void>();
@@ -90,6 +182,7 @@ const tfFrameNodeCacheByTopic = new Map<string, Map<string, THREE.Group>>();
 const poseObjectByTopic = new Map<string, THREE.Object3D>();
 const poseAnchorByTopic = new Map<string, NavPoseAnchor>();
 const pointCloudByTopic = new Map<string, THREE.Points>();
+const pointCloudWarningSignatureByTopic = new Map<string, string>();
 const laserByTopic = new Map<string, THREE.Points>();
 const markerObjectByTopic = new Map<string, THREE.Object3D>();
 const twistObjectByTopic = new Map<string, THREE.Object3D>();
@@ -105,6 +198,8 @@ const raycaster = new THREE.Raycaster();
 const interactionPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
 const maxTfHistorySamplesPerFrame = 240;
 const maxTfHistoryAgeMs = 30000;
+const robotPoseTfTopic = "/display/tf";
+const supportTfTopics = [robotPoseTfTopic, "/tf", "/tf_static"];
 
 const hudDisplayCount = computed(() => props.displays.length);
 const currentInteractionMode = computed(() => props.interactionMode || "none");
@@ -125,7 +220,7 @@ const emptyStateText = computed(() => {
 });
 const interactionHintText = computed(() => {
   if (currentInteractionMode.value === "initialpose") {
-    return "初始化定位模式: 左键点击地图并拖动方向，松开后下发 /initialpose。";
+    return "初始化定位模式: 左键点击地图并拖动方向，松开后生成候选位姿。";
   }
   if (currentInteractionMode.value === "navgoal") {
     return "导航目标模式: 左键点击地图并拖动方向，松开后下发 /nav2_goal_request。";
@@ -138,6 +233,13 @@ const baseLinkHudTone = computed(() => {
   }
   return baseLinkHudText.value.includes("等待") || baseLinkHudText.value.includes("不可用") ? "warning" : "success";
 });
+const offlineClipActive = ref(false);
+const activeOfflineClipFace = ref<keyof BoundsPayload | null>(null);
+const offlineMapDisplayMode = ref<"voxel" | "pointcloud">("voxel");
+
+function hasOfflineMapRaycastCache() {
+  return Boolean(offlineMapRawPositions && offlineMapRawPositions.length > 0);
+}
 
 function initializeScene() {
   const host = mountRef.value;
@@ -171,6 +273,26 @@ function initializeScene() {
   controls.screenSpacePanning = false;
   controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
   controls.mouseButtons.RIGHT = THREE.MOUSE.PAN;
+
+  transformControls = new TransformControls(camera, renderer.domElement);
+  transformControls.setSpace("local");
+  transformControls.setMode("translate");
+  transformControls.enabled = false;
+  transformControls.addEventListener("dragging-changed", (event) => {
+    if (controls) {
+      controls.enabled = !event.value;
+    }
+  });
+  transformControls.addEventListener("objectChange", () => {
+    const candidate = getInitialPoseCandidate();
+    if (!candidate) {
+      return;
+    }
+    sceneStatus.value = `初始化候选: x=${candidate.x.toFixed(3)}, y=${candidate.y.toFixed(3)}, z=${candidate.z.toFixed(3)}, roll=${candidate.roll.toFixed(2)}, pitch=${candidate.pitch.toFixed(2)}, yaw=${candidate.yaw.toFixed(2)}`;
+  });
+  transformControlsHelper = transformControls.getHelper();
+  transformControlsHelper.visible = false;
+  scene.add(transformControlsHelper);
 
   const ambient = new THREE.AmbientLight("#c7dcff", 1.35);
   scene.add(ambient);
@@ -245,6 +367,7 @@ function disposeMaterialResources(material: THREE.Material | null | undefined) {
 
 function clearThreeObject(object: THREE.Object3D) {
   scene?.remove(object);
+  object.parent?.remove(object);
   object.traverse((child) => {
     const mesh = child as THREE.Mesh;
     if (mesh.geometry) {
@@ -278,6 +401,8 @@ function handleWebglContextRestored() {
 
 function teardownRenderer() {
   clearInteractionPreview();
+  clearInitialPoseCandidate();
+  clearOfflineMapPointCloud();
   clearAllTopicVisuals();
   tfTransformHistoryByTopic.clear();
   tfFrameNodeCacheByTopic.clear();
@@ -287,6 +412,12 @@ function teardownRenderer() {
   }
   controls?.dispose();
   controls = null;
+  transformControls?.dispose();
+  transformControls = null;
+  if (transformControlsHelper) {
+    scene?.remove(transformControlsHelper);
+    transformControlsHelper = null;
+  }
   if (renderer) {
     renderer.dispose();
     renderer.forceContextLoss();
@@ -343,6 +474,7 @@ function disposeTopic(topic: string) {
     clearThreeObject(pointCloud);
     pointCloudByTopic.delete(topic);
   }
+  pointCloudWarningSignatureByTopic.delete(topic);
 
   const laser = laserByTopic.get(topic);
   if (laser) {
@@ -1103,7 +1235,7 @@ function normalizePointCloudBytes(data: unknown): Uint8Array | null {
 }
 
 function resolveFieldOffset(fields: any[], fieldName: string) {
-  const match = fields.find((field) => field?.name === fieldName);
+  const match = fields.find((field) => String(field?.name ?? "").toLowerCase() === fieldName);
   return typeof match?.offset === "number" ? match.offset : -1;
 }
 
@@ -1184,6 +1316,444 @@ function buildPointCloudColorBuffer(positions: number[], baseColorText: string) 
   return colors;
 }
 
+function boundsSize(bounds: BoundsPayload, axis: "x" | "y" | "z") {
+  if (axis === "x") {
+    return Math.max(0, bounds.xmax - bounds.xmin);
+  }
+  if (axis === "y") {
+    return Math.max(0, bounds.ymax - bounds.ymin);
+  }
+  return Math.max(0, bounds.zmax - bounds.zmin);
+}
+
+function cloneBounds(bounds: BoundsPayload): BoundsPayload {
+  return {
+    xmin: Number(bounds.xmin),
+    xmax: Number(bounds.xmax),
+    ymin: Number(bounds.ymin),
+    ymax: Number(bounds.ymax),
+    zmin: Number(bounds.zmin),
+    zmax: Number(bounds.zmax),
+  };
+}
+
+function createMapYamlReference(mapInfo: OfflineMapInfoPayload | null) {
+  if (!mapInfo) {
+    return null;
+  }
+  const origin = Array.isArray(mapInfo.origin) ? mapInfo.origin : [0, 0, 0];
+  const originX = Number(origin[0] ?? 0);
+  const originY = Number(origin[1] ?? 0);
+  const yaw = Number(origin[2] ?? 0);
+  const widthM = Number(mapInfo.width) * Number(mapInfo.resolution);
+  const heightM = Number(mapInfo.height) * Number(mapInfo.resolution);
+  if (!Number.isFinite(widthM) || !Number.isFinite(heightM) || widthM <= 0 || heightM <= 0) {
+    return null;
+  }
+
+  const group = new THREE.Group();
+  group.name = "offline-map-yaml-reference";
+  const centerLocal = new THREE.Vector3(widthM / 2, heightM / 2, -0.015).applyAxisAngle(new THREE.Vector3(0, 0, 1), yaw);
+  group.position.set(originX + centerLocal.x, originY + centerLocal.y, centerLocal.z);
+  group.rotation.z = yaw;
+
+  const planeMaterial = new THREE.MeshBasicMaterial({
+    color: "#ffffff",
+    transparent: true,
+    opacity: 0.34,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const plane = new THREE.Mesh(
+    new THREE.PlaneGeometry(widthM, heightM),
+    planeMaterial,
+  );
+  plane.name = "offline-map-yaml-plane";
+  group.add(plane);
+
+  if (mapInfo.image_path) {
+    const textureUrl = `/api/files/pgm-image?path=${encodeURIComponent(mapInfo.image_path)}`;
+    new THREE.TextureLoader().load(
+      textureUrl,
+      (texture) => {
+        texture.colorSpace = THREE.SRGBColorSpace;
+        texture.needsUpdate = true;
+        planeMaterial.map = texture;
+        planeMaterial.color = new THREE.Color("#ffffff");
+        planeMaterial.needsUpdate = true;
+      },
+      undefined,
+      () => {
+        planeMaterial.color = new THREE.Color("#18283b");
+        planeMaterial.opacity = 0.18;
+        planeMaterial.needsUpdate = true;
+      },
+    );
+  }
+
+  const halfW = widthM / 2;
+  const halfH = heightM / 2;
+  const borderPoints = [
+    new THREE.Vector3(-halfW, -halfH, 0.005),
+    new THREE.Vector3(halfW, -halfH, 0.005),
+    new THREE.Vector3(halfW, halfH, 0.005),
+    new THREE.Vector3(-halfW, halfH, 0.005),
+    new THREE.Vector3(-halfW, -halfH, 0.005),
+  ];
+  const border = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(borderPoints),
+    new THREE.LineBasicMaterial({ color: "#8cd867", transparent: true, opacity: 0.86 }),
+  );
+  border.name = "offline-map-yaml-border";
+  group.add(border);
+  return group;
+}
+
+function updateOfflineMapGeometry() {
+  if (!offlineMapClipBounds) {
+    return;
+  }
+  updateOfflineMapPointCloudGeometry();
+  updateOfflineMapVoxelGeometry();
+}
+
+function updateOfflineMapVisibility() {
+  if (offlineMapPoints) {
+    offlineMapPoints.visible = offlineMapDisplayMode.value === "pointcloud";
+  }
+  if (offlineMapVoxelMesh) {
+    offlineMapVoxelMesh.visible = offlineMapDisplayMode.value === "voxel";
+  }
+}
+
+function updateOfflineMapPointCloudGeometry() {
+  if (!offlineMapRawPositions || !offlineMapPoints || !offlineMapClipBounds) {
+    return;
+  }
+  const bounds = offlineMapClipBounds;
+  const positions: number[] = [];
+  for (let index = 0; index < offlineMapRawPositions.length; index += 3) {
+    const x = offlineMapRawPositions[index];
+    const y = offlineMapRawPositions[index + 1];
+    const z = offlineMapRawPositions[index + 2];
+    if (x < bounds.xmin || x > bounds.xmax || y < bounds.ymin || y > bounds.ymax || z < bounds.zmin || z > bounds.zmax) {
+      continue;
+    }
+    positions.push(x, y, z);
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("color", new THREE.BufferAttribute(buildPointCloudColorBuffer(positions, "#d7dee8"), 3));
+  geometry.computeBoundingSphere();
+  replaceObjectGeometry(offlineMapPoints, geometry);
+  const material = offlineMapPoints.material;
+  if (!Array.isArray(material)) {
+    material.vertexColors = true;
+    material.needsUpdate = true;
+  }
+  updateOfflineMapVisibility();
+  sceneStatus.value = `离线地图点云显示 ${Math.floor(positions.length / 3)} / ${Math.floor(offlineMapRawPositions.length / 3)} 点`;
+}
+
+function updateOfflineMapVoxelGeometry() {
+  if (!offlineMapVoxelCenters || !offlineMapVoxelMesh || !offlineMapClipBounds) {
+    return;
+  }
+  const bounds = offlineMapClipBounds;
+  const matrix = new THREE.Matrix4();
+  const scale = new THREE.Vector3(1, 1, 1);
+  const rotation = new THREE.Quaternion();
+  let visibleCount = 0;
+  for (let index = 0; index < offlineMapVoxelCenters.length; index += 3) {
+    const x = offlineMapVoxelCenters[index];
+    const y = offlineMapVoxelCenters[index + 1];
+    const z = offlineMapVoxelCenters[index + 2];
+    const half = offlineMapVoxelSize * 0.5;
+    if (
+      x + half < bounds.xmin
+      || x - half > bounds.xmax
+      || y + half < bounds.ymin
+      || y - half > bounds.ymax
+      || z + half < bounds.zmin
+      || z - half > bounds.zmax
+    ) {
+      continue;
+    }
+    matrix.compose(new THREE.Vector3(x, y, z), rotation, scale);
+    offlineMapVoxelMesh.setMatrixAt(visibleCount, matrix);
+    visibleCount += 1;
+  }
+  offlineMapVoxelMesh.count = visibleCount;
+  offlineMapVoxelMesh.instanceMatrix.needsUpdate = true;
+  updateOfflineMapVisibility();
+  if (offlineMapDisplayMode.value === "voxel") {
+    sceneStatus.value = `离线占据网格显示 ${visibleCount} / ${Math.floor(offlineMapVoxelCenters.length / 3)} 个 voxel`;
+  }
+}
+
+function buildOfflineMapVoxelMesh() {
+  if (!offlineMapVoxelCenters || offlineMapVoxelCenters.length === 0) {
+    return null;
+  }
+  const voxelCount = Math.floor(offlineMapVoxelCenters.length / 3);
+  const geometry = new THREE.BoxGeometry(offlineMapVoxelSize, offlineMapVoxelSize, offlineMapVoxelSize);
+  const material = new THREE.MeshBasicMaterial({
+    color: "#4cc9f0",
+    transparent: true,
+    opacity: 0.22,
+    depthWrite: false,
+  });
+  const mesh = new THREE.InstancedMesh(geometry, material, voxelCount);
+  mesh.name = "offline-map-voxel-preview";
+  mesh.frustumCulled = false;
+  return mesh;
+}
+
+function buildVoxelCentersFromPointCloud(positions: Float32Array, voxelSize: number) {
+  const occupied = new Map<string, [number, number, number]>();
+  const half = voxelSize * 0.5;
+  for (let index = 0; index < positions.length; index += 3) {
+    const ix = Math.floor(positions[index] / voxelSize + 1e-9);
+    const iy = Math.floor(positions[index + 1] / voxelSize + 1e-9);
+    const iz = Math.floor(positions[index + 2] / voxelSize + 1e-9);
+    const key = `${ix},${iy},${iz}`;
+    if (!occupied.has(key)) {
+      occupied.set(key, [
+        ix * voxelSize + half,
+        iy * voxelSize + half,
+        iz * voxelSize + half,
+      ]);
+    }
+  }
+  const centers = new Float32Array(occupied.size * 3);
+  let cursor = 0;
+  occupied.forEach((center) => {
+    centers[cursor] = center[0];
+    centers[cursor + 1] = center[1];
+    centers[cursor + 2] = center[2];
+    cursor += 3;
+  });
+  return centers;
+}
+
+function setOfflineMapDisplayMode(mode: "voxel" | "pointcloud") {
+  if (!offlineMapRawPositions && !offlineMapVoxelCenters) {
+    return { ok: false, message: "请先加载离线地图。" };
+  }
+  offlineMapDisplayMode.value = mode;
+  updateOfflineMapVisibility();
+  if (mode === "voxel" && offlineMapVoxelCenters) {
+    sceneStatus.value = `已切换到占据网格显示: ${Math.floor(offlineMapVoxelCenters.length / 3)} 个 voxel。`;
+    return { ok: true, message: sceneStatus.value };
+  } else if (mode === "pointcloud" && offlineMapRawPositions) {
+    sceneStatus.value = `已切换到点云显示: ${Math.floor(offlineMapRawPositions.length / 3)} 点。`;
+    return { ok: true, message: sceneStatus.value };
+  }
+  return { ok: false, message: "当前离线地图缺少对应显示数据。" };
+}
+
+function attachOfflineMapPointCloud(payload: OfflineMapPointCloudPayload) {
+  if (!scene) {
+    return { ok: false, message: "三维场景尚未初始化。" };
+  }
+  const points = Array.isArray(payload?.pcd?.points) ? payload.pcd.points : [];
+  const positions = new Float32Array(points.length * 3);
+  let cursor = 0;
+  for (const point of points) {
+    const x = Number(point?.[0]);
+    const y = Number(point?.[1]);
+    const z = Number(point?.[2]);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+      continue;
+    }
+    positions[cursor] = x;
+    positions[cursor + 1] = y;
+    positions[cursor + 2] = z;
+    cursor += 3;
+  }
+  if (cursor <= 0) {
+    return { ok: false, message: "离线 PCD 没有可显示的有效点。" };
+  }
+
+  clearOfflineMapPointCloud();
+  offlineMapDisplayMode.value = "voxel";
+  offlineMapRawPositions = positions.slice(0, cursor);
+  offlineMapVoxelSize = Math.max(0.03, Number(payload.occupancy?.voxel_m || payload.pcd.voxel_leaf_m || 0.1));
+  const voxelCenters = Array.isArray(payload.occupancy?.voxels) ? payload.occupancy.voxels : [];
+  const voxelPositions = new Float32Array(voxelCenters.length * 3);
+  let voxelCursor = 0;
+  for (const voxel of voxelCenters) {
+    const x = Number(voxel?.[0]);
+    const y = Number(voxel?.[1]);
+    const z = Number(voxel?.[2]);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+      continue;
+    }
+    voxelPositions[voxelCursor] = x;
+    voxelPositions[voxelCursor + 1] = y;
+    voxelPositions[voxelCursor + 2] = z;
+    voxelCursor += 3;
+  }
+  offlineMapVoxelCenters = voxelCursor > 0
+    ? voxelPositions.slice(0, voxelCursor)
+    : buildVoxelCentersFromPointCloud(offlineMapRawPositions, offlineMapVoxelSize);
+  offlineMapOriginalBounds = cloneBounds(payload.pcd.sampled_bounds);
+  offlineMapClipBounds = cloneBounds(payload.pcd.sampled_bounds);
+  offlineClipActive.value = true;
+  offlineMapGroup = new THREE.Group();
+  offlineMapGroup.name = "offline-map-pointcloud-root";
+
+  const mapReference = createMapYamlReference(payload.map);
+  if (mapReference) {
+    offlineMapGroup.add(mapReference);
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  const initialPositions = Array.from(offlineMapRawPositions);
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(initialPositions, 3));
+  geometry.setAttribute("color", new THREE.BufferAttribute(buildPointCloudColorBuffer(initialPositions, "#d7dee8"), 3));
+  geometry.computeBoundingSphere();
+  const material = new THREE.PointsMaterial({
+    color: "#ffffff",
+    size: 0.06,
+    sizeAttenuation: true,
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.88,
+    depthWrite: true,
+    depthTest: true,
+  });
+  offlineMapPoints = new THREE.Points(geometry, material);
+  offlineMapPoints.name = "offline-map-pointcloud-preview";
+  offlineMapGroup.add(offlineMapPoints);
+  offlineMapVoxelMesh = buildOfflineMapVoxelMesh();
+  if (offlineMapVoxelMesh) {
+    offlineMapGroup.add(offlineMapVoxelMesh);
+    updateOfflineMapVoxelGeometry();
+  }
+  updateOfflineMapVisibility();
+  scene.add(offlineMapGroup);
+  const displayedVoxelCount = Math.floor((offlineMapVoxelCenters?.length ?? 0) / 3);
+  const sourceVoxelCount = payload.occupancy?.occupied_count && payload.occupancy.occupied_count > 0
+    ? payload.occupancy.occupied_count
+    : displayedVoxelCount;
+  sceneStatus.value = `已加载离线地图: ${payload.pcd.sampled_count} / ${payload.pcd.input_points} 点，${displayedVoxelCount} / ${sourceVoxelCount} 个占据 voxel。`;
+  return { ok: true, message: sceneStatus.value };
+}
+
+function clearOfflineMapPointCloud() {
+  if (offlineMapGroup) {
+    clearThreeObject(offlineMapGroup);
+    offlineMapGroup = null;
+  }
+  offlineMapPoints = null;
+  offlineMapVoxelMesh = null;
+  offlineMapRawPositions = null;
+  offlineMapVoxelCenters = null;
+  offlineMapVoxelSize = 0.1;
+  offlineMapOriginalBounds = null;
+  offlineMapClipBounds = null;
+  offlineClipActive.value = false;
+  activeOfflineClipFace.value = null;
+}
+
+function moveOfflineClipFace(face: keyof BoundsPayload, direction: -1 | 1) {
+  if (!offlineMapClipBounds || !offlineMapOriginalBounds) {
+    sceneStatus.value = "请先加载离线地图点云。";
+    return;
+  }
+  const axis = face.startsWith("x") ? "x" : face.startsWith("y") ? "y" : "z";
+  const minKey = `${axis}min` as keyof BoundsPayload;
+  const maxKey = `${axis}max` as keyof BoundsPayload;
+  const span = Math.max(0.05, boundsSize(offlineMapOriginalBounds, axis));
+  const step = Math.max(0.02, span * 0.035);
+  const minGap = Math.max(0.02, span * 0.01);
+  const originalMin = offlineMapOriginalBounds[minKey];
+  const originalMax = offlineMapOriginalBounds[maxKey];
+  const nextValue = offlineMapClipBounds[face] + direction * step;
+  if (face.endsWith("min")) {
+    offlineMapClipBounds[face] = Math.min(Math.max(nextValue, originalMin), offlineMapClipBounds[maxKey] - minGap);
+  } else {
+    offlineMapClipBounds[face] = Math.max(Math.min(nextValue, originalMax), offlineMapClipBounds[minKey] + minGap);
+  }
+  updateOfflineMapGeometry();
+}
+
+function resetOfflineClipBounds() {
+  if (!offlineMapOriginalBounds) {
+    sceneStatus.value = "请先加载离线地图点云。";
+    return;
+  }
+  offlineMapClipBounds = cloneBounds(offlineMapOriginalBounds);
+  updateOfflineMapGeometry();
+}
+
+function clipAxisForFace(face: keyof BoundsPayload) {
+  return face.startsWith("x") ? "x" : face.startsWith("y") ? "y" : "z";
+}
+
+function setOfflineClipFaceValue(face: keyof BoundsPayload, value: number) {
+  if (!offlineMapClipBounds || !offlineMapOriginalBounds) {
+    return;
+  }
+  const axis = clipAxisForFace(face);
+  const minKey = `${axis}min` as keyof BoundsPayload;
+  const maxKey = `${axis}max` as keyof BoundsPayload;
+  const span = Math.max(0.05, boundsSize(offlineMapOriginalBounds, axis));
+  const minGap = Math.max(0.02, span * 0.01);
+  const originalMin = offlineMapOriginalBounds[minKey];
+  const originalMax = offlineMapOriginalBounds[maxKey];
+  if (face.endsWith("min")) {
+    offlineMapClipBounds[face] = Math.min(Math.max(value, originalMin), offlineMapClipBounds[maxKey] - minGap);
+  } else {
+    offlineMapClipBounds[face] = Math.max(Math.min(value, originalMax), offlineMapClipBounds[minKey] + minGap);
+  }
+  updateOfflineMapGeometry();
+}
+
+function clipDragDirectionMultiplier(face: keyof BoundsPayload) {
+  // 左、后、下三个轴的屏幕拖动直觉与基础数值方向相反，单独翻转以保持操作一致。
+  return face === "xmin" || face === "ymin" || face === "zmin" ? -1 : 1;
+}
+
+function beginOfflineClipFaceDrag(face: keyof BoundsPayload, event: PointerEvent) {
+  if (!offlineClipActive.value || !offlineMapClipBounds) {
+    sceneStatus.value = "请先加载离线地图点云。";
+    return;
+  }
+  offlineClipDragFace = face;
+  offlineClipDragStartX = event.clientX;
+  offlineClipDragStartY = event.clientY;
+  offlineClipDragStartValue = offlineMapClipBounds[face];
+  activeOfflineClipFace.value = face;
+  const target = event.currentTarget;
+  if (target instanceof HTMLElement) {
+    target.setPointerCapture(event.pointerId);
+  }
+}
+
+function dragOfflineClipFace(event: PointerEvent) {
+  if (!offlineClipDragFace || !offlineMapOriginalBounds) {
+    return;
+  }
+  const face = offlineClipDragFace;
+  const axis = clipAxisForFace(face);
+  const span = Math.max(0.05, boundsSize(offlineMapOriginalBounds, axis));
+  const deltaX = event.clientX - offlineClipDragStartX;
+  const deltaY = event.clientY - offlineClipDragStartY;
+  const movementScale = span / 180;
+  const projectedDistance = axis === "z" ? -deltaY : deltaX;
+  const baseSignedDistance = face.endsWith("min") ? -projectedDistance * movementScale : projectedDistance * movementScale;
+  const signedDistance = baseSignedDistance * clipDragDirectionMultiplier(face);
+  setOfflineClipFaceValue(face, offlineClipDragStartValue + signedDistance);
+}
+
+function endOfflineClipFaceDrag() {
+  offlineClipDragFace = null;
+  activeOfflineClipFace.value = null;
+}
+
 function extractCustomPointCloudPositions(message: any) {
   const points = Array.isArray(message?.points) ? message.points : [];
   if (points.length === 0) {
@@ -1225,6 +1795,7 @@ function extractPointCloud2Positions(message: any) {
   const sampleStep = Math.max(1, Math.ceil(totalPoints / 18000));
   const positions: number[] = [];
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const littleEndian = message?.is_bigendian !== true;
 
   for (let index = 0; index < totalPoints; index += sampleStep) {
     const base = index * pointStep;
@@ -1232,9 +1803,9 @@ function extractPointCloud2Positions(message: any) {
       break;
     }
 
-    const x = view.getFloat32(base + xOffset, true);
-    const y = view.getFloat32(base + yOffset, true);
-    const z = view.getFloat32(base + zOffset, true);
+    const x = view.getFloat32(base + xOffset, littleEndian);
+    const y = view.getFloat32(base + yOffset, littleEndian);
+    const z = view.getFloat32(base + zOffset, littleEndian);
     if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
       continue;
     }
@@ -1243,17 +1814,34 @@ function extractPointCloud2Positions(message: any) {
   return positions;
 }
 
-function renderPointCloud(display: NavViewerDisplay, message: any) {
+function describePointCloud2ForWarning(message: any) {
+  const fields = Array.isArray(message?.fields)
+    ? message.fields.map((field) => `${String(field?.name ?? "?")}:${String(field?.offset ?? "?")}`).join(",")
+    : "none";
+  const bytes = normalizePointCloudBytes(message?.data);
+  const dataLength = bytes?.byteLength ?? 0;
+  return `fields=${fields || "none"}, point_step=${String(message?.point_step ?? "?")}, width=${String(message?.width ?? "?")}, height=${String(message?.height ?? "?")}, data=${dataLength}B`;
+}
+
+function renderPointCloud(display: NavViewerDisplay, message: any): PointCloudRenderResult {
   if (!scene) {
-    return;
+    return { ok: false, message: "3D 场景未初始化，暂不能渲染点云。" };
   }
   const latestDisplay = getDisplayByTopic(display.topic) || display;
   const topic = latestDisplay.topic;
+  const isCustomPointCloud = Array.isArray(message?.points);
   const positions = Array.isArray(message?.points)
     ? extractCustomPointCloudPositions(message)
     : extractPointCloud2Positions(message);
   if (positions.length === 0) {
-    return;
+    const detail = isCustomPointCloud
+      ? `points=${Array.isArray(message?.points) ? message.points.length : 0}`
+      : describePointCloud2ForWarning(message);
+    return {
+      ok: false,
+      message: `点云 ${topic} 已收到但没有可渲染 xyz 数据，${detail}`,
+      warningSignature: `${topic}:${detail}`,
+    };
   }
   const useLayeredColors = pointColorModeForDisplay(latestDisplay) === "layered";
   const pointColors = useLayeredColors ? buildPointCloudColorBuffer(positions, pointColorForDisplay(latestDisplay)) : null;
@@ -1338,6 +1926,262 @@ function renderPointCloud(display: NavViewerDisplay, message: any) {
   cacheTopicLocalMatrix(topic, composeLocalMatrix());
   applyObjectFrameTransform(topic, points, message?.header?.frame_id, sourceStampMsByTopic.get(topic) ?? null);
   points.visible = true;
+  pointCloudWarningSignatureByTopic.delete(topic);
+  return { ok: true, message: `已更新点云: ${topic}` };
+}
+
+function candidateQuaternionFromYaw(yaw: number) {
+  return new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, yaw, "XYZ"));
+}
+
+function candidateQuaternionFromGroundNormal(yaw: number, normal: THREE.Vector3 | null) {
+  if (!normal || normal.lengthSq() < 1e-8) {
+    return candidateQuaternionFromYaw(yaw);
+  }
+  const zAxis = normal.clone().normalize();
+  if (zAxis.z < 0) {
+    zAxis.multiplyScalar(-1);
+  }
+  const horizontalForward = new THREE.Vector3(Math.cos(yaw), Math.sin(yaw), 0);
+  const projectedForward = horizontalForward.sub(zAxis.clone().multiplyScalar(horizontalForward.dot(zAxis)));
+  if (projectedForward.lengthSq() < 1e-8) {
+    return candidateQuaternionFromYaw(yaw);
+  }
+  const xAxis = projectedForward.normalize();
+  const yAxis = zAxis.clone().cross(xAxis).normalize();
+  const matrix = new THREE.Matrix4().makeBasis(xAxis, yAxis, zAxis);
+  return new THREE.Quaternion().setFromRotationMatrix(matrix);
+}
+
+function createInitialPoseArrowObject() {
+  const group = new THREE.Group();
+  group.name = "initial-pose-candidate-visual";
+
+  const anchor = new THREE.Mesh(
+    new THREE.CircleGeometry(0.16, 28),
+    new THREE.MeshBasicMaterial({ color: "#31d28a", transparent: true, opacity: 0.92 })
+  );
+  anchor.name = "initial-pose-anchor";
+  anchor.position.set(0, 0, 0.025);
+  group.add(anchor);
+
+  const arrow = new THREE.ArrowHelper(
+    new THREE.Vector3(1, 0, 0),
+    new THREE.Vector3(0, 0, 0.08),
+    1.25,
+    "#31d28a",
+    0.32,
+    0.15
+  );
+  arrow.name = "initial-pose-arrow";
+  group.add(arrow);
+
+  const zAxis = new THREE.ArrowHelper(
+    new THREE.Vector3(0, 0, 1),
+    new THREE.Vector3(0, 0, 0.08),
+    0.58,
+    "#61ecff",
+    0.16,
+    0.08
+  );
+  zAxis.name = "initial-pose-z-axis";
+  group.add(zAxis);
+
+  return group;
+}
+
+function applyInitialPoseCandidateTransform(group: THREE.Group, x: number, y: number, z: number, yaw: number, normal: THREE.Vector3 | null = null) {
+  group.position.set(x, y, z);
+  group.quaternion.copy(candidateQuaternionFromGroundNormal(yaw, normal));
+  group.updateMatrixWorld(true);
+}
+
+function ensureInitialPoseCandidateGroup(x: number, y: number, z: number, yaw: number, normal: THREE.Vector3 | null = null) {
+  if (!scene) {
+    return null;
+  }
+  if (!initialPoseCandidateGroup) {
+    initialPoseCandidateGroup = new THREE.Group();
+    initialPoseCandidateGroup.name = "initial-pose-candidate-root";
+    initialPoseCandidateGroup.add(createInitialPoseArrowObject());
+    scene.add(initialPoseCandidateGroup);
+  }
+  applyInitialPoseCandidateTransform(initialPoseCandidateGroup, x, y, z, yaw, normal);
+  transformControls?.attach(initialPoseCandidateGroup);
+  if (transformControls) {
+    transformControls.enabled = true;
+    transformControls.setSize(1.1);
+  }
+  if (transformControlsHelper) {
+    transformControlsHelper.visible = true;
+  }
+  return initialPoseCandidateGroup;
+}
+
+function clearInitialPoseCandidate() {
+  transformControls?.detach();
+  if (transformControls) {
+    transformControls.enabled = false;
+  }
+  if (transformControlsHelper) {
+    transformControlsHelper.visible = false;
+  }
+  if (initialPoseCandidateGroup) {
+    clearThreeObject(initialPoseCandidateGroup);
+    initialPoseCandidateGroup = null;
+  }
+  initialPosePointCloud = null;
+}
+
+function setInitialPoseTransformMode(mode: "translate" | "rotate") {
+  if (!transformControls || !initialPoseCandidateGroup) {
+    return { ok: false, message: "请先在主视图拖出初始化候选位姿。" };
+  }
+  transformControls.setMode(mode);
+  transformControls.setSpace("local");
+  return { ok: true, message: mode === "translate" ? "已切换到位置移动控件。" : "已切换到姿态旋转控件。" };
+}
+
+/**
+ * 功能说明：
+ * 将抓取到的一帧点云转换到 base_link 局部坐标，后续由初始化候选位姿统一控制位置和姿态。
+ *
+ * 注意事项：
+ * 1. TF 齐全时使用 fixed frame 作为中间坐标，避免把当前全局位姿直接烘焙到点云里。
+ * 2. TF 不齐全时保留原始点坐标继续预览，现场可据提示判断是否需要补 TF 或改选局部点云话题。
+ */
+function localizePointCloudPositionsToBase(message: any, positions: number[]) {
+  const cloudFrame = normalizeFrameId(message?.header?.frame_id);
+  const stampMs = extractHeaderStampMs(message);
+  const cloudToFixed = resolveFrameTransformToFixed(cloudFrame, stampMs);
+  const baseToFixed = resolveFrameTransformToFixed("base_link", stampMs);
+  if (!cloudToFixed || !baseToFixed) {
+    return {
+      positions,
+      localized: false,
+      message: cloudFrame
+        ? `缺少 ${cloudFrame} 或 base_link 到 ${currentFixedFrame()} 的 TF，已按原始点云局部坐标预览。`
+        : "点云缺少 frame_id，已按原始点云局部坐标预览。",
+    };
+  }
+
+  const cloudToBase = baseToFixed.clone().invert().multiply(cloudToFixed);
+  const nextPositions = [...positions];
+  transformPositionArrayInPlace(nextPositions, cloudToBase);
+  return {
+    positions: nextPositions,
+    localized: true,
+    message: `点云已从 ${cloudFrame || "未知坐标系"} 转成 base_link 局部快照。`,
+  };
+}
+
+/**
+ * 功能说明：
+ * 把外层页面抓取的一帧点云绑定到初始化候选位姿上。
+ *
+ * 用法说明：
+ * 1. 必须先通过拖拽生成候选位姿，否则没有可绑定的三维操作中心。
+ * 2. 重复抓帧会释放上一帧点云资源，只保留最新一帧，避免浏览器端缓存累积。
+ */
+function attachInitialPosePointCloud(payload: InitialPosePointCloudPayload) {
+  if (!initialPoseCandidateGroup) {
+    return { ok: false, message: "请先拖出初始化候选位姿，再抓取点云帧。" };
+  }
+  const display: NavViewerDisplay = {
+    topic: payload.topic || "initial-pose-preview-cloud",
+    messageType: "sensor_msgs/msg/PointCloud2",
+    kind: "pointcloud",
+    label: "初始化点云预览",
+    pointSize: payload.pointSize ?? 0.06,
+    pointColorMode: payload.pointColorMode ?? "layered",
+    color: payload.color ?? "#f4d35e",
+  };
+  const rawPositions = Array.isArray(payload.message?.points)
+    ? extractCustomPointCloudPositions(payload.message)
+    : extractPointCloud2Positions(payload.message);
+  if (rawPositions.length === 0) {
+    return { ok: false, message: "点云帧没有解析到有效 x/y/z 点。" };
+  }
+
+  const localized = localizePointCloudPositionsToBase(payload.message, rawPositions);
+  const useLayeredColors = pointColorModeForDisplay(display) === "layered";
+  const pointColors = useLayeredColors ? buildPointCloudColorBuffer(localized.positions, pointColorForDisplay(display)) : null;
+
+  if (initialPosePointCloud) {
+    clearThreeObject(initialPosePointCloud);
+    initialPosePointCloud = null;
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(localized.positions, 3));
+  if (pointColors) {
+    geometry.setAttribute("color", new THREE.BufferAttribute(pointColors, 3));
+  }
+  geometry.computeBoundingSphere();
+  const material = new THREE.PointsMaterial({
+    color: useLayeredColors ? "#ffffff" : pointColorForDisplay(display),
+    size: safePointCloudSize(display),
+    sizeAttenuation: true,
+    vertexColors: useLayeredColors,
+    transparent: true,
+    opacity: 0.78,
+    depthWrite: false,
+    depthTest: true,
+  });
+  initialPosePointCloud = new THREE.Points(geometry, material);
+  initialPosePointCloud.name = "initial-pose-pointcloud-preview";
+  initialPoseCandidateGroup.add(initialPosePointCloud);
+  initialPoseCandidateGroup.updateMatrixWorld(true);
+  sceneStatus.value = `已绑定初始化点云: ${payload.topic}，${Math.floor(localized.positions.length / 3)} 点。${localized.message}`;
+  return { ok: true, message: sceneStatus.value };
+}
+
+function updateInitialPosePointCloudSize(pointSize: number) {
+  if (!initialPosePointCloud) {
+    return { ok: false, message: "当前还没有初始化点云预览。" };
+  }
+  const safeSize = Math.min(0.8, Math.max(0.005, Number(pointSize) || 0.055));
+  const material = initialPosePointCloud.material;
+  if (Array.isArray(material)) {
+    return { ok: false, message: "初始化点云材质格式不支持直接调整点大小。" };
+  }
+  material.size = safeSize;
+  material.needsUpdate = true;
+  sceneStatus.value = `初始化点云点大小已调整为 ${safeSize.toFixed(3)}。`;
+  return { ok: true, message: sceneStatus.value };
+}
+
+function attachInitialPoseLatestPointCloud(topic: string, pointSize = 0.055) {
+  const message = latestMessageByTopic.get(topic);
+  if (!message) {
+    return { ok: false, message: `主视图还没有缓存 ${topic} 的点云帧。` };
+  }
+  const result = attachInitialPosePointCloud({
+    topic,
+    message,
+    color: "#f4d35e",
+    pointSize,
+    pointColorMode: "layered",
+  });
+  if (!result.ok) {
+    return result;
+  }
+  return { ok: true, message: `${result.message}（使用主视图已收到的最近一帧）` };
+}
+
+function getInitialPoseCandidate() {
+  if (!initialPoseCandidateGroup) {
+    return null;
+  }
+  const euler = new THREE.Euler().setFromQuaternion(initialPoseCandidateGroup.quaternion, "XYZ");
+  return {
+    x: initialPoseCandidateGroup.position.x,
+    y: initialPoseCandidateGroup.position.y,
+    z: initialPoseCandidateGroup.position.z,
+    roll: euler.x,
+    pitch: euler.y,
+    yaw: euler.z,
+  };
 }
 
 function clearInteractionPreview() {
@@ -1363,12 +2207,12 @@ function buildInteractionPreview(startPoint: THREE.Vector3, endPoint: THREE.Vect
     new THREE.CircleGeometry(0.12, 20),
     new THREE.MeshBasicMaterial({ color: currentInteractionMode.value === "initialpose" ? "#31d28a" : "#f6a237" })
   );
-  anchor.position.set(startPoint.x, startPoint.y, 0.02);
+  anchor.position.set(startPoint.x, startPoint.y, startPoint.z + 0.02);
   group.add(anchor);
 
   const arrow = new THREE.ArrowHelper(
     new THREE.Vector3(Math.cos(yaw), Math.sin(yaw), 0),
-    new THREE.Vector3(startPoint.x, startPoint.y, 0.05),
+    new THREE.Vector3(startPoint.x, startPoint.y, startPoint.z + 0.05),
     length,
     currentInteractionMode.value === "initialpose" ? "#31d28a" : "#f6a237",
     0.26,
@@ -1380,7 +2224,7 @@ function buildInteractionPreview(startPoint: THREE.Vector3, endPoint: THREE.Vect
   interactionPreviewGroup = group;
 }
 
-function worldPointFromMouse(event: MouseEvent) {
+function worldPointFromMouse(event: MouseEvent, planeZ = 0) {
   if (!camera || !renderer) {
     return null;
   }
@@ -1389,15 +2233,84 @@ function worldPointFromMouse(event: MouseEvent) {
   const y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera({ x, y }, camera);
   const point = new THREE.Vector3();
-  const hit = raycaster.ray.intersectPlane(interactionPlane, point);
+  const plane = planeZ === 0 ? interactionPlane : new THREE.Plane(new THREE.Vector3(0, 0, 1), -planeZ);
+  const hit = raycaster.ray.intersectPlane(plane, point);
   return hit ? point.clone() : null;
 }
 
-function handlePointerDown(event: MouseEvent) {
+function rayPayloadFromMouse(event: MouseEvent) {
+  if (!camera || !renderer) {
+    return null;
+  }
+  const rect = renderer.domElement.getBoundingClientRect();
+  const x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  const y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera({ x, y }, camera);
+  return {
+    origin: [raycaster.ray.origin.x, raycaster.ray.origin.y, raycaster.ray.origin.z],
+    direction: [raycaster.ray.direction.x, raycaster.ray.direction.y, raycaster.ray.direction.z],
+  };
+}
+
+function safeInitialPoseBaseHeightOffset() {
+  const value = Number(props.initialPoseBaseHeightOffsetM ?? 0.35);
+  return Number.isFinite(value) ? Math.min(3, Math.max(-1, value)) : 0.35;
+}
+
+function currentOfflineMapClipBoundsPayload() {
+  if (!offlineMapClipBounds) {
+    return undefined;
+  }
+  return cloneBounds(offlineMapClipBounds);
+}
+
+async function resolveInitialPoseStartPoint(event: MouseEvent) {
+  const fallback = worldPointFromMouse(event, 0);
+  interactionStartGroundNormal = null;
+  interactionStartGroundMessage = "";
+  if (!hasOfflineMapRaycastCache()) {
+    return fallback;
+  }
+  const ray = rayPayloadFromMouse(event);
+  if (!ray) {
+    return fallback;
+  }
+  try {
+    const result = await raycastRosNavOfflineMap({
+      origin: ray.origin,
+      direction: ray.direction,
+      max_distance_m: 80,
+      normal_radius_m: Number(props.initialPoseGroundNormalRadiusM ?? 0.8),
+      ground_max_slope_deg: Number(props.initialPoseGroundMaxSlopeDeg ?? 30),
+      clip_bounds: currentOfflineMapClipBoundsPayload(),
+      use_visible_voxels: true,
+    });
+    if (!result.hit || !Number.isFinite(result.x) || !Number.isFinite(result.y) || !Number.isFinite(result.z)) {
+      interactionStartGroundMessage = result.message || "射线未命中可靠地面，已回退到平面初始化。";
+      return fallback;
+    }
+    const normal = Array.isArray(result.normal) && result.normal.length >= 3
+      ? new THREE.Vector3(Number(result.normal[0]), Number(result.normal[1]), Number(result.normal[2])).normalize()
+      : new THREE.Vector3(0, 0, 1);
+    interactionStartGroundNormal = normal;
+    interactionStartGroundMessage = result.message || "已通过离线点云占据射线吸附地面。";
+    return new THREE.Vector3(Number(result.x), Number(result.y), Number(result.z) + safeInitialPoseBaseHeightOffset());
+  } catch (error) {
+    interactionStartGroundMessage = `离线点云射线吸附失败: ${(error as Error).message}`;
+    return fallback;
+  }
+}
+
+async function handlePointerDown(event: MouseEvent) {
   if (event.button !== 0 || currentInteractionMode.value === "none") {
     return;
   }
-  const point = worldPointFromMouse(event);
+  const point = currentInteractionMode.value === "initialpose"
+    ? await resolveInitialPoseStartPoint(event)
+    : worldPointFromMouse(event);
+  if (currentInteractionMode.value === "none") {
+    return;
+  }
   if (!point) {
     return;
   }
@@ -1412,7 +2325,7 @@ function handlePointerMove(event: MouseEvent) {
   if (!interactionStartPoint || currentInteractionMode.value === "none") {
     return;
   }
-  const point = worldPointFromMouse(event);
+  const point = worldPointFromMouse(event, interactionStartPoint.z);
   if (!point) {
     return;
   }
@@ -1431,19 +2344,33 @@ function finishInteraction(emitResult: boolean) {
   const mode = currentInteractionMode.value;
   const targetX = interactionStartPoint.x;
   const targetY = interactionStartPoint.y;
+  const targetZ = interactionStartPoint.z;
+  const groundNormal = mode === "initialpose" ? interactionStartGroundNormal?.clone() ?? null : null;
+  const candidateQuaternion = candidateQuaternionFromGroundNormal(yaw, groundNormal);
+  const candidateEuler = new THREE.Euler().setFromQuaternion(candidateQuaternion, "XYZ");
+  const groundMessage = interactionStartGroundMessage;
   clearInteractionPreview();
   interactionStartPoint = null;
   interactionCurrentPoint = null;
+  interactionStartGroundNormal = null;
+  interactionStartGroundMessage = "";
   controls && (controls.enabled = true);
 
   if (!emitResult || mode === "none") {
     return;
   }
+  if (mode === "initialpose") {
+    ensureInitialPoseCandidateGroup(targetX, targetY, targetZ, yaw, groundNormal);
+    sceneStatus.value = `已生成初始化候选位姿，可抓取点云并用三维控件微调。${groundMessage ? ` ${groundMessage}` : ""}`;
+  }
   emit("interactionComplete", {
     mode,
     x: targetX,
     y: targetY,
-    yaw,
+    z: targetZ,
+    roll: candidateEuler.x,
+    pitch: candidateEuler.y,
+    yaw: candidateEuler.z,
   });
 }
 
@@ -1471,6 +2398,27 @@ function quaternionToYaw(rotation: any) {
   return Math.atan2(sinyCosp, cosyCosp);
 }
 
+function quaternionFromPoseOrientation(orientation: any) {
+  const quaternion = new THREE.Quaternion(
+    Number(orientation?.x ?? 0),
+    Number(orientation?.y ?? 0),
+    Number(orientation?.z ?? 0),
+    Number(orientation?.w ?? 1),
+  );
+  if (quaternion.lengthSq() < 1e-8) {
+    return new THREE.Quaternion();
+  }
+  return quaternion.normalize();
+}
+
+function vectorFromPosePosition(position: any) {
+  return new THREE.Vector3(
+    Number(position?.x ?? 0),
+    Number(position?.y ?? 0),
+    Number(position?.z ?? 0),
+  );
+}
+
 function formatHudCoordinate(value: number) {
   return Number.isFinite(value) ? value.toFixed(3) : "-";
 }
@@ -1481,13 +2429,14 @@ function updateBaseLinkHud() {
     return;
   }
 
-  const baseLinkTransform = resolveFrameTransformToFixed("base_link");
+  const baseLinkTransform = resolveFrameTransformToFixed("base_link", null, robotPoseTfTopic);
   if (baseLinkTransform) {
     const position = new THREE.Vector3();
     const quaternion = new THREE.Quaternion();
     const scale = new THREE.Vector3();
     baseLinkTransform.decompose(position, quaternion, scale);
     baseLinkHudText.value = [
+      `topic: ${robotPoseTfTopic}`,
       `frame: ${currentFixedFrame()} <- base_link`,
       `x: ${formatHudCoordinate(position.x)}`,
       `y: ${formatHudCoordinate(position.y)}`,
@@ -1510,7 +2459,7 @@ function updateBaseLinkHud() {
     return;
   }
 
-  baseLinkHudText.value = "base_link 位姿暂不可用";
+  baseLinkHudText.value = `${robotPoseTfTopic} 中 base_link 位姿暂不可用`;
 }
 
 function createCircleLine(radius: number, color: string, dashed = false) {
@@ -1739,6 +2688,8 @@ function renderPose(topic: string, message: any) {
   const position = pose?.position ?? {};
   const orientation = pose?.orientation ?? {};
   const yaw = quaternionToYaw(orientation);
+  const posePosition = vectorFromPosePosition(position);
+  const poseQuaternion = quaternionFromPoseOrientation(orientation);
   const frameId = normalizeFrameId(message?.header?.frame_id) || currentFixedFrame();
   const display = getDisplayByTopic(topic) ?? {
     topic,
@@ -1758,25 +2709,24 @@ function renderPose(topic: string, message: any) {
   const marker = group.children[0] as THREE.Group | undefined;
   const body = marker?.getObjectByName("pose-body") as THREE.Mesh | null;
   if (body) {
-    body.rotation.z = yaw - Math.PI / 2;
-    body.position.set(Number(position.x ?? 0), Number(position.y ?? 0), 0.34);
+    body.position.set(0.34, 0, 0);
   }
   const tail = marker?.getObjectByName("pose-tail") as THREE.Mesh | null;
   if (tail) {
-    tail.position.set(Number(position.x ?? 0), Number(position.y ?? 0), 0.02);
+    tail.position.set(0, 0, 0);
   }
 
   sourceFrameByTopic.set(topic, frameId);
   sourceStampMsByTopic.set(topic, extractHeaderStampMs(message));
-  cacheTopicLocalMatrix(topic, composeLocalMatrix());
+  cacheTopicLocalMatrix(topic, composeLocalMatrix(posePosition, poseQuaternion));
   applyObjectFrameTransform(topic, group, frameId, sourceStampMsByTopic.get(topic) ?? null);
   group.visible = true;
   poseAnchorByTopic.set(topic, {
     topic,
     frameId,
-    x: Number(position.x ?? 0),
-    y: Number(position.y ?? 0),
-    z: Number(position.z ?? 0),
+    x: posePosition.x,
+    y: posePosition.y,
+    z: posePosition.z,
     yaw,
   });
   refreshAllObstacleZones();
@@ -1790,6 +2740,8 @@ function createPoseMarker(color: string, scale: number) {
     new THREE.MeshStandardMaterial({ color })
   );
   body.name = "pose-body";
+  body.rotation.z = -Math.PI / 2;
+  body.position.set(0.34 * scale, 0, 0);
   marker.add(body);
 
   const tail = new THREE.Mesh(
@@ -1797,6 +2749,7 @@ function createPoseMarker(color: string, scale: number) {
     new THREE.MeshBasicMaterial({ color })
   );
   tail.name = "pose-tail";
+  tail.position.set(0, 0, 0);
   marker.add(tail);
   return marker;
 }
@@ -1833,17 +2786,19 @@ function renderPoseArray(topic: string, message: any) {
   poses.forEach((pose: any, index: number) => {
     const position = pose?.position ?? {};
     const orientation = pose?.orientation ?? {};
-    const yaw = quaternionToYaw(orientation);
+    const posePosition = vectorFromPosePosition(position);
+    const poseQuaternion = quaternionFromPoseOrientation(orientation);
     const marker = group!.children[index] as THREE.Group;
     marker.visible = true;
+    marker.position.copy(posePosition);
+    marker.quaternion.copy(poseQuaternion);
     const body = marker.getObjectByName("pose-body") as THREE.Mesh | null;
     if (body) {
-      body.rotation.z = yaw - Math.PI / 2;
-      body.position.set(Number(position.x ?? 0), Number(position.y ?? 0), 0.25);
+      body.position.set(0.25, 0, 0);
     }
     const tail = marker.getObjectByName("pose-tail") as THREE.Mesh | null;
     if (tail) {
-      tail.position.set(Number(position.x ?? 0), Number(position.y ?? 0), 0.018);
+      tail.position.set(0, 0, 0);
     }
   });
 
@@ -2448,7 +3403,7 @@ function ensureSupportTfSubscriptions() {
   if (!rosAdapter || !canConsumeTopicData.value) {
     return;
   }
-  ["/tf", "/tf_static"].forEach((topic) => {
+  supportTfTopics.forEach((topic) => {
     if (supportTfUnsubscribeMap.has(topic) || unsubscribeMap.has(topic)) {
       return;
     }
@@ -2504,8 +3459,15 @@ function renderDisplayMessage(display: NavViewerDisplay, message: any) {
     return;
   }
   if (display.kind === "pointcloud") {
-    renderPointCloud(display, message);
-    sceneStatus.value = `已更新点云: ${display.topic}`;
+    const result = renderPointCloud(display, message);
+    sceneStatus.value = result.message;
+    if (!result.ok && result.warningSignature) {
+      const previousSignature = pointCloudWarningSignatureByTopic.get(display.topic);
+      if (previousSignature !== result.warningSignature) {
+        pointCloudWarningSignatureByTopic.set(display.topic, result.warningSignature);
+        emit("rosLog", { source: "3DViewer", level: "warning", message: result.message });
+      }
+    }
     return;
   }
   if (display.kind === "laser") {
@@ -2692,6 +3654,15 @@ watch(
 
 defineExpose<NavViewerExpose>({
   focusOnNdtPose,
+  attachOfflineMapPointCloud,
+  clearOfflineMapPointCloud,
+  setOfflineMapDisplayMode,
+  attachInitialPosePointCloud,
+  attachInitialPoseLatestPointCloud,
+  updateInitialPosePointCloudSize,
+  getInitialPoseCandidate,
+  clearInitialPoseCandidate,
+  setInitialPoseTransformMode,
 });
 
 onMounted(async () => {
@@ -2738,6 +3709,86 @@ onBeforeUnmount(() => {
 
     <div class="nav-viewer-stage">
       <div ref="mountRef" class="nav-viewer-canvas-host"></div>
+      <div class="nav-offline-clip-widget" :class="{ disabled: !offlineClipActive }">
+        <div class="nav-offline-clip-title">离线地图裁剪</div>
+        <div class="nav-offline-display-toggle" aria-label="离线地图显示模式">
+          <button
+            type="button"
+            :class="{ active: offlineMapDisplayMode === 'voxel' }"
+            :disabled="!offlineClipActive"
+            title="显示占据 voxel 方块"
+            @click="setOfflineMapDisplayMode('voxel')"
+          >
+            占据网格
+          </button>
+          <button
+            type="button"
+            :class="{ active: offlineMapDisplayMode === 'pointcloud' }"
+            :disabled="!offlineClipActive"
+            title="显示下采样点云"
+            @click="setOfflineMapDisplayMode('pointcloud')"
+          >
+            点云
+          </button>
+        </div>
+        <div class="nav-offline-clip-axis-control" aria-label="离线点云六向裁剪">
+          <span
+            class="clip-axis-arrow axis-xmin"
+            :class="{ active: activeOfflineClipFace === 'xmin' }"
+            title="拖动左面裁剪边界"
+            @pointerdown.stop.prevent="beginOfflineClipFaceDrag('xmin', $event)"
+            @pointermove.stop.prevent="dragOfflineClipFace"
+            @pointerup.stop.prevent="endOfflineClipFaceDrag"
+            @pointercancel.stop.prevent="endOfflineClipFaceDrag"
+          ></span>
+          <span
+            class="clip-axis-arrow axis-xmax"
+            :class="{ active: activeOfflineClipFace === 'xmax' }"
+            title="拖动右面裁剪边界"
+            @pointerdown.stop.prevent="beginOfflineClipFaceDrag('xmax', $event)"
+            @pointermove.stop.prevent="dragOfflineClipFace"
+            @pointerup.stop.prevent="endOfflineClipFaceDrag"
+            @pointercancel.stop.prevent="endOfflineClipFaceDrag"
+          ></span>
+          <span
+            class="clip-axis-arrow axis-ymin"
+            :class="{ active: activeOfflineClipFace === 'ymin' }"
+            title="拖动后面裁剪边界"
+            @pointerdown.stop.prevent="beginOfflineClipFaceDrag('ymin', $event)"
+            @pointermove.stop.prevent="dragOfflineClipFace"
+            @pointerup.stop.prevent="endOfflineClipFaceDrag"
+            @pointercancel.stop.prevent="endOfflineClipFaceDrag"
+          ></span>
+          <span
+            class="clip-axis-arrow axis-ymax"
+            :class="{ active: activeOfflineClipFace === 'ymax' }"
+            title="拖动前面裁剪边界"
+            @pointerdown.stop.prevent="beginOfflineClipFaceDrag('ymax', $event)"
+            @pointermove.stop.prevent="dragOfflineClipFace"
+            @pointerup.stop.prevent="endOfflineClipFaceDrag"
+            @pointercancel.stop.prevent="endOfflineClipFaceDrag"
+          ></span>
+          <span
+            class="clip-axis-arrow axis-zmin"
+            :class="{ active: activeOfflineClipFace === 'zmin' }"
+            title="拖动底面裁剪边界"
+            @pointerdown.stop.prevent="beginOfflineClipFaceDrag('zmin', $event)"
+            @pointermove.stop.prevent="dragOfflineClipFace"
+            @pointerup.stop.prevent="endOfflineClipFaceDrag"
+            @pointercancel.stop.prevent="endOfflineClipFaceDrag"
+          ></span>
+          <span
+            class="clip-axis-arrow axis-zmax"
+            :class="{ active: activeOfflineClipFace === 'zmax' }"
+            title="拖动顶面裁剪边界"
+            @pointerdown.stop.prevent="beginOfflineClipFaceDrag('zmax', $event)"
+            @pointermove.stop.prevent="dragOfflineClipFace"
+            @pointerup.stop.prevent="endOfflineClipFaceDrag"
+            @pointercancel.stop.prevent="endOfflineClipFaceDrag"
+          ></span>
+        </div>
+        <button class="nav-offline-clip-reset" type="button" :disabled="!offlineClipActive" @click="resetOfflineClipBounds">重置裁剪</button>
+      </div>
       <div class="nav-viewer-base-link-hud" :class="`tone-${baseLinkHudTone}`">
         <span class="nav-viewer-base-link-title">机器狗位置</span>
         <span class="nav-viewer-base-link-text">{{ baseLinkHudText }}</span>

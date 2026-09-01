@@ -24,58 +24,74 @@ export interface NavViewerDisplay {
   tfVisibleFrames?: string[];
 }
 
+function normalizeMessageType(messageType: string): string {
+  return messageType.trim().toLowerCase();
+}
+
+function messageTypeMatches(messageType: string, ...candidates: string[]): boolean {
+  const normalized = normalizeMessageType(messageType);
+  return candidates.some((candidate) => normalized === candidate.toLowerCase());
+}
+
 function isCustomPointCloudMessageType(messageType: string): boolean {
-  const normalized = messageType.trim().toLowerCase();
+  const normalized = normalizeMessageType(messageType);
   return normalized.endsWith("/custommsg") || normalized.endsWith("/msg/custommsg");
 }
 
+export function isPointCloudMessageType(messageType: string): boolean {
+  return messageTypeMatches(messageType, "sensor_msgs/msg/PointCloud2", "sensor_msgs/PointCloud2")
+    || isCustomPointCloudMessageType(messageType);
+}
+
 export function inferDisplayKind(topic: string, messageType: string): NavDisplayKind {
-  if (messageType === "sensor_msgs/msg/PointCloud2" || isCustomPointCloudMessageType(messageType)) {
+  if (isPointCloudMessageType(messageType)) {
     return "pointcloud";
   }
-  if (messageType === "sensor_msgs/msg/LaserScan") {
+  if (messageTypeMatches(messageType, "sensor_msgs/msg/LaserScan", "sensor_msgs/LaserScan")) {
     return "laser";
   }
-  if (messageType === "visualization_msgs/msg/Marker" || messageType === "visualization_msgs/Marker") {
+  if (messageTypeMatches(messageType, "visualization_msgs/msg/Marker", "visualization_msgs/Marker")) {
     return "marker";
   }
-  if (messageType === "scan_planner_msgs/msg/Bspline" || messageType === "scan_planner_msgs/Bspline") {
+  if (messageTypeMatches(messageType, "scan_planner_msgs/msg/Bspline", "scan_planner_msgs/Bspline")) {
     return "bspline";
   }
-  if (messageType === "geometry_msgs/msg/Twist" || messageType === "geometry_msgs/Twist") {
+  if (messageTypeMatches(messageType, "geometry_msgs/msg/Twist", "geometry_msgs/Twist")) {
     return "twist";
   }
-  if (messageType === "nav_msgs/OccupancyGrid" || messageType === "nav_msgs/msg/OccupancyGrid") {
+  if (messageTypeMatches(messageType, "nav_msgs/OccupancyGrid", "nav_msgs/msg/OccupancyGrid")) {
     return "map";
   }
   if (topic === "/map" || topic.endsWith("/map")) {
     return "map";
   }
-  if (messageType === "nav_msgs/Path" || messageType === "nav_msgs/msg/Path") {
+  if (messageTypeMatches(messageType, "nav_msgs/Path", "nav_msgs/msg/Path")) {
     return "path";
   }
   if (topic.includes("plan") || topic.endsWith("/path")) {
     return "path";
   }
-  if (messageType === "tf2_msgs/TFMessage" || messageType === "tf2_msgs/msg/TFMessage" || topic === "/tf" || topic === "/tf_static") {
+  if (messageTypeMatches(messageType, "tf2_msgs/TFMessage", "tf2_msgs/msg/TFMessage") || topic === "/tf" || topic === "/tf_static") {
     return "tf";
   }
   if (topic === "/geneox_mid360_obstacle" || topic.endsWith("/geneox_mid360_obstacle")) {
     return "obstacle_zone";
   }
   if (
-    messageType === "geometry_msgs/msg/PoseArray" ||
-    messageType === "geometry_msgs/PoseArray"
+    messageTypeMatches(messageType, "geometry_msgs/msg/PoseArray", "geometry_msgs/PoseArray")
   ) {
     return "pose_array";
   }
   if (
-    messageType === "geometry_msgs/msg/PoseWithCovarianceStamped" ||
-    messageType === "geometry_msgs/msg/PoseStamped" ||
-    messageType === "nav_msgs/msg/Odometry" ||
-    messageType === "nav_msgs/Odometry" ||
-    messageType === "geometry_msgs/PoseWithCovarianceStamped" ||
-    messageType === "geometry_msgs/PoseStamped"
+    messageTypeMatches(
+      messageType,
+      "geometry_msgs/msg/PoseWithCovarianceStamped",
+      "geometry_msgs/msg/PoseStamped",
+      "nav_msgs/msg/Odometry",
+      "nav_msgs/Odometry",
+      "geometry_msgs/PoseWithCovarianceStamped",
+      "geometry_msgs/PoseStamped",
+    )
   ) {
     return "pose";
   }

@@ -170,7 +170,8 @@ def run_pcd_map(values: Dict[str, str]) -> ToolRunResponse:
     summary = (
         f"地图生成完成：{parsed.get('pgm_path', 'unknown')} | "
         f"可行走格={parsed.get('walkable_cells', 'n/a')} | "
-        f"障碍格={parsed.get('obstacle_cells', 'n/a')}"
+        f"障碍格={parsed.get('obstacle_cells', 'n/a')} | "
+        f"未知格={parsed.get('unknown_cells', 'n/a')}"
     )
     data = {
         "pgm_path": parsed.get("pgm_path", ""),
