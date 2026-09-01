@@ -166,3 +166,10 @@ class NavRecordingFileListResponse(BaseModel):
 
 class DeletePathRequest(BaseModel):
     path: str = ""
+
+
+class UploadedToolFileResponse(BaseModel):
+    path: str = ""
+    original_name: str = ""
+    size_bytes: int = 0
+    content_type: str = ""

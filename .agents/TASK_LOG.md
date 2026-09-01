@@ -1,5 +1,72 @@
 # 任务日志
 
+## 2026-09-01
+
+- 任务目标：把 Android 离线地图文件输入从手填路径改为系统文件选择，并保证后端能读取手机选择的 PCD/YAML/PGM。
+- 修改文件：
+  - `backend/app/api/routes.py`
+  - `backend/app/models.py`
+  - `backend/app/services/uploaded_files.py`
+  - `frontend/src/api/client.ts`
+  - `frontend/src/components/RosNavAppPage.vue`
+  - `frontend/src/styles.css`
+  - `.agents/PROJECT_OVERVIEW.md`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 新增 `/api/files/upload` 二进制上传接口，将手机或浏览器选择的 `.pcd/.yaml/.yml/.pgm` 保存到后端 `backend/data/uploads/` 下，并返回后端本机路径。
+  - 新增 Android 本地 `RosFilePickerPlugin`，通过系统文件管理器选择文件后在原生层读取 `content://` 文件流并上传到当前配置的后端，避免 WebView 文件输入在部分手机上不回传文件。
+  - Android 离线地图页的 PCD、map.yaml、map.pgm 改为只读路径显示加“选择”按钮，优先调用原生文件选择上传，网页环境回退到普通文件输入。
+  - Android 连接配置新增“后端地址”，用于文件上传和离线地图 HTTP 接口；当仍为默认相对 `/api` 时，会尝试从 rosbridge 地址推断 `http://同主机:8000/api`，避免上传请求落到 `localhost:80`。
+  - 继续调整 Android 架构：`RosFilePickerPlugin` 不再要求把离线地图文件上传到电脑后端，而是复制到 App 私有缓存并在 APK 内本地解析 ASCII/binary PCD、map.yaml 和 PGM 尺寸，直接生成与后端同形状的离线地图 preview。
+  - `Nav3DViewer.vue` 增加本地离线占据网格 raycast 回退，Android 初始化定位不再因离线地图射线吸附访问不可达后端。
+  - 缩小并下移 Android 横屏主视图的离线地图裁剪控件，避免与左上状态徽章和图层数据重叠。
+  - 修复初始化候选位姿使用三维拖动轴微调后，手指松开触发画布 pointerup 导致候选位置被覆盖到松手点的问题。
+  - 修复 Android 本地 map.yaml/PGM 底图显示仍依赖 `/api/files/pgm-image` 的问题，插件本地把 PGM 转成 PNG data URL 后交给 Three.js 贴图。
+  - Android 拉起系统文件选择器前临时切到竖屏，选择完成或取消后恢复 `sensorLandscape`。
+  - 将 Android 主视图剪裁控件缩小/下移规则提升为移动端基础样式，避免宽横屏设备不命中窄屏 media query。
+  - 修复离线地图和全局重定位候选相关前端 API 的旧 `API_BASE` 写法，统一使用当前配置的 `apiUrl()`，避免 Android 配置远程后端后请求仍落到默认 `/api`。
+- 风险、限制或尚未验证项：
+  - 已运行 `python -c "from app.main import app; print(app.title)"`、`python -m compileall backend\app`、`cd frontend && npm run build`、`cd frontend && npm run build:android`、`cd frontend/android && .\gradlew.bat assembleDebug`，均通过；仍有 Vite 大 chunk 常规警告。
+  - 尚未在真实 Android 设备上验证系统文件选择器、较大 PCD 上传耗时和后端预览闭环。
+
+- 任务目标：把 `main` 分支的离线点云加载、裁剪和初始化定位候选流程同步到 Android 分支，并在功能列表新增配置入口。
+- 修改文件：
+  - `frontend/src/components/RosNavAppPage.vue`
+  - `frontend/src/components/Nav3DViewer.vue`
+  - `frontend/src/styles.css`
+  - `.agents/PROJECT_OVERVIEW.md`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 合并 `main` 到 `feat/ros_android`，带入后端离线地图预览、PGM 转图、离线地图 raycast、C++ PCD 预览 CLI 和三维主视图离线地图能力。
+  - Android 顶部功能列表新增“离线地图”，打开后可配置 PCD/YAML/PGM、下采样、占据 voxel、最大点/voxel 和初始化地面参数。
+  - Android 主视图复用 `Nav3DViewer.vue` 的离线占据网格/点云显示切换、六向裁剪、射线吸附地面和初始化候选位姿能力。
+  - Android 初始化定位由拖拽后立即发布改为先生成候选，再在离线地图页确认发布；候选可绑定点云帧并切换平移/旋转微调。
+- 风险、限制或尚未验证项：
+  - 已运行 `cd frontend && npm run build`、`cd frontend && npm run build:android` 和 `cd frontend/android && .\gradlew.bat assembleDebug`，均通过；仍有 Vite 大 chunk 常规警告。
+  - 尚未在真实 Android 设备、真实 PCD 路径和真实 rosbridge 环境下验证离线地图接口访问、裁剪触控和初始化发布闭环。
+
+- 任务目标：按照 `G:\test\安卓端优化和问题修复\安卓端问题优化修复.md` 优化 Android ROS 工作台界面和输入法问题。
+- 修改文件：
+  - `frontend/src/components/RosNavAppPage.vue`
+  - `frontend/src/components/Nav3DViewer.vue`
+  - `frontend/src/styles.css`
+  - `frontend/android/app/src/main/AndroidManifest.xml`
+  - `frontend/android/app/src/main/assets/public/index.html`
+  - `.agents/PROJECT_OVERVIEW.md`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - 右上功能菜单移除“模块中心”和“图层管理”，并去掉菜单内 X 关闭按钮，点击功能按钮本身即可展开/收回。
+  - 移动端主视图底部控制只保留“初始化定位”和“导航目标”，整体下移并改为无底板透明按钮；左下运行控制和聚焦按钮同步缩小、透明化。
+  - “机器狗位置”HUD 改为从 `/display/tf` 解析 `base_link`，以 `pose / x / y / z / yaw / pitch / roll` 的两位小数格式展示，并通过移动端 CSS 去掉背景底板。
+  - Android 软键盘改为 `adjustNothing`，前端新增软键盘上方悬浮输入条，输入时同步原字段值，避免配置窗/图层抽屉被键盘顶乱。
+  - 针对覆盖式输入法补充键盘高度兜底计算，真实视口 inset 不可用时按横屏键盘高度估算，把悬浮输入条抬到输入法上沿。
+  - 调整移动端“机器狗位置”HUD 到右下角聚焦按钮下方，限制宽度并右对齐，避免与初始化定位按钮区域交叉遮挡。
+  - 话题浏览新增左右分栏拖拽条，右侧预览面板允许横向滚动，便于查看长内容。
+  - 已执行 `npm run build:android`，同步 Android `public/index.html` 到新构建资源。
+- 风险、限制或尚未验证项：
+  - 已运行 `cd frontend && npm run build:android`，构建和 Capacitor sync 成功；仍有 Vite 大 chunk 常规警告。
+  - 尚未在真实 Android 设备上验证输入法厂商行为、触控拖拽手感和横屏布局遮挡情况。
+
 ## 2026-08-21
 
 - 任务目标：修复 `pcd_map` 导出的 PGM/YAML 语义，使其能输出未知区、可通行区和障碍区，并更接近 `nav2` 地图逻辑。
@@ -36,8 +103,6 @@
   - 在导入环境后，`cmake --build cpp/build --target pcd_map_cli --config Release` 已编译通过。
 - 风险、限制或尚未验证项：
   - 本次只实测了 `pcd_map_cli` 目标，尚未在同一会话里把其余 C++ CLI 全量重编一遍。
-
-## 2026-08-12
 
 - 任务目标：接入 SCAN-Planner 推荐测试话题到 `ros_nav_test`，让新的消息类型可以直接添加到三维主视图进行可视化调试。
 - 修改文件：
@@ -1234,3 +1299,17 @@
 - 风险、限制或尚未验证项：
   - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
   - 尚未连接用户现场 rosbridge 验证 `/display/tf` 是否包含完整 `base_link -> fixed frame` 链路。
+
+- 日期：2026-09-01
+- 任务目标：修复 Android 离线地图 PGM 底图与 PCD 坐标显示不对齐的问题。
+- 修改文件：
+  - `frontend/android/app/src/main/java/com/moontoolbox/rosnav/RosFilePickerPlugin.java`
+  - `.agents/TASK_LOG.md`
+- 主要变更：
+  - Android 本地 PGM 转 PNG 时不再手动翻转 Y 轴，保持和后端 `/files/pgm-image` 的像素输出顺序一致。
+  - 保留前端现有 `map.yaml origin + resolution + yaw` 的放置逻辑，由 Three.js 贴图路径统一处理图像坐标显示。
+- 风险、限制或尚未验证项：
+  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
+  - 已运行 `cd frontend && npm run build:android`，Capacitor 同步通过。
+  - 已运行 `cd frontend/android && .\gradlew.bat assembleDebug`，Android debug 包构建通过。
+  - 尚未在真机上用用户现场 PCD/PGM/YAML 目视复测对齐效果；若仍偏移，需要继续核对 `map.yaml origin` 是否对应 PGM 左下角，以及 PCD 是否已经处于同一个 `map` frame。

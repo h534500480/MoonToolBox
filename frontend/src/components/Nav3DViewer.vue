@@ -6,6 +6,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 
 import { raycastRosNavOfflineMap } from "../api/client";
+import { canUseNativeRosFilePicker } from "../lib/nativeFilePicker";
 import type { NavViewerDisplay } from "../lib/ros/displayRegistry";
 import { buildSharedRosKey, createSharedRosLiveAdapter, type RosLiveConfig } from "../lib/ros/liveAdapter";
 
@@ -76,6 +77,7 @@ interface PointCloudRenderResult {
 interface OfflineMapInfoPayload {
   yaml_path: string;
   image_path: string;
+  image_data_url?: string;
   resolution: number;
   origin: number[];
   width: number;
@@ -157,6 +159,8 @@ let interactionStartGroundNormal: THREE.Vector3 | null = null;
 let interactionStartGroundMessage = "";
 let interactionPreviewGroup: THREE.Group | null = null;
 let activeInteractionPointerId: number | null = null;
+let transformControlDragging = false;
+let suppressNextCanvasPointerUp = false;
 let initialPoseCandidateGroup: THREE.Group | null = null;
 let initialPosePointCloud: THREE.Points | null = null;
 let offlineMapGroup: THREE.Group | null = null;
@@ -280,6 +284,14 @@ function initializeScene() {
   transformControls.setMode("translate");
   transformControls.enabled = false;
   transformControls.addEventListener("dragging-changed", (event) => {
+    transformControlDragging = Boolean(event.value);
+    if (transformControlDragging) {
+      suppressNextCanvasPointerUp = true;
+      clearInteractionPreview();
+      interactionStartPoint = null;
+      interactionCurrentPoint = null;
+      activeInteractionPointerId = null;
+    }
     if (controls) {
       controls.enabled = !event.value;
     }
@@ -1383,8 +1395,8 @@ function createMapYamlReference(mapInfo: OfflineMapInfoPayload | null) {
   plane.name = "offline-map-yaml-plane";
   group.add(plane);
 
-  if (mapInfo.image_path) {
-    const textureUrl = `/api/files/pgm-image?path=${encodeURIComponent(mapInfo.image_path)}`;
+  const textureUrl = mapInfo.image_data_url || (mapInfo.image_path ? `/api/files/pgm-image?path=${encodeURIComponent(mapInfo.image_path)}` : "");
+  if (textureUrl) {
     new THREE.TextureLoader().load(
       textureUrl,
       (texture) => {
@@ -2276,6 +2288,97 @@ function currentOfflineMapClipBoundsPayload() {
   return cloneBounds(offlineMapClipBounds);
 }
 
+function pointInsideOfflineClip(x: number, y: number, z: number, bounds = offlineMapClipBounds) {
+  if (!bounds) {
+    return true;
+  }
+  return x >= bounds.xmin && x <= bounds.xmax
+    && y >= bounds.ymin && y <= bounds.ymax
+    && z >= bounds.zmin && z <= bounds.zmax;
+}
+
+function estimateLocalGroundHit(x: number, y: number, z: number, distanceM: number) {
+  if (!offlineMapRawPositions) {
+    return null;
+  }
+  const radius = Math.max(0.15, Math.min(Number(props.initialPoseGroundNormalRadiusM ?? 0.8), 3));
+  const radiusSq = radius * radius;
+  let count = 0;
+  let sumZ = 0;
+  for (let index = 0; index < offlineMapRawPositions.length; index += 3) {
+    const px = offlineMapRawPositions[index];
+    const py = offlineMapRawPositions[index + 1];
+    const pz = offlineMapRawPositions[index + 2];
+    if (!pointInsideOfflineClip(px, py, pz)) {
+      continue;
+    }
+    const dx = px - x;
+    const dy = py - y;
+    const dz = pz - z;
+    if (dx * dx + dy * dy + dz * dz <= radiusSq) {
+      count += 1;
+      sumZ += pz;
+    }
+  }
+  if (count <= 0) {
+    return null;
+  }
+  return {
+    x,
+    y,
+    z: sumZ / count,
+    normal: new THREE.Vector3(0, 0, 1),
+    message: count >= 6
+      ? "已通过安卓本地离线占据网格命中地面。"
+      : "已通过安卓本地离线占据网格吸附高度，邻域点较少，roll/pitch 回退为 0。",
+    distanceM,
+  };
+}
+
+function raycastLocalOfflineMap(ray: { origin: number[]; direction: number[] }) {
+  if (!offlineMapVoxelCenters || offlineMapVoxelCenters.length === 0) {
+    return null;
+  }
+  const origin = new THREE.Vector3(Number(ray.origin[0]), Number(ray.origin[1]), Number(ray.origin[2]));
+  const direction = new THREE.Vector3(Number(ray.direction[0]), Number(ray.direction[1]), Number(ray.direction[2])).normalize();
+  if (!Number.isFinite(origin.x) || !Number.isFinite(origin.y) || !Number.isFinite(origin.z) || direction.lengthSq() <= 0) {
+    return null;
+  }
+  const step = Math.max(offlineMapVoxelSize * 0.5, 0.03);
+  const hitRadius = Math.max(offlineMapVoxelSize * 0.75, 0.04);
+  const hitRadiusSq = hitRadius * hitRadius;
+  for (let distance = 0; distance <= 80; distance += step) {
+    const x = origin.x + direction.x * distance;
+    const y = origin.y + direction.y * distance;
+    const z = origin.z + direction.z * distance;
+    if (!pointInsideOfflineClip(x, y, z)) {
+      continue;
+    }
+    for (let index = 0; index < offlineMapVoxelCenters.length; index += 3) {
+      const vx = offlineMapVoxelCenters[index];
+      const vy = offlineMapVoxelCenters[index + 1];
+      const vz = offlineMapVoxelCenters[index + 2];
+      if (!pointInsideOfflineClip(vx, vy, vz)) {
+        continue;
+      }
+      const dx = vx - x;
+      const dy = vy - y;
+      const dz = vz - z;
+      if (dx * dx + dy * dy + dz * dz <= hitRadiusSq) {
+        return estimateLocalGroundHit(vx, vy, vz, distance) ?? {
+          x: vx,
+          y: vy,
+          z: vz,
+          normal: new THREE.Vector3(0, 0, 1),
+          message: "已通过安卓本地离线占据网格命中 voxel。",
+          distanceM: distance,
+        };
+      }
+    }
+  }
+  return null;
+}
+
 async function resolveInitialPoseStartPoint(event: PointerEvent) {
   const fallback = worldPointFromPointer(event, 0);
   interactionStartGroundNormal = null;
@@ -2285,6 +2388,16 @@ async function resolveInitialPoseStartPoint(event: PointerEvent) {
   }
   const ray = rayPayloadFromPointer(event);
   if (!ray) {
+    return fallback;
+  }
+  const localHit = raycastLocalOfflineMap(ray);
+  if (localHit) {
+    interactionStartGroundNormal = localHit.normal;
+    interactionStartGroundMessage = localHit.message;
+    return new THREE.Vector3(localHit.x, localHit.y, localHit.z + safeInitialPoseBaseHeightOffset());
+  }
+  if (canUseNativeRosFilePicker()) {
+    interactionStartGroundMessage = "安卓本地离线占据网格未命中，已回退到平面初始化。";
     return fallback;
   }
   try {
@@ -2314,6 +2427,9 @@ async function resolveInitialPoseStartPoint(event: PointerEvent) {
 }
 
 async function handlePointerDown(event: PointerEvent) {
+  if (transformControlDragging || transformControls?.dragging) {
+    return;
+  }
   if (currentInteractionMode.value === "none") {
     return;
   }
@@ -2393,6 +2509,10 @@ function finishInteraction(emitResult: boolean) {
 }
 
 function handlePointerUp(event: PointerEvent) {
+  if (suppressNextCanvasPointerUp || transformControlDragging || transformControls?.dragging) {
+    suppressNextCanvasPointerUp = false;
+    return;
+  }
   if (activeInteractionPointerId !== event.pointerId) {
     return;
   }
@@ -2448,6 +2568,10 @@ function formatHudCoordinate(value: number) {
   return Number.isFinite(value) ? value.toFixed(3) : "-";
 }
 
+function formatCompactHudCoordinate(value: number) {
+  return Number.isFinite(value) ? value.toFixed(2) : "-";
+}
+
 function updateBaseLinkHud() {
   if (connectionLabel.value !== "已连接") {
     baseLinkHudText.value = "等待 rosbridge 连接";
@@ -2460,13 +2584,11 @@ function updateBaseLinkHud() {
     const quaternion = new THREE.Quaternion();
     const scale = new THREE.Vector3();
     baseLinkTransform.decompose(position, quaternion, scale);
+    const euler = new THREE.Euler().setFromQuaternion(quaternion, "XYZ");
     baseLinkHudText.value = [
-      `topic: ${robotPoseTfTopic}`,
-      `frame: ${currentFixedFrame()} <- base_link`,
-      `x: ${formatHudCoordinate(position.x)}`,
-      `y: ${formatHudCoordinate(position.y)}`,
-      `z: ${formatHudCoordinate(position.z)}`,
-      `yaw: ${formatHudCoordinate(quaternionToYaw(quaternion))} rad`,
+      `pose: ${currentFixedFrame()}->base_link`,
+      `x:${formatCompactHudCoordinate(position.x)} y:${formatCompactHudCoordinate(position.y)} z:${formatCompactHudCoordinate(position.z)}`,
+      `yaw:${formatCompactHudCoordinate(euler.z)} pitch:${formatCompactHudCoordinate(euler.y)} roll:${formatCompactHudCoordinate(euler.x)}`,
     ].join(" | ");
     return;
   }
@@ -2474,11 +2596,9 @@ function updateBaseLinkHud() {
   const poseAnchor = resolvePrimaryPoseAnchor();
   if (poseAnchor) {
     baseLinkHudText.value = [
-      `frame: ${poseAnchor.frameId}`,
-      `x: ${formatHudCoordinate(poseAnchor.x)}`,
-      `y: ${formatHudCoordinate(poseAnchor.y)}`,
-      `z: ${formatHudCoordinate(poseAnchor.z)}`,
-      `yaw: ${formatHudCoordinate(poseAnchor.yaw)} rad`,
+      `pose: ${poseAnchor.frameId}`,
+      `x:${formatCompactHudCoordinate(poseAnchor.x)} y:${formatCompactHudCoordinate(poseAnchor.y)} z:${formatCompactHudCoordinate(poseAnchor.z)}`,
+      `yaw:${formatCompactHudCoordinate(poseAnchor.yaw)} pitch:- roll:-`,
       "来源: pose",
     ].join(" | ");
     return;

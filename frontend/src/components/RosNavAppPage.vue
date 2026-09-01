@@ -5,6 +5,14 @@ import { useRoute, useRouter } from "vue-router";
 
 import Nav3DViewer from "./Nav3DViewer.vue";
 import NavTopicPanelList from "./NavTopicPanelList.vue";
+import {
+  fetchRosNavOfflineMapPreview,
+  getApiBase,
+  saveApiBase,
+  uploadToolFile,
+  type NavOfflineMapPreviewResponse,
+} from "../api/client";
+import { buildNativeOfflineMapPreview, canUseNativeRosFilePicker, pickNativeLocalFile } from "../lib/nativeFilePicker";
 import { buildSharedRosKey, createSharedRosLiveAdapter, type RosLiveAdapter, type RosLiveConfig } from "../lib/ros/liveAdapter";
 import { createMobileDetailPanel, type MobileNavTopicOption, type MobileRosConnectionConfig } from "../lib/ros/mobileCatalog";
 import {
@@ -23,8 +31,31 @@ import {
 const route = useRoute();
 const router = useRouter();
 
-const routePageKeys = ["home", "config", "main", "topics", "runtime"] as const;
+interface InitialPoseCandidatePayload {
+  x: number;
+  y: number;
+  z: number;
+  roll: number;
+  pitch: number;
+  yaw: number;
+}
+
+interface Nav3DViewerComponentExpose {
+  focusOnNdtPose: () => { ok: boolean; message: string };
+  attachOfflineMapPointCloud: (payload: NavOfflineMapPreviewResponse) => { ok: boolean; message: string };
+  clearOfflineMapPointCloud: () => void;
+  setOfflineMapDisplayMode: (mode: "voxel" | "pointcloud") => { ok: boolean; message: string };
+  attachInitialPosePointCloud: (payload: { topic: string; message: any; color?: string; pointSize?: number; pointColorMode?: "solid" | "layered" }) => { ok: boolean; message: string };
+  attachInitialPoseLatestPointCloud: (topic: string, pointSize?: number) => { ok: boolean; message: string };
+  updateInitialPosePointCloudSize: (pointSize: number) => { ok: boolean; message: string };
+  getInitialPoseCandidate: () => InitialPoseCandidatePayload | null;
+  clearInitialPoseCandidate: () => void;
+  setInitialPoseTransformMode: (mode: "translate" | "rotate") => { ok: boolean; message: string };
+}
+
+const routePageKeys = ["home", "config", "main", "topics", "runtime", "offline"] as const;
 type RoutePageKey = typeof routePageKeys[number];
+type OfflineMapFileKind = "pcd" | "yaml" | "pgm";
 
 const menuOpen = ref(false);
 const exportSheetOpen = ref(false);
@@ -50,10 +81,42 @@ const obstacleZoneStatus = ref<{ label: string; tone: "neutral" | "success" | "w
   tone: "neutral",
 });
 const layerDrawerRef = ref<HTMLElement | null>(null);
+const topicSheetBodyRef = ref<HTMLElement | null>(null);
+const navViewerRef = ref<Nav3DViewerComponentExpose | null>(null);
+const offlineMapPcdFileInputRef = ref<HTMLInputElement | null>(null);
+const offlineMapYamlFileInputRef = ref<HTMLInputElement | null>(null);
+const offlineMapPgmFileInputRef = ref<HTMLInputElement | null>(null);
 const layerDrawerHeightPx = ref(0);
 const layerDrawerDragTranslatePx = ref<number | null>(null);
 const connectionDraft = ref<MobileRosConnectionConfig>({ ...mobileRosAppState.connection });
 const layerInputDrafts = ref<Record<string, string>>({});
+const topicBrowserPercent = ref(46);
+const backendApiBaseDraft = ref(getApiBase());
+const keyboardInputActive = ref(false);
+const keyboardInputValue = ref("");
+const keyboardInputLabel = ref("输入");
+const keyboardInputPlaceholder = ref("");
+const keyboardInputMode = ref<"text" | "numeric" | "decimal" | "search" | "url">("text");
+const keyboardInputType = ref("text");
+const offlineMapPcd = ref("");
+const offlineMapYaml = ref("");
+const offlineMapPgm = ref("");
+const offlineMapVoxelLeafM = ref("0.20");
+const offlineMapOccupancyVoxelM = ref("0.30");
+const offlineMapMaxPoints = ref("60000");
+const offlineMapMaxVoxels = ref("60000");
+const offlineMapLoading = ref(false);
+const offlineMapMessage = ref("");
+const offlineMapPreview = ref<NavOfflineMapPreviewResponse | null>(null);
+const offlineMapDisplayMode = ref<"voxel" | "pointcloud">("voxel");
+const initialPoseBaseHeightOffsetM = ref("0.35");
+const initialPoseGroundNormalRadiusM = ref("0.80");
+const initialPoseGroundMaxSlopeDeg = ref("30");
+const initialPosePointCloudTopic = ref("/cloud_registered_bl");
+const initialPosePointCloudSize = ref("0.055");
+const initialPosePointCloudLoading = ref(false);
+const initialPoseTransformMode = ref<"translate" | "rotate">("translate");
+const initialPoseCandidateActive = ref(false);
 
 let mobileSharedAdapter: RosLiveAdapter | null = null;
 let mobileStatusUnsubscribes: Array<() => void> = [];
@@ -63,6 +126,8 @@ let layerDrawerStartClientY = 0;
 let layerDrawerStartTranslatePx = 0;
 let layerDrawerMoved = false;
 let visualViewportCleanup: (() => void) | null = null;
+let topicSplitActivePointerId: number | null = null;
+let floatingKeyboardTarget: HTMLInputElement | HTMLTextAreaElement | null = null;
 
 const currentPage = computed<RoutePageKey>(() => {
   const page = typeof route.params.page === "string" ? route.params.page : "main";
@@ -163,11 +228,10 @@ const detailPanels = computed(() => {
 });
 
 const menuEntries = [
-  { key: "home", label: "模块中心", kind: "route" },
   { key: "config", label: "连接配置", kind: "route" },
+  { key: "offline", label: "离线地图", kind: "route" },
   { key: "topics", label: "话题浏览", kind: "route" },
   { key: "runtime", label: "运行参数", kind: "route" },
-  { key: "layers", label: "图层管理", kind: "drawer" },
   { key: "export", label: "快照导出", kind: "local" },
 ] as const;
 
@@ -182,6 +246,10 @@ const layerDrawerStyle = computed(() => {
     transform: `translateY(${Math.max(0, translateY)}px)`,
   };
 });
+
+const topicSheetBodyStyle = computed(() => ({
+  gridTemplateColumns: `minmax(220px, ${topicBrowserPercent.value}%) 14px minmax(260px, 1fr)`,
+}));
 
 function mapNdtStatus(rawValue: unknown) {
   const statusValue = Number(rawValue ?? 0);
@@ -218,6 +286,7 @@ function resetMobileStatusCards() {
 
 function syncConnectionDraftFromState() {
   connectionDraft.value = { ...mobileRosAppState.connection };
+  backendApiBaseDraft.value = getApiBase();
 }
 
 function layerInputDraftKey(topic: string, field: string) {
@@ -329,63 +398,121 @@ async function connectMobileStatusSubscriptions() {
   }
 }
 
-function scrollFocusedFieldIntoView(event: FocusEvent) {
+function syncFloatingKeyboardValueToTarget() {
+  if (!floatingKeyboardTarget) {
+    return;
+  }
+  floatingKeyboardTarget.value = keyboardInputValue.value;
+  floatingKeyboardTarget.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function finishFloatingKeyboardEdit() {
+  const target = floatingKeyboardTarget;
+  syncFloatingKeyboardValueToTarget();
+  keyboardInputActive.value = false;
+  floatingKeyboardTarget = null;
+  updateMobileKeyboardMetrics();
+  target?.dispatchEvent(new FocusEvent("blur"));
+}
+
+function cancelFloatingKeyboardEdit() {
+  keyboardInputActive.value = false;
+  floatingKeyboardTarget = null;
+  updateMobileKeyboardMetrics();
+}
+
+function isFloatingKeyboardTarget(target: EventTarget | null): target is HTMLInputElement | HTMLTextAreaElement {
+  if (!(target instanceof HTMLInputElement) && !(target instanceof HTMLTextAreaElement)) {
+    return false;
+  }
+  if (target.classList.contains("ros-mobile-keyboard-input")) {
+    return false;
+  }
+  if (target.disabled || target.readOnly) {
+    return false;
+  }
+  const ignoredTypes = new Set(["button", "checkbox", "color", "file", "hidden", "radio", "range", "submit"]);
+  return !(target instanceof HTMLInputElement && ignoredTypes.has(target.type));
+}
+
+function labelForFloatingKeyboard(target: HTMLInputElement | HTMLTextAreaElement) {
+  const field = target.closest(".field, .nav-display-config-item");
+  const label = field?.querySelector(".field-label, .kv-key")?.textContent?.trim();
+  return label || target.getAttribute("aria-label") || "输入";
+}
+
+function openFloatingKeyboardInput(target: HTMLInputElement | HTMLTextAreaElement) {
+  floatingKeyboardTarget = target;
+  keyboardInputValue.value = target.value;
+  keyboardInputLabel.value = labelForFloatingKeyboard(target);
+  keyboardInputPlaceholder.value = target.placeholder || "";
+  keyboardInputMode.value = (target.getAttribute("inputmode") as typeof keyboardInputMode.value | null) || (target.type === "search" ? "search" : "text");
+  keyboardInputType.value = target.type === "number" ? "text" : target.type || "text";
+  keyboardInputActive.value = true;
+  requestAnimationFrame(updateMobileKeyboardMetrics);
+  void nextTick(() => {
+    const input = document.querySelector(".ros-mobile-keyboard-input") as HTMLInputElement | null;
+    input?.focus({ preventScroll: true });
+    input?.select();
+    requestAnimationFrame(updateMobileKeyboardMetrics);
+  });
+}
+
+function handleMobileTextFieldFocusIn(event: FocusEvent) {
   const target = event.target;
-  if (!(target instanceof HTMLElement)) {
+  if (!isFloatingKeyboardTarget(target)) {
     return;
   }
-  const field = target.closest("input, select, textarea");
-  if (!(field instanceof HTMLElement)) {
-    return;
-  }
-  window.setTimeout(() => {
-    const scrollContainer = field.closest(
-      ".ros-mobile-bottom-drawer-body, .ros-mobile-config-modal, .ros-mobile-side-sheet-scroll, .ros-mobile-topic-browser, .ros-mobile-topic-preview"
-    );
-    if (!(scrollContainer instanceof HTMLElement)) {
-      field.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
-      return;
-    }
-    const containerRect = scrollContainer.getBoundingClientRect();
-    const fieldRect = field.getBoundingClientRect();
-    const keyboardInset = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--mobile-keyboard-inset")) || 0;
-    const safeTop = containerRect.top + 20;
-    const safeBottom = containerRect.bottom - Math.max(88, Math.min(containerRect.height * 0.38, keyboardInset + 36));
-    if (fieldRect.bottom > safeBottom) {
-      scrollContainer.scrollBy({
-        top: fieldRect.bottom - safeBottom,
-        behavior: "smooth",
-      });
-      return;
-    }
-    if (fieldRect.top < safeTop) {
-      scrollContainer.scrollBy({
-        top: fieldRect.top - safeTop,
-        behavior: "smooth",
-      });
-    }
-  }, 180);
+  openFloatingKeyboardInput(target);
 }
 
 function installVisualViewportKeyboardSync() {
-  const root = document.documentElement;
   const viewport = window.visualViewport;
   if (!viewport) {
-    root.style.setProperty("--mobile-keyboard-inset", "0px");
-    return () => root.style.setProperty("--mobile-keyboard-inset", "0px");
+    updateMobileKeyboardMetrics();
+    window.addEventListener("resize", updateMobileKeyboardMetrics);
+    return () => {
+      window.removeEventListener("resize", updateMobileKeyboardMetrics);
+      resetMobileKeyboardMetrics();
+    };
   }
-  const applyInset = () => {
-    const inset = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
-    root.style.setProperty("--mobile-keyboard-inset", `${Math.round(inset)}px`);
-  };
-  applyInset();
-  viewport.addEventListener("resize", applyInset);
-  viewport.addEventListener("scroll", applyInset);
+  updateMobileKeyboardMetrics();
+  viewport.addEventListener("resize", updateMobileKeyboardMetrics);
+  viewport.addEventListener("scroll", updateMobileKeyboardMetrics);
+  window.addEventListener("resize", updateMobileKeyboardMetrics);
   return () => {
-    viewport.removeEventListener("resize", applyInset);
-    viewport.removeEventListener("scroll", applyInset);
-    root.style.setProperty("--mobile-keyboard-inset", "0px");
+    viewport.removeEventListener("resize", updateMobileKeyboardMetrics);
+    viewport.removeEventListener("scroll", updateMobileKeyboardMetrics);
+    window.removeEventListener("resize", updateMobileKeyboardMetrics);
+    resetMobileKeyboardMetrics();
   };
+}
+
+function estimateOverlayKeyboardInset(rawInset: number) {
+  if (!keyboardInputActive.value || rawInset >= 80) {
+    return rawInset;
+  }
+  const landscape = window.innerWidth > window.innerHeight;
+  const fallbackRatio = landscape ? 0.66 : 0.42;
+  return Math.round(window.innerHeight * fallbackRatio);
+}
+
+function updateMobileKeyboardMetrics() {
+  const root = document.documentElement;
+  const viewport = window.visualViewport;
+  const rawInset = viewport
+    ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop)
+    : 0;
+  const keyboardInset = Math.round(rawInset);
+  const panelBottom = estimateOverlayKeyboardInset(keyboardInset);
+  root.style.setProperty("--mobile-keyboard-inset", `${keyboardInset}px`);
+  root.style.setProperty("--mobile-keyboard-panel-bottom", `${panelBottom}px`);
+}
+
+function resetMobileKeyboardMetrics() {
+  const root = document.documentElement;
+  root.style.setProperty("--mobile-keyboard-inset", "0px");
+  root.style.setProperty("--mobile-keyboard-panel-bottom", "0px");
 }
 
 function isRoutePageKey(page: string): page is RoutePageKey {
@@ -466,9 +593,43 @@ function persistConnectionConfig() {
     timeoutMs: normalizeTimeoutMs(connectionDraft.value.timeoutMs || "8000"),
   };
   updateMobileConnectionConfig(nextConnection);
+  const apiDraft = backendApiBaseDraft.value.trim();
+  const nextApiBase = /^https?:\/\//i.test(apiDraft)
+    ? apiDraft
+    : inferBackendApiBaseFromRosbridge(nextConnection.url) || apiDraft || "/api";
+  const savedApiBase = saveApiBase(nextApiBase);
+  backendApiBaseDraft.value = savedApiBase;
   syncConnectionDraftFromState();
   viewerReconnectToken.value += 1;
-  appendRosLog("info", `已保存连接配置: ${mobileRosAppState.connection.url || "未配置地址"}`);
+  appendRosLog("info", `已保存连接配置: ${mobileRosAppState.connection.url || "未配置地址"}，后端 ${savedApiBase}`);
+}
+
+function inferBackendApiBaseFromRosbridge(rawUrl: string) {
+  try {
+    const parsed = new URL(rawUrl.trim());
+    if (!["ws:", "wss:", "http:", "https:"].includes(parsed.protocol) || !parsed.hostname) {
+      return "";
+    }
+    const protocol = parsed.protocol === "wss:" || parsed.protocol === "https:" ? "https:" : "http:";
+    return `${protocol}//${parsed.hostname}:8000/api`;
+  } catch {
+    return "";
+  }
+}
+
+function configuredBackendApiBaseForNativeUpload() {
+  const currentApiBase = getApiBase();
+  if (/^https?:\/\//i.test(currentApiBase)) {
+    return currentApiBase;
+  }
+  const inferred = inferBackendApiBaseFromRosbridge(mobileRosAppState.connection.url || connectionDraft.value.url);
+  if (inferred) {
+    const savedApiBase = saveApiBase(inferred);
+    backendApiBaseDraft.value = savedApiBase;
+    appendRosLog("info", `已根据 Bridge 地址推断后端地址: ${savedApiBase}`);
+    return savedApiBase;
+  }
+  throw new Error("请先在连接配置里填写后端地址，例如 http://电脑IP:8000/api");
 }
 
 function normalizeTimeoutMs(rawValue: string) {
@@ -580,6 +741,14 @@ function handleTextFieldConfirm(event: KeyboardEvent) {
   if (target instanceof HTMLElement) {
     target.blur();
   }
+}
+
+function handleFloatingKeyboardKeydown(event: KeyboardEvent) {
+  if (event.key !== "Enter") {
+    return;
+  }
+  event.preventDefault();
+  finishFloatingKeyboardEdit();
 }
 
 function updateMainDisplayTfShowNames(topic: string, checked: boolean) {
@@ -698,13 +867,73 @@ function onLayerDrawerPointerCancel(event: PointerEvent) {
   finishLayerDrawerDrag();
 }
 
-function yawToQuaternion(yaw: number) {
+function beginTopicSplitDrag(event: PointerEvent) {
+  if (event.pointerType === "mouse" && event.button !== 0) {
+    return;
+  }
+  const handle = event.currentTarget;
+  if (!(handle instanceof HTMLElement)) {
+    return;
+  }
+  topicSplitActivePointerId = event.pointerId;
+  handle.setPointerCapture(event.pointerId);
+  updateTopicSplitFromPointer(event.clientX);
+  event.preventDefault();
+}
+
+function updateTopicSplitFromPointer(clientX: number) {
+  const host = topicSheetBodyRef.value;
+  if (!host) {
+    return;
+  }
+  const rect = host.getBoundingClientRect();
+  const ratio = ((clientX - rect.left) / Math.max(1, rect.width)) * 100;
+  topicBrowserPercent.value = Math.min(68, Math.max(32, ratio));
+}
+
+function moveTopicSplitDrag(event: PointerEvent) {
+  if (topicSplitActivePointerId !== event.pointerId) {
+    return;
+  }
+  updateTopicSplitFromPointer(event.clientX);
+  event.preventDefault();
+}
+
+function endTopicSplitDrag(event: PointerEvent) {
+  if (topicSplitActivePointerId !== event.pointerId) {
+    return;
+  }
+  const handle = event.currentTarget;
+  if (handle instanceof HTMLElement) {
+    handle.releasePointerCapture(event.pointerId);
+  }
+  topicSplitActivePointerId = null;
+}
+
+function eulerToQuaternion(roll: number, pitch: number, yaw: number) {
+  const halfRoll = roll / 2;
+  const halfPitch = pitch / 2;
   const halfYaw = yaw / 2;
+  const cr = Math.cos(halfRoll);
+  const sr = Math.sin(halfRoll);
+  const cp = Math.cos(halfPitch);
+  const sp = Math.sin(halfPitch);
+  const cy = Math.cos(halfYaw);
+  const sy = Math.sin(halfYaw);
   return {
-    x: 0,
-    y: 0,
-    z: Math.sin(halfYaw),
-    w: Math.cos(halfYaw),
+    x: sr * cp * cy - cr * sp * sy,
+    y: cr * sp * cy + sr * cp * sy,
+    z: cr * cp * sy - sr * sp * cy,
+    w: cr * cp * cy + sr * sp * sy,
+  };
+}
+
+function rosHeaderStampNow() {
+  const nowMs = Date.now();
+  const sec = Math.floor(nowMs / 1000);
+  return {
+    sec,
+    nanosec: (nowMs - sec * 1000) * 1_000_000,
   };
 }
 
@@ -721,7 +950,12 @@ function nextRequestPlanId() {
 }
 
 function enterInitialPoseMode() {
-  navInteractionMode.value = navInteractionMode.value === "initialpose" ? "none" : "initialpose";
+  if (navInteractionMode.value === "initialpose" || initialPoseCandidateActive.value || navViewerRef.value?.getInitialPoseCandidate()) {
+    cancelInitialPoseCandidate();
+    return;
+  }
+  navViewerRef.value?.clearInitialPoseCandidate();
+  navInteractionMode.value = "initialpose";
   navControlMessage.value = navInteractionMode.value === "initialpose" ? "已进入初始化定位模式，请在主视图中按下并拖动方向。" : "已退出初始化定位模式。";
 }
 
@@ -730,22 +964,23 @@ function enterNavGoalMode() {
   navControlMessage.value = navInteractionMode.value === "navgoal" ? "已进入导航目标模式，请在主视图中按下并拖动方向。" : "已退出导航目标模式。";
 }
 
-async function publishInitialPose(x: number, y: number, yaw: number) {
+async function publishInitialPose(x: number, y: number, yaw: number, z = 0, roll = 0, pitch = 0) {
   await publishRosMessage("/initialpose", "geometry_msgs/msg/PoseWithCovarianceStamped", {
     header: {
+      stamp: rosHeaderStampNow(),
       frame_id: mobileRosAppState.connection.fixedFrame || "map",
     },
     pose: {
       pose: {
-        position: { x, y, z: 0 },
-        orientation: yawToQuaternion(yaw),
+        position: { x, y, z },
+        orientation: eulerToQuaternion(roll, pitch, yaw),
       },
       covariance: [
         0.25, 0, 0, 0, 0, 0,
         0, 0.25, 0, 0, 0, 0,
-        0, 0, 0.0, 0, 0, 0,
-        0, 0, 0, 0.0, 0, 0,
-        0, 0, 0, 0, 0.0, 0,
+        0, 0, 0.25, 0, 0, 0,
+        0, 0, 0, 0.0685, 0, 0,
+        0, 0, 0, 0, 0.0685, 0,
         0, 0, 0, 0, 0, 0.0685,
       ],
     },
@@ -772,12 +1007,288 @@ async function publishNavGoal(x: number, y: number, yaw: number) {
   navControlMessage.value = `已下发导航目标: ${requestPlanId}`;
 }
 
-async function handleNavViewerInteraction(payload: { mode: "initialpose" | "navgoal"; x: number; y: number; yaw: number }) {
+function normalizedNumber(value: string, fallback: number, min: number, max: number) {
+  const parsed = Number(value);
+  return Math.min(max, Math.max(min, Number.isFinite(parsed) ? parsed : fallback));
+}
+
+function normalizedInteger(value: string, fallback: number, min: number, max: number) {
+  return Math.round(normalizedNumber(value, fallback, min, max));
+}
+
+function normalizedOfflineMapVoxelLeaf() {
+  return normalizedNumber(offlineMapVoxelLeafM.value, 0.20, 0.01, 5);
+}
+
+function normalizedOfflineMapOccupancyVoxel() {
+  return normalizedNumber(offlineMapOccupancyVoxelM.value, 0.30, 0.05, 2);
+}
+
+function normalizedOfflineMapMaxPoints() {
+  return normalizedInteger(offlineMapMaxPoints.value, 60000, 1000, 300000);
+}
+
+function normalizedOfflineMapMaxVoxels() {
+  return normalizedInteger(offlineMapMaxVoxels.value, 60000, 1000, 200000);
+}
+
+function normalizedInitialPoseBaseHeightOffset() {
+  return normalizedNumber(initialPoseBaseHeightOffsetM.value, 0.35, -1, 3);
+}
+
+function normalizedInitialPoseGroundNormalRadius() {
+  return normalizedNumber(initialPoseGroundNormalRadiusM.value, 0.80, 0.15, 3);
+}
+
+function normalizedInitialPoseGroundMaxSlope() {
+  return normalizedNumber(initialPoseGroundMaxSlopeDeg.value, 30, 1, 75);
+}
+
+function normalizedInitialPosePointCloudSize() {
+  return normalizedNumber(initialPosePointCloudSize.value, 0.055, 0.005, 0.8);
+}
+
+function offlineMapDisplayedVoxelCount() {
+  const occupancy = offlineMapPreview.value?.occupancy;
+  if (occupancy?.displayed_count && occupancy.displayed_count > 0) {
+    return occupancy.displayed_count;
+  }
+  return occupancy?.occupied_count ?? 0;
+}
+
+function offlineMapTotalVoxelCount() {
+  return offlineMapPreview.value?.occupancy?.occupied_count ?? offlineMapDisplayedVoxelCount();
+}
+
+function offlineMapFileInputRef(kind: OfflineMapFileKind) {
+  if (kind === "pcd") {
+    return offlineMapPcdFileInputRef.value;
+  }
+  if (kind === "yaml") {
+    return offlineMapYamlFileInputRef.value;
+  }
+  return offlineMapPgmFileInputRef.value;
+}
+
+async function openOfflineMapFilePicker(kind: OfflineMapFileKind) {
+  if (!canUseNativeRosFilePicker()) {
+    offlineMapFileInputRef(kind)?.click();
+    return;
+  }
+
+  offlineMapLoading.value = true;
+  offlineMapMessage.value = `请选择 ${offlineMapFileLabel(kind)} 文件...`;
+  try {
+    const uploaded = await pickNativeLocalFile(`ros_nav_offline_map_${kind}`);
+    setOfflineMapFilePath(kind, uploaded.path);
+    offlineMapMessage.value = `已选择 ${offlineMapFileLabel(kind)}: ${uploaded.original_name || uploaded.path}`;
+  } catch (error) {
+    offlineMapMessage.value = `选择 ${offlineMapFileLabel(kind)} 失败: ${(error as Error).message}`;
+  } finally {
+    offlineMapLoading.value = false;
+  }
+}
+
+function setOfflineMapFilePath(kind: OfflineMapFileKind, path: string) {
+  if (kind === "pcd") {
+    offlineMapPcd.value = path;
+    return;
+  }
+  if (kind === "yaml") {
+    offlineMapYaml.value = path;
+    return;
+  }
+  offlineMapPgm.value = path;
+}
+
+function offlineMapFileLabel(kind: OfflineMapFileKind) {
+  if (kind === "pcd") {
+    return "离线地图 PCD";
+  }
+  if (kind === "yaml") {
+    return "map.yaml";
+  }
+  return "map.pgm";
+}
+
+async function handleOfflineMapFileSelected(kind: OfflineMapFileKind, event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0] ?? null;
+  input.value = "";
+  if (!file) {
+    return;
+  }
+
+  offlineMapLoading.value = true;
+  offlineMapMessage.value = `正在上传 ${offlineMapFileLabel(kind)}: ${file.name}`;
+  try {
+    const uploaded = await uploadToolFile(file, "ros_nav_offline_map");
+    setOfflineMapFilePath(kind, uploaded.path);
+    offlineMapMessage.value = `已选择 ${offlineMapFileLabel(kind)}: ${uploaded.original_name || file.name}`;
+  } catch (error) {
+    offlineMapMessage.value = `选择 ${offlineMapFileLabel(kind)} 失败: ${(error as Error).message}`;
+  } finally {
+    offlineMapLoading.value = false;
+  }
+}
+
+async function loadOfflineMapPointCloud() {
+  const pcdPath = offlineMapPcd.value.trim();
+  if (!pcdPath) {
+    offlineMapMessage.value = "请先选择离线地图 PCD 文件。";
+    return;
+  }
+  offlineMapLoading.value = true;
+  offlineMapMessage.value = "正在加载离线地图...";
+  try {
+    const result = canUseNativeRosFilePicker()
+      ? await buildNativeOfflineMapPreview({
+        pcdPath,
+        yamlPath: offlineMapYaml.value.trim(),
+        pgmPath: offlineMapPgm.value.trim(),
+        voxelLeafM: normalizedOfflineMapVoxelLeaf(),
+        occupancyVoxelM: normalizedOfflineMapOccupancyVoxel(),
+        maxPoints: normalizedOfflineMapMaxPoints(),
+        maxVoxels: normalizedOfflineMapMaxVoxels(),
+      })
+      : await fetchRosNavOfflineMapPreview(
+        pcdPath,
+        offlineMapYaml.value.trim(),
+        offlineMapPgm.value.trim(),
+        String(normalizedOfflineMapVoxelLeaf()),
+        String(normalizedOfflineMapOccupancyVoxel()),
+        String(normalizedOfflineMapMaxPoints()),
+        String(normalizedOfflineMapMaxVoxels()),
+      );
+    offlineMapPreview.value = result;
+    offlineMapDisplayMode.value = "voxel";
+    const attachResult = navViewerRef.value?.attachOfflineMapPointCloud(result);
+    offlineMapMessage.value = attachResult?.message
+      || `已加载离线地图: ${result.pcd.sampled_count} / ${result.pcd.input_points} 点`;
+  } catch (error) {
+    offlineMapMessage.value = `离线地图加载失败: ${(error as Error).message}`;
+  } finally {
+    offlineMapLoading.value = false;
+  }
+}
+
+function clearOfflineMapPointCloud() {
+  navViewerRef.value?.clearOfflineMapPointCloud();
+  offlineMapPreview.value = null;
+  offlineMapDisplayMode.value = "voxel";
+  offlineMapMessage.value = "已清除离线地图。";
+}
+
+function setOfflineMapDisplayMode(mode: "voxel" | "pointcloud") {
+  offlineMapDisplayMode.value = mode;
+  const result = navViewerRef.value?.setOfflineMapDisplayMode(mode);
+  offlineMapMessage.value = result?.message || "请先加载离线地图。";
+}
+
+function setInitialPoseTransformMode(mode: "translate" | "rotate") {
+  initialPoseTransformMode.value = mode;
+  const result = navViewerRef.value?.setInitialPoseTransformMode(mode);
+  navControlMessage.value = result?.message || "请先拖出初始化候选位姿。";
+}
+
+function cancelInitialPoseCandidate() {
+  navViewerRef.value?.clearInitialPoseCandidate();
+  navInteractionMode.value = "none";
+  initialPoseCandidateActive.value = false;
+  navControlMessage.value = "已取消初始化候选位姿。";
+}
+
+async function confirmInitialPoseCandidate() {
+  const candidate = navViewerRef.value?.getInitialPoseCandidate() ?? null;
+  if (!candidate) {
+    navControlMessage.value = "当前没有可确认的初始化候选位姿。";
+    return;
+  }
+  navControlLoading.value = true;
+  try {
+    await publishInitialPose(candidate.x, candidate.y, candidate.yaw, candidate.z, candidate.roll, candidate.pitch);
+    navViewerRef.value?.clearInitialPoseCandidate();
+    navInteractionMode.value = "none";
+    initialPoseCandidateActive.value = false;
+    navControlMessage.value = `已下发初始化定位: (${candidate.x.toFixed(2)}, ${candidate.y.toFixed(2)}, z=${candidate.z.toFixed(2)}, yaw=${candidate.yaw.toFixed(2)})`;
+  } catch (error) {
+    navControlMessage.value = `确认初始化定位失败: ${(error as Error).message}`;
+  } finally {
+    navControlLoading.value = false;
+  }
+}
+
+/**
+ * 功能说明：
+ * 为初始化候选位姿绑定一帧点云预览，便于在安卓主视图里微调姿态后再确认下发。
+ */
+async function captureInitialPosePointCloudFrame() {
+  const viewer = navViewerRef.value;
+  if (!viewer?.getInitialPoseCandidate()) {
+    navControlMessage.value = "请先在主视图拖出初始化候选位姿。";
+    return;
+  }
+  const topic = initialPosePointCloudTopic.value.trim();
+  if (!topic) {
+    navControlMessage.value = "请填写点云 Topic。";
+    return;
+  }
+
+  initialPosePointCloudLoading.value = true;
+  navControlMessage.value = `正在抓取 ${topic} 点云帧...`;
+  let unsubscribe: (() => void) | null = null;
+  let timeoutHandle: number | undefined;
+  try {
+    const pointSize = normalizedInitialPosePointCloudSize();
+    const cachedResult = viewer.attachInitialPoseLatestPointCloud(topic, pointSize);
+    if (cachedResult.ok) {
+      navControlMessage.value = cachedResult.message;
+      return;
+    }
+    const matchedTopic = mobileRosAppState.topicOptions.find((item) => item.key === topic);
+    const messageType = matchedTopic?.type || "sensor_msgs/msg/PointCloud2";
+    const adapter = await ensureMobileSharedAdapterConnected();
+    const message = await new Promise<any>((resolve, reject) => {
+      timeoutHandle = window.setTimeout(() => {
+        unsubscribe?.();
+        unsubscribe = null;
+        reject(new Error(`等待 ${topic} 下一帧点云超时`));
+      }, 15000);
+      unsubscribe = adapter.subscribe(topic, messageType, (nextMessage) => {
+        if (timeoutHandle) {
+          window.clearTimeout(timeoutHandle);
+          timeoutHandle = undefined;
+        }
+        unsubscribe?.();
+        unsubscribe = null;
+        resolve(nextMessage);
+      }, { queueLength: 1 });
+    });
+    const result = viewer.attachInitialPosePointCloud({
+      topic,
+      message,
+      color: "#f4d35e",
+      pointSize,
+      pointColorMode: "layered",
+    });
+    navControlMessage.value = result.message;
+  } catch (error) {
+    navControlMessage.value = `抓取初始化点云失败: ${(error as Error).message}`;
+  } finally {
+    if (timeoutHandle) {
+      window.clearTimeout(timeoutHandle);
+    }
+    unsubscribe?.();
+    initialPosePointCloudLoading.value = false;
+  }
+}
+
+async function handleNavViewerInteraction(payload: { mode: "initialpose" | "navgoal"; x: number; y: number; z?: number; roll?: number; pitch?: number; yaw: number }) {
   navControlLoading.value = true;
   try {
     if (payload.mode === "initialpose") {
-      await publishInitialPose(payload.x, payload.y, payload.yaw);
-      navControlMessage.value = `已下发初始化定位: (${payload.x.toFixed(2)}, ${payload.y.toFixed(2)}, yaw=${payload.yaw.toFixed(2)})`;
+      initialPoseCandidateActive.value = true;
+      navControlMessage.value = `已生成初始化候选: (${payload.x.toFixed(2)}, ${payload.y.toFixed(2)}, z=${(payload.z ?? 0).toFixed(2)}, yaw=${payload.yaw.toFixed(2)})，请在离线地图页确认或微调。`;
     } else {
       await publishNavGoal(payload.x, payload.y, payload.yaw);
     }
@@ -785,7 +1296,9 @@ async function handleNavViewerInteraction(payload: { mode: "initialpose" | "navg
     navControlMessage.value = `下发失败: ${(error as Error).message}`;
   } finally {
     navControlLoading.value = false;
-    navInteractionMode.value = "none";
+    if (payload.mode !== "initialpose") {
+      navInteractionMode.value = "none";
+    }
   }
 }
 
@@ -889,10 +1402,17 @@ watch(
   { immediate: true }
 );
 
+watch(
+  () => initialPosePointCloudSize.value,
+  () => {
+    navViewerRef.value?.updateInitialPosePointCloudSize(normalizedInitialPosePointCloudSize());
+  }
+);
+
 onMounted(() => {
   loadMobileRosAppState();
   syncConnectionDraftFromState();
-  document.addEventListener("focusin", scrollFocusedFieldIntoView);
+  document.addEventListener("focusin", handleMobileTextFieldFocusIn);
   visualViewportCleanup = installVisualViewportKeyboardSync();
   void nextTick(() => {
     updateLayerDrawerMetrics();
@@ -905,7 +1425,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
-  document.removeEventListener("focusin", scrollFocusedFieldIntoView);
+  document.removeEventListener("focusin", handleMobileTextFieldFocusIn);
   teardownMobileStatusSubscriptions();
   mobileSharedAdapter?.disconnect();
   mobileSharedAdapter = null;
@@ -921,6 +1441,7 @@ onBeforeUnmount(() => {
     <article class="ros-mobile-app-canvas">
       <article class="ros-mobile-viewer-surface">
             <Nav3DViewer
+              ref="navViewerRef"
               :provider="mobileRosAppState.connection.provider"
               :url="mobileRosAppState.connection.url"
               :timeout-ms="Number(mobileRosAppState.connection.timeoutMs || '8000')"
@@ -928,6 +1449,9 @@ onBeforeUnmount(() => {
               :displays="mobileRosAppState.mainDisplays"
               :interaction-mode="navInteractionMode"
               :reconnect-token="viewerReconnectToken"
+              :initial-pose-base-height-offset-m="normalizedInitialPoseBaseHeightOffset()"
+              :initial-pose-ground-normal-radius-m="normalizedInitialPoseGroundNormalRadius()"
+              :initial-pose-ground-max-slope-deg="normalizedInitialPoseGroundMaxSlope()"
               @interaction-complete="handleNavViewerInteraction"
               @tf-frames-change="handleTfFramesChange"
               @ros-log="appendRosLog($event.level, `${$event.source}: ${$event.message}`)"
@@ -971,7 +1495,6 @@ onBeforeUnmount(() => {
                 <span class="ros-mobile-quick-menu-icon">{{ entry.label.slice(0, 1) }}</span>
                 <span>{{ entry.label }}</span>
               </button>
-              <button class="ros-mobile-quick-menu-close" type="button" @click="menuOpen = false">×</button>
             </aside>
 
             <div class="ros-mobile-viewer-bottom">
@@ -983,7 +1506,7 @@ onBeforeUnmount(() => {
                   :disabled="navControlLoading"
                   @click="enterInitialPoseMode"
                 >
-                  {{ navInteractionMode === "initialpose" ? "退出定位" : "初始化定位" }}
+                  {{ navInteractionMode === "initialpose" || initialPoseCandidateActive ? "取消定位" : "初始化定位" }}
                 </button>
                 <button
                   class="ros-mobile-mode-chip"
@@ -994,8 +1517,6 @@ onBeforeUnmount(() => {
                 >
                   {{ navInteractionMode === "navgoal" ? "退出导航" : "导航目标" }}
                 </button>
-                <button class="ros-mobile-mode-chip subtle" type="button" @click="openPage('topics')">话题</button>
-                <button class="ros-mobile-mode-chip subtle" type="button" @click="layerDrawerOpen = !layerDrawerOpen">图层</button>
               </div>
             </div>
 
@@ -1047,7 +1568,7 @@ onBeforeUnmount(() => {
               </aside>
             </section>
 
-            <div v-if="currentPage === 'config' || exportSheetOpen" class="ros-mobile-overlay-backdrop" @click="closeModalOverlay"></div>
+            <div v-if="currentPage === 'config' || currentPage === 'offline' || exportSheetOpen" class="ros-mobile-overlay-backdrop" @click="closeModalOverlay"></div>
             <section v-if="currentPage === 'config'" class="ros-mobile-config-modal panel">
               <div class="ros-mobile-overlay-head">
                 <div>
@@ -1072,6 +1593,15 @@ onBeforeUnmount(() => {
                     placeholder="ws://10.10.15.64:9090"
                     @input="updateConnectionField('url', ($event.target as HTMLInputElement).value)"
                     @blur="void 0"
+                    @keydown="handleTextFieldConfirm"
+                  />
+                </label>
+                <label class="field">
+                  <span class="field-label">后端地址</span>
+                  <input
+                    v-model="backendApiBaseDraft"
+                    class="field-input"
+                    placeholder="http://电脑IP:8000/api"
                     @keydown="handleTextFieldConfirm"
                   />
                 </label>
@@ -1134,6 +1664,172 @@ onBeforeUnmount(() => {
               </aside>
             </section>
 
+            <section v-if="currentPage === 'offline'" class="ros-mobile-side-sheet offline">
+              <div class="ros-mobile-overlay-head compact">
+                <div>
+                  <div class="result-title">离线地图配置</div>
+                  <div class="section-subtitle">加载 PCD 占据网格后，裁剪和初始化射线吸附会使用当前可见离线地图。</div>
+                </div>
+                <button class="ros-mobile-close-btn" type="button" @click="closeToMain">×</button>
+              </div>
+              <div class="ros-mobile-side-sheet-scroll ros-mobile-offline-scroll">
+                <div class="ros-mobile-offline-grid">
+                  <label class="field">
+                    <span class="field-label">离线地图 PCD</span>
+                    <span class="ros-mobile-offline-file-row">
+                      <input v-model="offlineMapPcd" class="field-input" placeholder="点击选择手机文件" readonly @click="openOfflineMapFilePicker('pcd')" />
+                      <button class="field-browse-btn" type="button" :disabled="offlineMapLoading" @click="openOfflineMapFilePicker('pcd')">选择</button>
+                    </span>
+                  </label>
+                  <label class="field">
+                    <span class="field-label">map.yaml</span>
+                    <span class="ros-mobile-offline-file-row">
+                      <input v-model="offlineMapYaml" class="field-input" placeholder="可选，点击选择手机文件" readonly @click="openOfflineMapFilePicker('yaml')" />
+                      <button class="field-browse-btn" type="button" :disabled="offlineMapLoading" @click="openOfflineMapFilePicker('yaml')">选择</button>
+                    </span>
+                  </label>
+                  <label class="field">
+                    <span class="field-label">map.pgm</span>
+                    <span class="ros-mobile-offline-file-row">
+                      <input v-model="offlineMapPgm" class="field-input" placeholder="可选，建议和 map.yaml 一起选择" readonly @click="openOfflineMapFilePicker('pgm')" />
+                      <button class="field-browse-btn" type="button" :disabled="offlineMapLoading" @click="openOfflineMapFilePicker('pgm')">选择</button>
+                    </span>
+                  </label>
+                  <label class="field compact">
+                    <span class="field-label">下采样 m</span>
+                    <input v-model="offlineMapVoxelLeafM" class="field-input" type="text" inputmode="decimal" @keydown="handleTextFieldConfirm" />
+                  </label>
+                  <label class="field compact">
+                    <span class="field-label">占据 voxel m</span>
+                    <input v-model="offlineMapOccupancyVoxelM" class="field-input" type="text" inputmode="decimal" @keydown="handleTextFieldConfirm" />
+                  </label>
+                  <label class="field compact">
+                    <span class="field-label">最大点数</span>
+                    <input v-model="offlineMapMaxPoints" class="field-input" type="text" inputmode="numeric" @keydown="handleTextFieldConfirm" />
+                  </label>
+                  <label class="field compact">
+                    <span class="field-label">最大 voxel</span>
+                    <input v-model="offlineMapMaxVoxels" class="field-input" type="text" inputmode="numeric" @keydown="handleTextFieldConfirm" />
+                  </label>
+                  <label class="field compact">
+                    <span class="field-label">base 高度偏移 m</span>
+                    <input v-model="initialPoseBaseHeightOffsetM" class="field-input" type="text" inputmode="decimal" @keydown="handleTextFieldConfirm" />
+                  </label>
+                  <label class="field compact">
+                    <span class="field-label">法线半径 m</span>
+                    <input v-model="initialPoseGroundNormalRadiusM" class="field-input" type="text" inputmode="decimal" @keydown="handleTextFieldConfirm" />
+                  </label>
+                  <label class="field compact">
+                    <span class="field-label">最大坡度 °</span>
+                    <input v-model="initialPoseGroundMaxSlopeDeg" class="field-input" type="text" inputmode="decimal" @keydown="handleTextFieldConfirm" />
+                  </label>
+                </div>
+
+                <input
+                  ref="offlineMapPcdFileInputRef"
+                  class="visually-hidden-file-input"
+                  type="file"
+                  accept=".pcd,application/octet-stream"
+                  @change="handleOfflineMapFileSelected('pcd', $event)"
+                />
+                <input
+                  ref="offlineMapYamlFileInputRef"
+                  class="visually-hidden-file-input"
+                  type="file"
+                  accept=".yaml,.yml,text/yaml,text/plain"
+                  @change="handleOfflineMapFileSelected('yaml', $event)"
+                />
+                <input
+                  ref="offlineMapPgmFileInputRef"
+                  class="visually-hidden-file-input"
+                  type="file"
+                  accept=".pgm,image/x-portable-graymap,image/x-portable-anymap"
+                  @change="handleOfflineMapFileSelected('pgm', $event)"
+                />
+
+                <div class="ros-mobile-offline-actions">
+                  <button class="primary-btn" type="button" :disabled="offlineMapLoading" @click="loadOfflineMapPointCloud">
+                    {{ offlineMapLoading ? "加载中..." : "加载离线地图" }}
+                  </button>
+                  <button class="secondary-btn" type="button" :disabled="offlineMapLoading || !offlineMapPreview" @click="clearOfflineMapPointCloud">清除</button>
+                  <div class="segmented-control ros-mobile-offline-toggle">
+                    <button
+                      type="button"
+                      :class="{ active: offlineMapDisplayMode === 'voxel' }"
+                      :disabled="offlineMapLoading || !offlineMapPreview"
+                      @click="setOfflineMapDisplayMode('voxel')"
+                    >
+                      占据网格
+                    </button>
+                    <button
+                      type="button"
+                      :class="{ active: offlineMapDisplayMode === 'pointcloud' }"
+                      :disabled="offlineMapLoading || !offlineMapPreview"
+                      @click="setOfflineMapDisplayMode('pointcloud')"
+                    >
+                      点云
+                    </button>
+                  </div>
+                </div>
+
+                <div v-if="offlineMapPreview" class="stat-strip ros-mobile-offline-stats">
+                  <div>
+                    <span>输入点数</span>
+                    <strong>{{ offlineMapPreview.pcd.input_points }}</strong>
+                  </div>
+                  <div>
+                    <span>显示点数</span>
+                    <strong>{{ offlineMapPreview.pcd.sampled_count }}</strong>
+                  </div>
+                  <div>
+                    <span>占据 voxel</span>
+                    <strong>{{ offlineMapDisplayedVoxelCount() }} / {{ offlineMapTotalVoxelCount() }}</strong>
+                  </div>
+                  <div>
+                    <span>PGM 地图</span>
+                    <strong>{{ offlineMapPreview.map ? `${offlineMapPreview.map.width}x${offlineMapPreview.map.height}` : "未绑定" }}</strong>
+                  </div>
+                </div>
+
+                <div class="ros-mobile-offline-section">
+                  <div class="result-title">初始化候选</div>
+                  <div class="section-subtitle">{{ navControlMessage || offlineMapMessage || "点击主视图底部“初始化定位”，拖拽方向后在这里确认。" }}</div>
+                  <div class="ros-mobile-offline-grid compact-grid">
+                    <label class="field">
+                      <span class="field-label">点云 Topic</span>
+                      <input v-model="initialPosePointCloudTopic" class="field-input" placeholder="/cloud_registered_bl" @keydown="handleTextFieldConfirm" />
+                    </label>
+                    <label class="field compact">
+                      <span class="field-label">点大小</span>
+                      <input v-model="initialPosePointCloudSize" class="field-input" type="text" inputmode="decimal" @keydown="handleTextFieldConfirm" />
+                    </label>
+                    <div class="segmented-control ros-mobile-offline-toggle">
+                      <button type="button" :class="{ active: initialPoseTransformMode === 'translate' }" @click="setInitialPoseTransformMode('translate')">平移</button>
+                      <button type="button" :class="{ active: initialPoseTransformMode === 'rotate' }" @click="setInitialPoseTransformMode('rotate')">旋转</button>
+                    </div>
+                  </div>
+                  <div class="ros-mobile-offline-actions">
+                    <button class="secondary-btn" type="button" :disabled="navControlLoading || initialPosePointCloudLoading" @click="captureInitialPosePointCloudFrame">
+                      {{ initialPosePointCloudLoading ? "抓取中..." : "绑定点云帧" }}
+                    </button>
+                    <button class="primary-btn" type="button" :disabled="navControlLoading" @click="confirmInitialPoseCandidate">确认下发</button>
+                    <button class="secondary-btn" type="button" :disabled="navControlLoading" @click="cancelInitialPoseCandidate">取消候选</button>
+                  </div>
+                </div>
+
+                <div class="section-subtitle nav-topic-feedback">{{ offlineMapMessage || "未加载离线地图。" }}</div>
+              </div>
+              <aside class="ros-mobile-status-widget embedded" :class="{ open: statusPanelOpen }">
+                <button class="ros-mobile-status-widget-toggle" type="button" @click="statusPanelOpen = !statusPanelOpen">
+                  <span>{{ latestStatusTitle }}</span>
+                  <strong>{{ statusPanelOpen ? "收起" : "展开" }}</strong>
+                </button>
+                <div v-if="statusPanelOpen" class="ros-mobile-status-widget-body">
+                  <div class="ros-mobile-status-widget-message">{{ latestStatusMessage }}</div>
+                </div>
+              </aside>
+            </section>
+
             <section v-if="currentPage === 'topics'" class="ros-mobile-side-sheet topics">
               <div class="ros-mobile-overlay-head compact">
                 <div>
@@ -1142,7 +1838,7 @@ onBeforeUnmount(() => {
                 </div>
                 <button class="ros-mobile-close-btn" type="button" @click="closeToMain">×</button>
               </div>
-              <div class="ros-mobile-side-sheet-body topics">
+              <div ref="topicSheetBodyRef" class="ros-mobile-side-sheet-body topics" :style="topicSheetBodyStyle">
                 <section class="ros-mobile-topic-browser">
                   <div class="ros-mobile-topic-toolbar">
                     <input v-model="topicQuery" class="field-input" placeholder="搜索话题名、类型或说明" />
@@ -1166,6 +1862,18 @@ onBeforeUnmount(() => {
                     </div>
                   </div>
                 </section>
+
+                <button
+                  class="ros-mobile-topic-splitter"
+                  type="button"
+                  aria-label="调整话题浏览面板宽度"
+                  @pointerdown="beginTopicSplitDrag"
+                  @pointermove="moveTopicSplitDrag"
+                  @pointerup="endTopicSplitDrag"
+                  @pointercancel="endTopicSplitDrag"
+                >
+                  <span></span>
+                </button>
 
                 <section class="ros-mobile-topic-preview panel">
                   <template v-if="selectedTopicOption">
@@ -1424,6 +2132,23 @@ onBeforeUnmount(() => {
                 </div>
               </aside>
             </section>
+            <aside v-if="keyboardInputActive" class="ros-mobile-keyboard-panel">
+              <label class="ros-mobile-keyboard-field">
+                <span>{{ keyboardInputLabel }}</span>
+                <input
+                  v-model="keyboardInputValue"
+                  class="ros-mobile-keyboard-input"
+                  :type="keyboardInputType"
+                  :inputmode="keyboardInputMode"
+                  :placeholder="keyboardInputPlaceholder"
+                  enterkeyhint="done"
+                  @input="syncFloatingKeyboardValueToTarget"
+                  @keydown="handleFloatingKeyboardKeydown"
+                />
+              </label>
+              <button class="secondary-btn" type="button" @click="cancelFloatingKeyboardEdit">取消</button>
+              <button class="primary-btn" type="button" @click="finishFloatingKeyboardEdit">完成</button>
+            </aside>
       </article>
     </article>
   </div>

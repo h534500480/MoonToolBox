@@ -2,7 +2,7 @@ import mimetypes
 from io import BytesIO
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import FileResponse, Response
 
 from app.catalog import get_tool_definitions, is_tool_enabled
@@ -22,6 +22,7 @@ from app.models import (
     TilePreviewResponse,
     ToolRunRequest,
     ToolRunResponse,
+    UploadedToolFileResponse,
 )
 from app.services.costmap_playback import run_costmap
 from app.services.browser_bridge import list_tabs, start_browser
@@ -58,6 +59,7 @@ from app.services.ros_data_source import (
 from app.services.ros_runtime_params import list_ros_runtime_params
 from app.services.system_info import get_system_info
 from app.services.system_actions import open_path_in_system
+from app.services.uploaded_files import save_uploaded_tool_file
 
 
 router = APIRouter()
@@ -177,6 +179,26 @@ def get_local_text(path: str):
         return {"path": path, "content": read_nav_recording_text(path)}
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/files/upload", response_model=UploadedToolFileResponse)
+def post_upload_tool_file(
+    content: bytes = Body(..., media_type="application/octet-stream"),
+    filename: str = "",
+    purpose: str = "tool",
+    content_type: str = "",
+):
+    try:
+        return save_uploaded_tool_file(
+            content=content,
+            filename=filename,
+            content_type=content_type,
+            purpose=purpose,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"文件上传失败: {type(exc).__name__}: {exc}") from exc
 
 
 @router.get("/nav-recordings", response_model=NavRecordingFileListResponse)

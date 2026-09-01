@@ -17,6 +17,7 @@ ROS Tool Suite 是一个面向 ROS 地图处理、定位导航调试、网络扫
 
 - Web 后端：`python .\backend\run.py`
 - Web 前端：`cd .\frontend && npm run dev`
+- Android 构建前同步：`cd .\frontend && npm run build:android`
 - 桌面兼容入口：`python .\tool_suite_gui.py`
 - 生产构建：`cd .\frontend && npm run build`
 
@@ -36,6 +37,18 @@ ROS Tool Suite 是一个面向 ROS 地图处理、定位导航调试、网络扫
 - 工具 key 为 `network_scan`，Web 主线走 `backend/app/services/network_scan.py`，不是 `cpp_runner.py` 中的 C++ 备用封装。
 - 当前扫描分两阶段：先按 IP 范围并发执行系统 ping 获取连通性，再一次性读取 ARP 表并只对在线/ARP 发现的设备补全主机名、MAC、ARP 类型和 SSH(22) 状态。
 - 主机名解析优先使用反向 DNS，其次用 `zeroconf` 浏览 mDNS/Avahi/Bonjour 常见服务补全 Ubuntu 等 `.local` 名称，Windows 下最后用 `nbtstat -A` 做 NetBIOS 兜底；因此能看到的名称取决于 DNS/PTR、mDNS、NetBIOS、设备自身和网络策略，不保证所有在线设备都有名字。
+
+## Android ROS 工作台
+
+- `frontend/src/lib/ros/liveAdapter.ts` 是前端 rosbridge 实时连接的统一封装，支持 mock、rosbridge、共享连接、topic 订阅限流、topic 发布和 rosapi 服务调用。
+- Android / 移动端 ROS 工作台优先直接连接 rosbridge WebSocket，不依赖本机 FastAPI 后端去代读 ROS 数据；页面主视图、状态卡、话题浏览、参数读取和消息下发共用同一 shared key，避免同页重复建连。
+- `frontend/src/components/RosNavAppPage.vue` 是 Android 横屏主页面：顶部功能菜单只保留连接配置、话题浏览、运行参数和快照导出；底部主控制只保留初始化定位和导航目标，图层管理通过底部抽屉 handle 展开/收回。
+- Android 连接配置里单独维护“后端地址”，用于离线地图上传、预览和 raycast 等 HTTP API；真机环境必须使用 `http://电脑IP:8000/api` 这类手机可访问地址，不能使用默认相对 `/api` 或 `localhost`。
+- Android 功能菜单新增“离线地图”页，PCD/YAML/PGM 优先通过 `RosFilePickerPlugin` 调起系统文件管理器，选择前临时切竖屏、返回后恢复横屏，并复制到 App 私有缓存目录；安卓端离线地图预览不依赖 FastAPI 后端，插件本地解析 ASCII/binary PCD 的 `x/y/z` 字段、按参数体素下采样、生成占据 voxel，并解析 map.yaml/PGM 尺寸和 PGM 灰度贴图 data URL。网页环境仍回退到 `/api/tools/ros_nav_test/offline-map-preview`。结果交给 `Nav3DViewer.vue` 显示占据网格、点云、PGM 底图和裁剪控件；Android 初始化定位射线优先使用前端本地占据网格和采样点估计地面高度，本地未命中时直接回退平面，避免请求不可达后端。初始化定位拖拽生成候选位姿后，可在该页绑定点云帧、切换平移/旋转微调并确认下发。
+- Android 输入法不再通过滚动或压缩主界面避让输入框，`AndroidManifest.xml` 使用 `adjustNothing`，前端在软键盘上方显示 `ros-mobile-keyboard-panel` 悬浮输入条并同步原输入值。
+- Android 话题浏览页使用可拖拽左右分栏，右侧预览面板允许横向滚动，以便查看较长 topic、类型和诊断内容。
+- `frontend/src/lib/ros/directRosClient.ts` 保留 rosapi 直连兜底能力；当调用方传入共享 `RosLiveAdapter` 时，话题列表、轻量探测和参数读取优先复用现有 WebSocket。
+- 弱网或 rosbridge 不可达时，共享连接会主动关闭失败 socket，并使用有限次数的慢退避自动重连；达到上限后暂停，等待用户手动重连，避免持续重试拖垮机器人侧网络和 SSH 会话。
 
 ## ROS 实时连接
 

@@ -46,6 +46,14 @@ function apiUrl(path: string): string {
   return `${getApiBase()}${normalizedPath}`;
 }
 
+export function absoluteApiUrl(path: string): string {
+  const targetPath = apiUrl(path);
+  if (typeof window === "undefined" || /^https?:\/\//i.test(targetPath)) {
+    return targetPath;
+  }
+  return new URL(targetPath, window.location.href).toString();
+}
+
 export function buildBackendImageUrl(path: string, cacheKey = ""): string {
   const query = new URLSearchParams({ path });
   if (cacheKey) {
@@ -300,6 +308,48 @@ export async function fetchLocalTextFile(path: string): Promise<string> {
   return data.content ?? "";
 }
 
+export interface UploadedToolFileResponse {
+  path: string;
+  original_name: string;
+  size_bytes: number;
+  content_type: string;
+}
+
+export async function uploadToolFile(file: File, purpose = "tool"): Promise<UploadedToolFileResponse> {
+  const query = new URLSearchParams({
+    filename: file.name,
+    purpose,
+    content_type: file.type || ""
+  });
+  const response = await fetch(`${apiUrl("/files/upload")}?${query.toString()}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/octet-stream"
+    },
+    body: file
+  });
+  if (!response.ok) {
+    let detail = `文件上传失败: HTTP ${response.status}`;
+    try {
+      const data = await response.json();
+      detail = data.detail ?? detail;
+    } catch {
+      // Keep fallback message.
+    }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+export function buildToolFileUploadUrl(file: { name: string; type?: string }, purpose = "tool"): string {
+  const query = new URLSearchParams({
+    filename: file.name,
+    purpose,
+    content_type: file.type || ""
+  });
+  return `${absoluteApiUrl("/files/upload")}?${query.toString()}`;
+}
+
 export interface TilePreviewResponse {
   point_count: number;
   xmin: number;
@@ -360,6 +410,7 @@ export interface GlobalRelocalizationPcdPreviewResponse {
 export interface NavOfflineMapInfo {
   yaml_path: string;
   image_path: string;
+  image_data_url?: string;
   resolution: number;
   origin: number[];
   width: number;
@@ -424,7 +475,7 @@ export async function fetchRosNavOfflineMapPreview(
     max_points: maxPoints || "60000",
     max_voxels: maxVoxels || "60000"
   });
-  const response = await fetch(`${API_BASE}/tools/ros_nav_test/offline-map-preview?${query.toString()}`);
+  const response = await fetch(`${apiUrl("/tools/ros_nav_test/offline-map-preview")}?${query.toString()}`);
   if (!response.ok) {
     let detail = `离线地图预览请求失败: HTTP ${response.status}`;
     try {
@@ -450,7 +501,7 @@ export async function raycastRosNavOfflineMap(payload: {
   clip_bounds?: Record<string, number>;
   use_visible_voxels?: boolean;
 }): Promise<NavOfflineMapRaycastResponse> {
-  const response = await fetch(`${API_BASE}/tools/ros_nav_test/offline-map-raycast`, {
+  const response = await fetch(apiUrl("/tools/ros_nav_test/offline-map-raycast"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -505,7 +556,7 @@ export async function fetchGlobalRelocalizationPcdPreview(path: string, maxPoint
     path,
     max_points: String(maxPoints)
   });
-  const response = await fetch(`${API_BASE}/tools/global_relocalization_candidates/pcd-preview?${query.toString()}`);
+  const response = await fetch(`${apiUrl("/tools/global_relocalization_candidates/pcd-preview")}?${query.toString()}`);
   if (!response.ok) {
     let detail = "Failed to load PCD preview";
     try {
@@ -521,7 +572,7 @@ export async function fetchGlobalRelocalizationPcdPreview(path: string, maxPoint
 
 export async function fetchGlobalRelocalizationCandidates(path: string): Promise<GlobalRelocalizationCandidatesResponse> {
   const query = new URLSearchParams({ path });
-  const response = await fetch(`${API_BASE}/tools/global_relocalization_candidates/candidates?${query.toString()}`);
+  const response = await fetch(`${apiUrl("/tools/global_relocalization_candidates/candidates")}?${query.toString()}`);
   if (!response.ok) {
     let detail = "Failed to load candidates";
     try {
@@ -536,7 +587,7 @@ export async function fetchGlobalRelocalizationCandidates(path: string): Promise
 }
 
 export async function exportGlobalRelocalizationManual(payload: Record<string, unknown>): Promise<GlobalRelocalizationManualExportResponse> {
-  const response = await fetch(`${API_BASE}/tools/global_relocalization_candidates/manual-export`, {
+  const response = await fetch(apiUrl("/tools/global_relocalization_candidates/manual-export"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -557,7 +608,7 @@ export async function exportGlobalRelocalizationManual(payload: Record<string, u
 }
 
 export async function exportGlobalRelocalizationFinal(payload: Record<string, unknown>): Promise<GlobalRelocalizationFinalExportResponse> {
-  const response = await fetch(`${API_BASE}/tools/global_relocalization_candidates/final-export`, {
+  const response = await fetch(apiUrl("/tools/global_relocalization_candidates/final-export"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json"

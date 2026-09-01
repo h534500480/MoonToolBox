@@ -1,6 +1,7 @@
 :root {
   color-scheme: dark;
   --mobile-keyboard-inset: 0px;
+  --mobile-keyboard-panel-bottom: 0px;
   --bg: #060b13;
   --workspace: #080f1a;
   --sidebar-bg: #07101b;
@@ -4496,13 +4497,107 @@ select {
 
 .ros-mobile-viewer-surface .nav-viewer-focus-button {
   top: auto;
-  right: 22px;
-  bottom: 88px;
-  width: clamp(52px, 4.9vmin, 64px);
-  height: clamp(52px, 4.9vmin, 64px);
+  right: 14px;
+  bottom: 108px;
+  width: clamp(38px, 3.8vmin, 46px);
+  height: clamp(38px, 3.8vmin, 46px);
   border-radius: 50%;
-  background: rgba(51, 38, 26, 0.7);
-  border-color: rgba(234, 214, 184, 0.38);
+  background: transparent;
+  border-color: rgba(234, 214, 184, 0.28);
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.ros-mobile-viewer-surface .nav-viewer-focus-icon {
+  width: 70%;
+  height: 70%;
+}
+
+.ros-mobile-viewer-surface .nav-viewer-base-link-hud {
+  position: absolute;
+  right: 10px;
+  bottom: 14px;
+  width: min(268px, calc(100% - 20px));
+  padding: 2px 4px;
+  gap: 2px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.ros-mobile-viewer-surface .nav-viewer-base-link-title {
+  font-size: 10px;
+  line-height: 1.1;
+  text-align: right;
+}
+
+.ros-mobile-viewer-surface .nav-viewer-base-link-text {
+  font-size: 10px;
+  line-height: 1.28;
+  text-align: right;
+  word-break: normal;
+  overflow-wrap: anywhere;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.72);
+}
+
+.ros-mobile-viewer-surface .nav-offline-clip-widget {
+  top: 126px;
+  left: 24px;
+  width: 90px;
+  z-index: 8;
+}
+
+.ros-mobile-viewer-surface .nav-offline-clip-title {
+  font-size: 10px;
+  margin-bottom: 1px;
+}
+
+.ros-mobile-viewer-surface .nav-offline-display-toggle {
+  margin-bottom: 2px;
+}
+
+.ros-mobile-viewer-surface .nav-offline-display-toggle button {
+  min-height: 18px;
+  padding: 0 4px;
+  font-size: 9px;
+}
+
+.ros-mobile-viewer-surface .nav-offline-clip-axis-control {
+  width: 86px;
+  height: 86px;
+}
+
+.ros-mobile-viewer-surface .nav-offline-clip-axis-control::after {
+  left: 39px;
+  top: 39px;
+  width: 7px;
+  height: 7px;
+}
+
+.ros-mobile-viewer-surface .clip-axis-arrow {
+  left: 39px;
+  top: 39px;
+  width: 38px;
+}
+
+.ros-mobile-viewer-surface .clip-axis-arrow::before {
+  width: 34px;
+  height: 3px;
+}
+
+.ros-mobile-viewer-surface .clip-axis-arrow::after {
+  left: 28px;
+  top: -4px;
+  border-top-width: 7px;
+  border-bottom-width: 7px;
+  border-left-width: 12px;
+}
+
+.ros-mobile-viewer-surface .nav-offline-clip-reset {
+  min-height: 18px;
+  padding: 0 7px;
+  font-size: 10px;
 }
 
 .ros-mobile-viewer-topbar {
@@ -4686,7 +4781,7 @@ select {
   z-index: 18;
   display: grid;
   gap: 8px;
-  width: 208px;
+  width: 180px;
   padding: 14px;
   border-radius: 22px;
   border: 1px solid rgba(231, 210, 181, 0.14);
@@ -4722,29 +4817,16 @@ select {
   font-size: 14px;
 }
 
-.ros-mobile-quick-menu-close {
-  justify-self: end;
-  width: 38px;
-  height: 38px;
-  border-radius: 999px;
-  border: 1px solid rgba(230, 210, 181, 0.18);
-  background: rgba(255, 255, 255, 0.04);
-  color: #f3e6d3;
-  cursor: pointer;
-  font-size: 22px;
-  line-height: 1;
-}
-
 .ros-mobile-viewer-bottom {
   position: absolute;
   left: 50%;
-  bottom: clamp(78px, 10vh, 122px);
+  bottom: clamp(32px, 5.8vh, 58px);
   z-index: 11;
   transform: translateX(-50%);
   display: grid;
   justify-items: center;
   gap: 6px;
-  width: min(66%, 500px);
+  width: min(48%, 360px);
 }
 
 .ros-mobile-viewer-mode-row {
@@ -4752,11 +4834,11 @@ select {
   flex-wrap: wrap;
   justify-content: center;
   gap: 6px;
-  padding: 5px;
+  padding: 0;
   border-radius: 999px;
-  border: 1px solid rgba(232, 211, 181, 0.12);
-  background: rgba(10, 16, 28, 0.72);
-  backdrop-filter: blur(18px);
+  border: 0;
+  background: transparent;
+  backdrop-filter: none;
 }
 
 .ros-mobile-mode-chip,
@@ -4764,16 +4846,17 @@ select {
   min-height: clamp(28px, 2.55vmin, 33px);
   padding: 0 clamp(9px, 0.88vmin, 12px);
   border-radius: 999px;
-  border: 1px solid rgba(229, 211, 186, 0.12);
+  border: 1px solid rgba(229, 211, 186, 0.24);
   background: transparent;
   color: #e9decf;
   cursor: pointer;
   font-size: clamp(10px, 0.95vmin, 12px);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.68);
 }
 
 .ros-mobile-mode-chip.active {
-  background: rgba(193, 160, 111, 0.16);
-  border-color: rgba(214, 184, 144, 0.34);
+  background: rgba(193, 160, 111, 0.08);
+  border-color: rgba(214, 184, 144, 0.48);
   color: #f4e9d7;
 }
 
@@ -4784,16 +4867,16 @@ select {
 .ros-mobile-run-dock {
   position: absolute;
   left: 18px;
-  bottom: 108px;
+  bottom: 46px;
   z-index: 11;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px;
+  padding: 0;
   border-radius: 999px;
-  border: 1px solid rgba(231, 210, 181, 0.12);
-  background: rgba(10, 16, 28, 0.64);
-  backdrop-filter: blur(18px);
+  border: 0;
+  background: transparent;
+  backdrop-filter: none;
 }
 
 .ros-mobile-run-dock-toggle {
@@ -4801,11 +4884,12 @@ select {
   min-width: 28px;
   padding: 0 10px;
   border-radius: 999px;
-  border: 1px solid rgba(229, 211, 186, 0.12);
+  border: 1px solid rgba(229, 211, 186, 0.24);
   background: transparent;
   color: #e9decf;
   cursor: pointer;
   font-size: 12px;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.68);
 }
 
 .ros-mobile-run-dock-menu {
@@ -4844,10 +4928,10 @@ select {
   box-shadow: 0 24px 56px rgba(0, 0, 0, 0.34);
   backdrop-filter: blur(20px);
   padding: 12px;
-  max-height: calc(100dvh - 92px - var(--mobile-keyboard-inset));
+  max-height: calc(100dvh - 92px);
   overflow: auto;
-  scroll-padding-bottom: 42vh;
-  padding-bottom: calc(12px + var(--mobile-keyboard-inset));
+  scroll-padding-bottom: 24px;
+  padding-bottom: 12px;
 }
 
 .ros-mobile-module-overlay {
@@ -4933,12 +5017,16 @@ select {
   backdrop-filter: blur(18px);
   color: #efe4d3;
   overflow: auto;
-  scroll-padding-bottom: 42vh;
-  padding-bottom: calc(12px + var(--mobile-keyboard-inset));
+  scroll-padding-bottom: 24px;
+  padding-bottom: 12px;
 }
 
 .ros-mobile-side-sheet.topics {
   width: min(72%, 980px);
+}
+
+.ros-mobile-side-sheet.offline {
+  width: min(76%, 1040px);
 }
 
 .ros-mobile-side-sheet-body {
@@ -4948,7 +5036,7 @@ select {
 }
 
 .ros-mobile-side-sheet-body.topics {
-  grid-template-columns: minmax(280px, 0.92fr) minmax(320px, 1.08fr);
+  grid-template-columns: minmax(220px, 46%) 14px minmax(260px, 1fr);
   height: calc(100% - 48px);
 }
 
@@ -4963,6 +5051,7 @@ select {
   display: grid;
   gap: 8px;
   align-content: start;
+  min-width: 0;
 }
 
 .ros-mobile-topic-toolbar {
@@ -4974,6 +5063,7 @@ select {
 .ros-mobile-topic-scroll {
   display: grid;
   gap: 10px;
+  overflow: auto;
 }
 
 .ros-mobile-topic-list-item {
@@ -5017,6 +5107,111 @@ select {
 .ros-mobile-topic-preview.panel {
   padding: 12px;
   background: rgba(255, 255, 255, 0.02);
+  min-width: 0;
+  overflow: auto;
+}
+
+.ros-mobile-offline-scroll {
+  display: grid;
+  gap: 12px;
+  padding-right: 2px;
+}
+
+.ros-mobile-offline-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(160px, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+
+.ros-mobile-offline-grid.compact-grid {
+  grid-template-columns: minmax(190px, 1fr) minmax(88px, 0.35fr) minmax(148px, auto);
+}
+
+.ros-mobile-offline-grid .field.compact {
+  min-width: 0;
+}
+
+.ros-mobile-offline-file-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 68px;
+  gap: 8px;
+  align-items: center;
+}
+
+.ros-mobile-offline-file-row .field-input {
+  min-width: 0;
+  cursor: pointer;
+  text-overflow: ellipsis;
+}
+
+.ros-mobile-offline-file-row .field-browse-btn {
+  width: 68px;
+  height: 32px;
+  padding: 0;
+  font-size: 12px;
+}
+
+.visually-hidden-file-input {
+  position: fixed;
+  left: -10000px;
+  top: -10000px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.ros-mobile-offline-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ros-mobile-offline-toggle {
+  min-height: 40px;
+}
+
+.ros-mobile-offline-toggle button {
+  min-height: 38px;
+}
+
+.ros-mobile-offline-stats {
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+}
+
+.ros-mobile-offline-section {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border-radius: 16px;
+  border: 1px solid rgba(231, 210, 181, 0.12);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.ros-mobile-topic-preview.panel .nav-panel-list {
+  min-width: 520px;
+}
+
+.ros-mobile-topic-splitter {
+  align-self: stretch;
+  display: grid;
+  place-items: center;
+  width: 14px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(231, 210, 181, 0.06);
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.ros-mobile-topic-splitter span {
+  width: 4px;
+  height: 44px;
+  border-radius: 999px;
+  background: rgba(231, 210, 181, 0.34);
 }
 
 .ros-mobile-bottom-drawer {
@@ -5078,9 +5273,51 @@ select {
 .ros-mobile-bottom-drawer-body {
   max-height: calc(82vh - 52px);
   overflow: auto;
-  padding-bottom: calc(18px + var(--mobile-keyboard-inset));
-  scroll-padding-bottom: calc(18px + var(--mobile-keyboard-inset));
+  padding-bottom: 18px;
+  scroll-padding-bottom: 18px;
   overscroll-behavior: contain;
+}
+
+.ros-mobile-keyboard-panel {
+  position: fixed;
+  left: 50%;
+  bottom: calc(8px + var(--mobile-keyboard-panel-bottom));
+  z-index: 30;
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto auto;
+  align-items: end;
+  gap: 8px;
+  width: min(760px, calc(100vw - 28px));
+  padding: 8px;
+  border-radius: 16px;
+  border: 1px solid rgba(231, 210, 181, 0.16);
+  background: rgba(11, 17, 27, 0.9);
+  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.32);
+  transform: translateX(-50%);
+  backdrop-filter: blur(18px);
+}
+
+.ros-mobile-keyboard-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.ros-mobile-keyboard-field span {
+  color: #cfc1ad;
+  font-size: 10px;
+}
+
+.ros-mobile-keyboard-input {
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(231, 210, 181, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  color: #f5eadb;
+  font-size: 13px;
+  outline: none;
 }
 
 .nav-viewer-canvas-host canvas {
@@ -5186,6 +5423,10 @@ select {
   .ros-mobile-side-sheet-body.topics {
     grid-template-columns: 1fr;
   }
+
+  .ros-mobile-topic-splitter {
+    display: none;
+  }
 }
 
 @media (max-width: 900px) and (orientation: portrait) {
@@ -5215,9 +5456,22 @@ select {
     width: auto;
   }
 
+  .ros-mobile-side-sheet.offline {
+    width: auto;
+  }
+
+  .ros-mobile-offline-grid,
+  .ros-mobile-offline-grid.compact-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ros-mobile-offline-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .ros-mobile-run-dock {
     left: 12px;
-    bottom: 92px;
+    bottom: 42px;
   }
 
   .ros-mobile-viewer-surface .nav-viewer-focus-button {
@@ -5235,8 +5489,8 @@ select {
   }
 
   .ros-mobile-viewer-bottom {
-    bottom: 62px;
-    width: min(72%, 520px);
+    bottom: 34px;
+    width: min(58%, 420px);
   }
 }
 
@@ -5245,7 +5499,73 @@ select {
     width: min(74%, 920px);
   }
 
+  .ros-mobile-side-sheet.offline {
+    width: min(80%, 960px);
+  }
+
   .ros-mobile-side-sheet-body.topics {
-    grid-template-columns: minmax(240px, 0.9fr) minmax(260px, 1.1fr);
+    grid-template-columns: minmax(210px, 44%) 14px minmax(250px, 1fr);
+  }
+
+  .ros-mobile-keyboard-panel {
+    width: min(660px, calc(100vw - 22px));
+  }
+
+  .ros-mobile-viewer-surface .nav-offline-clip-widget {
+    top: 156px;
+    left: 34px;
+    width: 90px;
+  }
+
+  .ros-mobile-viewer-surface .nav-offline-clip-title {
+    font-size: 10px;
+    margin-bottom: 1px;
+  }
+
+  .ros-mobile-viewer-surface .nav-offline-display-toggle {
+    margin-bottom: 2px;
+  }
+
+  .ros-mobile-viewer-surface .nav-offline-display-toggle button {
+    min-height: 18px;
+    padding: 0 4px;
+    font-size: 9px;
+  }
+
+  .ros-mobile-viewer-surface .nav-offline-clip-axis-control {
+    width: 86px;
+    height: 86px;
+  }
+
+  .ros-mobile-viewer-surface .nav-offline-clip-axis-control::after {
+    left: 39px;
+    top: 39px;
+    width: 7px;
+    height: 7px;
+  }
+
+  .ros-mobile-viewer-surface .clip-axis-arrow {
+    left: 39px;
+    top: 39px;
+    width: 38px;
+  }
+
+  .ros-mobile-viewer-surface .clip-axis-arrow::before {
+    width: 34px;
+    height: 3px;
+  }
+
+  .ros-mobile-viewer-surface .clip-axis-arrow::after {
+    left: 28px;
+    top: -4px;
+    border-top-width: 7px;
+    border-bottom-width: 7px;
+    border-left-width: 12px;
+  }
+
+  .ros-mobile-viewer-surface .nav-offline-clip-reset {
+    min-height: 18px;
+    padding: 0 7px;
+    font-size: 10px;
   }
 }
