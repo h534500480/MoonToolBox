@@ -3,8 +3,12 @@
 #define MyAppPublisher "TreeMoon"
 #define MyAppExeName "scripts\start_local.vbs"
 
-#ifexist "..\release\MoonToolBox\MoonToolBox.ico"
-  #define MyAppShortcutIconFile "..\release\MoonToolBox\MoonToolBox.ico"
+#ifndef PackageSourceDir
+  #define PackageSourceDir "..\release\MoonToolBox"
+#endif
+
+#ifexist "{#PackageSourceDir}\MoonToolBox.ico"
+  #define MyAppShortcutIconFile "{#PackageSourceDir}\MoonToolBox.ico"
 #endif
 
 #ifexist "..\release\MoonToolBoxSetup.ico"
@@ -37,7 +41,7 @@ SetupIconFile={#MySetupIconFile}
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "..\release\MoonToolBox\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PackageSourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 #ifdef MyAppShortcutIconFile

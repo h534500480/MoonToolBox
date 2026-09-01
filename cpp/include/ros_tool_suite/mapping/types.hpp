@@ -27,6 +27,7 @@ struct GridParameters {
     int hole_fill_neighbors = 5;
     double overlay_smooth_radius = 0.0;
     int free_gray = 254;
+    int unknown_gray = 205;
     int obstacle_gray = 0;
     std::tuple<int, int, int> walkable_color = {0x39, 0xFF, 0x14};
     std::tuple<int, int, int> obstacle_color = {0xFF, 0x5A, 0x36};

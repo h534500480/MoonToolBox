@@ -1,8 +1,9 @@
 import mimetypes
+from io import BytesIO
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from app.catalog import get_tool_definitions, is_tool_enabled
 from app.models import (
@@ -45,6 +46,7 @@ from app.services.nav_recordings import (
     read_nav_recording_text,
     save_nav_recording,
 )
+from app.services.nav_offline_map import preview_nav_offline_map, raycast_nav_offline_map
 from app.services.pcd_preview import preview_pcd_tile
 from app.services.preferences import load_preferences, save_preferences
 from app.services.ros_data_source import (
@@ -151,6 +153,24 @@ def get_local_image(path: str):
     return FileResponse(file_path, media_type=media_type)
 
 
+@router.get("/files/pgm-image")
+def get_local_pgm_image(path: str):
+    file_path = Path(path)
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail=f"文件不存在: {path}")
+    try:
+        from PIL import Image
+    except ModuleNotFoundError as exc:
+        raise HTTPException(status_code=500, detail="缺少 Pillow，无法转换 PGM 地图。") from exc
+    try:
+        with Image.open(file_path) as image:
+            output = BytesIO()
+            image.convert("L").save(output, format="PNG")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"PGM 地图转换失败: {path}") from exc
+    return Response(content=output.getvalue(), media_type="image/png")
+
+
 @router.get("/files/text")
 def get_local_text(path: str):
     try:
@@ -192,6 +212,54 @@ def get_global_relocalization_pcd_preview(path: str, max_points: int = 90000):
         return preview_pcd_points(path=path, max_points=max_points)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/tools/ros_nav_test/offline-map-preview")
+def get_ros_nav_offline_map_preview(
+    pcd_path: str,
+    map_yaml_path: str = "",
+    map_pgm_path: str = "",
+    voxel_leaf_m: float = 0.20,
+    occupancy_voxel_m: float = 0.30,
+    max_points: int = 60000,
+    max_voxels: int = 60000,
+):
+    if not is_tool_enabled("ros_nav_test"):
+        raise HTTPException(status_code=404, detail="Tool not enabled")
+    try:
+        return preview_nav_offline_map(
+            pcd_path=pcd_path,
+            map_yaml_path=map_yaml_path,
+            map_pgm_path=map_pgm_path,
+            voxel_leaf_m=voxel_leaf_m,
+            occupancy_voxel_m=occupancy_voxel_m,
+            max_points=max_points,
+            max_voxels=max_voxels,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"离线地图预览接口异常: {type(exc).__name__}: {exc}") from exc
+
+
+@router.post("/tools/ros_nav_test/offline-map-raycast")
+def post_ros_nav_offline_map_raycast(payload: dict):
+    if not is_tool_enabled("ros_nav_test"):
+        raise HTTPException(status_code=404, detail="Tool not enabled")
+    try:
+        return raycast_nav_offline_map(
+            origin=payload.get("origin") or [],
+            direction=payload.get("direction") or [],
+            max_distance_m=float(payload.get("max_distance_m") or 80.0),
+            normal_radius_m=float(payload.get("normal_radius_m") or 0.8),
+            ground_max_slope_deg=float(payload.get("ground_max_slope_deg") or 30.0),
+            clip_bounds=payload.get("clip_bounds"),
+            use_visible_voxels=payload.get("use_visible_voxels") is not False,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"离线地图射线查询异常: {type(exc).__name__}: {exc}") from exc
 
 
 @router.get("/tools/global_relocalization_candidates/candidates")

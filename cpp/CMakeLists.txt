@@ -30,6 +30,12 @@ add_executable(global_relocalization_cli
 )
 target_include_directories(global_relocalization_cli PRIVATE ${COMMON_INCLUDE_DIR})
 
+add_executable(nav_pcd_preview_cli
+    src/nav_pcd_preview_cli/main.cpp
+    src/mapping/pcd_reader.cpp
+)
+target_include_directories(nav_pcd_preview_cli PRIVATE ${COMMON_INCLUDE_DIR})
+
 add_executable(network_scan_cli
     src/network_cli/main.cpp
     src/network/scanner.cpp

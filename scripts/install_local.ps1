@@ -22,6 +22,14 @@ function Invoke-Checked {
   }
 }
 
+function Import-VsCppBuildEnv {
+  $ScriptPath = Join-Path $PSScriptRoot "import_vsdev_env.ps1"
+  if (-not (Test-Path $ScriptPath)) {
+    throw "Missing helper script: $ScriptPath"
+  }
+  . $ScriptPath
+}
+
 function Initialize-PipNetwork {
   if ($env:ROS_TOOL_USE_SYSTEM_PROXY -ne "1") {
     $env:NO_PROXY = "*"
@@ -53,11 +61,12 @@ Write-Host "[2/5] Installing Python dependencies..."
 Invoke-Checked $Python @("-m", "pip", "install", "-i", $env:ROS_TOOL_PIP_INDEX_URL, "--trusted-host", ([Uri]$env:ROS_TOOL_PIP_INDEX_URL).Host, "--upgrade", "pip")
 Invoke-Checked $Python @("-m", "pip", "install", "-i", $env:ROS_TOOL_PIP_INDEX_URL, "--trusted-host", ([Uri]$env:ROS_TOOL_PIP_INDEX_URL).Host, "-r", "requirements.txt", "-r", "backend\requirements.txt")
 
-$RequiredExes = @("pcd_map_cli.exe", "pcd_tile_cli.exe", "global_relocalization_cli.exe", "network_scan_cli.exe", "costmap_cli.exe")
+$RequiredExes = @("pcd_map_cli.exe", "pcd_tile_cli.exe", "global_relocalization_cli.exe", "nav_pcd_preview_cli.exe", "network_scan_cli.exe", "costmap_cli.exe")
 $MissingExes = @($RequiredExes | Where-Object { -not (Test-Path (Join-Path $Root "cpp\build\$_")) })
 if ($MissingExes.Count -gt 0) {
   Write-Host "[3/5] Building C++ CLI tools..."
   Require-Command "cmake" "Install CMake and add it to PATH, or copy a prebuilt cpp\build folder with the required CLI exes."
+  Import-VsCppBuildEnv
 
   $ConfigureArgs = @("-S", "cpp", "-B", "cpp\build", "-DCMAKE_BUILD_TYPE=Release")
   if (Get-Command "ninja" -ErrorAction SilentlyContinue) {

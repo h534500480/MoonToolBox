@@ -108,6 +108,7 @@ class GridParameters:
     hole_fill_neighbors: int = 5
     overlay_smooth_radius: float = 0.00
     free_gray: int = 254
+    unknown_gray: int = 205
     obstacle_gray: int = 0
     walkable_color: tuple = (0x39, 0xFF, 0x14)
     obstacle_color: tuple = (0xFF, 0x5A, 0x36)
@@ -449,8 +450,10 @@ def write_pgm(path, result, params, tracker=None):
                 cell = result.grid[row_start + x]
                 if cell == OBSTACLE:
                     row[x] = params.obstacle_gray
-                else:
+                elif cell == WALKABLE:
                     row[x] = params.free_gray
+                else:
+                    row[x] = params.unknown_gray
             f.write(row)
             if tracker is not None:
                 tracker.advance(1)

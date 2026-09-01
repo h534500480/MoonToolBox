@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, ref, reactive, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, reactive, watch } from "vue";
 
 import {
   buildBackendImageUrl,
@@ -8,6 +8,7 @@ import {
   fetchLocalTextFile,
   fetchNavRecordingFiles,
   fetchRosDataSourceConfig,
+  fetchRosNavOfflineMapPreview,
   fetchRosRuntimeParams,
   fetchRosTopics,
   fetchMtslashBrowserFavorites,
@@ -23,6 +24,7 @@ import {
   startMtslashBrowser,
 } from "../api/client";
 import type { MtslashBrowserTab, MtslashFavoriteItem } from "../api/client";
+import type { NavOfflineMapPreviewResponse } from "../api/client";
 import type {
   BrowseDialogPayload,
   NavRecordingFileItem,
@@ -32,7 +34,7 @@ import type {
   RosTopicItem,
   ToolDefinition,
 } from "../types";
-import { buildDisplayLabel, inferDisplayKind, type NavViewerDisplay } from "../lib/ros/displayRegistry";
+import { buildDisplayLabel, inferDisplayKind, isPointCloudMessageType, type NavViewerDisplay } from "../lib/ros/displayRegistry";
 import {
   createRosLiveAdapter,
   createSharedRosLiveAdapter,
@@ -101,6 +103,28 @@ interface NavTopicOption {
   label: string;
   type: string;
   note: string;
+}
+
+interface InitialPoseCandidatePayload {
+  x: number;
+  y: number;
+  z: number;
+  roll: number;
+  pitch: number;
+  yaw: number;
+}
+
+interface Nav3DViewerComponentExpose {
+  focusOnNdtPose: () => { ok: boolean; message: string };
+  attachOfflineMapPointCloud: (payload: NavOfflineMapPreviewResponse) => { ok: boolean; message: string };
+  clearOfflineMapPointCloud: () => void;
+  setOfflineMapDisplayMode: (mode: "voxel" | "pointcloud") => { ok: boolean; message: string };
+  attachInitialPosePointCloud: (payload: { topic: string; message: any; color?: string; pointSize?: number; pointColorMode?: "solid" | "layered" }) => { ok: boolean; message: string };
+  attachInitialPoseLatestPointCloud: (topic: string, pointSize?: number) => { ok: boolean; message: string };
+  updateInitialPosePointCloudSize: (pointSize: number) => { ok: boolean; message: string };
+  getInitialPoseCandidate: () => InitialPoseCandidatePayload | null;
+  clearInitialPoseCandidate: () => void;
+  setInitialPoseTransformMode: (mode: "translate" | "rotate") => { ok: boolean; message: string };
 }
 
 interface NavPanelItem {
@@ -393,6 +417,7 @@ const rosSharedSessionStats = ref<SharedRosSessionStats>({
   message: "当前页面还没有建立共享连接",
 });
 const navDelayPanelCollapsed = ref(false);
+const navViewerRef = ref<Nav3DViewerComponentExpose | null>(null);
 const navDelayTopicsInput = ref(NAV_DELAY_DEFAULT_TOPICS.join("\n"));
 const navDelayTopicsApplied = ref(NAV_DELAY_DEFAULT_TOPICS.join("\n"));
 const navDelayStateMap = ref<Record<string, NavDelayTopicState>>({});
@@ -437,6 +462,16 @@ const manualInitialPoseX = ref("");
 const manualInitialPoseY = ref("");
 const manualInitialPoseZ = ref("0");
 const manualInitialPoseYaw = ref("");
+const initialPosePointCloudTopic = ref("/cloud_registered_bl");
+const initialPosePointCloudLoading = ref(false);
+const initialPosePointCloudSize = ref("0.055");
+const initialPoseTransformMode = ref<"translate" | "rotate">("translate");
+const initialPoseCandidateActive = ref(false);
+const initialPoseTopicDropdownOpen = ref(false);
+const offlineMapLoading = ref(false);
+const offlineMapMessage = ref("");
+const offlineMapPreview = ref<NavOfflineMapPreviewResponse | null>(null);
+const offlineMapDisplayMode = ref<"voxel" | "pointcloud">("voxel");
 let costmapTimer: number | undefined;
 let rosSharedStatsTimer: number | undefined;
 let navDelayAdapter: ReturnType<typeof createSharedRosLiveAdapter> | null = null;
@@ -481,6 +516,16 @@ watch(
     navSessionAutoSaved = false;
     rosRuntimeParams.value = null;
     rosRuntimeParamsMessage.value = "";
+    initialPosePointCloudTopic.value = "/cloud_registered_bl";
+    initialPosePointCloudLoading.value = false;
+    initialPosePointCloudSize.value = "0.055";
+    initialPoseTransformMode.value = "translate";
+    initialPoseCandidateActive.value = false;
+    offlineMapLoading.value = false;
+    offlineMapMessage.value = "";
+    offlineMapPreview.value = null;
+    navViewerRef.value?.clearOfflineMapPointCloud();
+    navViewerRef.value?.clearInitialPoseCandidate();
     navDelayPanelCollapsed.value = false;
     navDelayTopicsInput.value = defaultNavDelayTopicsText();
     navDelayTopicsApplied.value = defaultNavDelayTopicsText();
@@ -635,12 +680,27 @@ const pcdMapImageUrl = computed(() => {
 const selectedNavTopicOptions = computed(() =>
   rosTopicOptions.value.filter((item) => selectedNavTopics.value.includes(item.key))
 );
+const initialPosePointCloudTopicOptions = computed(() =>
+  rosTopicOptions.value.filter((item) => inferDisplayKind(item.key, item.type) === "pointcloud")
+);
+const filteredInitialPosePointCloudTopicOptions = computed(() => {
+  const keyword = initialPosePointCloudTopic.value.trim().toLowerCase();
+  if (!keyword) {
+    return initialPosePointCloudTopicOptions.value;
+  }
+  return initialPosePointCloudTopicOptions.value.filter((topic) =>
+    [topic.key, topic.label, topic.type, topic.note].some((value) => value.toLowerCase().includes(keyword))
+  );
+});
 const mergedToolLogs = computed(() => [...props.logs, ...rosRuntimeLogs.value]);
 
 const navActiveSidePanelCount = computed(() => navSidePanels.value.filter((panel) => !panel.paused).length);
 const navActiveFullPanelCount = computed(() => navFullPanels.value.filter((panel) => !panel.paused).length);
 const navDisplayManagerLabel = computed(() =>
   navDisplayManagerCollapsed.value ? `展开显示项管理 (${navMainDisplays.value.length})` : `收起显示项管理 (${navMainDisplays.value.length})`
+);
+const initialPoseModeButtonLabel = computed(() =>
+  navInteractionMode.value === "initialpose" || initialPoseCandidateActive.value ? "取消初始化定位" : "初始化定位"
 );
 const filteredRosTopicOptions = computed(() => {
   const keyword = rosTopicQuery.value.trim().toLowerCase();
@@ -1382,7 +1442,7 @@ function getBrowseMode(fieldKey: string, fieldLabel: string): BrowseDialogPayloa
   if (key.includes("output_dir") || key.endsWith("_dir") || label.includes("output dir") || label.includes("directory") || label.includes("输出目录")) {
     return "open_dir";
   }
-  if (key.includes("input") || key.includes("path") || key.includes("pcd") || key.includes("yaml")) {
+  if (key.includes("input") || key.includes("path") || key.includes("pcd") || key.includes("yaml") || key.includes("pgm")) {
     return "open_file";
   }
   if (key.includes("output") && key.includes("path")) {
@@ -1847,13 +1907,21 @@ function buildRosLiveConfig() {
   };
 }
 
-function yawToQuaternion(yaw: number) {
+function eulerToQuaternion(roll: number, pitch: number, yaw: number) {
+  const halfRoll = roll / 2;
+  const halfPitch = pitch / 2;
   const halfYaw = yaw / 2;
+  const cr = Math.cos(halfRoll);
+  const sr = Math.sin(halfRoll);
+  const cp = Math.cos(halfPitch);
+  const sp = Math.sin(halfPitch);
+  const cy = Math.cos(halfYaw);
+  const sy = Math.sin(halfYaw);
   return {
-    x: 0,
-    y: 0,
-    z: Math.sin(halfYaw),
-    w: Math.cos(halfYaw),
+    x: sr * cp * cy - cr * sp * sy,
+    y: cr * sp * cy + sr * cp * sy,
+    z: cr * cp * sy - sr * sp * cy,
+    w: cr * cp * cy + sr * sp * sy,
   };
 }
 
@@ -1901,7 +1969,15 @@ function rosHeaderStampNow() {
 }
 
 function enterInitialPoseMode() {
-  navInteractionMode.value = navInteractionMode.value === "initialpose" ? "none" : "initialpose";
+  if (navInteractionMode.value === "initialpose" || initialPoseCandidateActive.value || navViewerRef.value?.getInitialPoseCandidate()) {
+    cancelInitialPoseCandidate();
+    return;
+  }
+  const entering = navInteractionMode.value !== "initialpose";
+  if (entering) {
+    navViewerRef.value?.clearInitialPoseCandidate();
+  }
+  navInteractionMode.value = entering ? "initialpose" : "none";
   navControlMessage.value = navInteractionMode.value === "initialpose" ? "已进入初始化定位模式，请在主视图点击并拖动方向。" : "已退出初始化定位模式。";
 }
 
@@ -1910,8 +1986,8 @@ function enterNavGoalMode() {
   navControlMessage.value = navInteractionMode.value === "navgoal" ? "已进入导航目标模式，请在主视图点击并拖动方向。" : "已退出导航目标模式。";
 }
 
-async function publishInitialPose(x: number, y: number, yaw: number, z = 0) {
-  const orientation = yawToQuaternion(yaw);
+async function publishInitialPose(x: number, y: number, yaw: number, z = 0, roll = 0, pitch = 0) {
+  const orientation = eulerToQuaternion(roll, pitch, yaw);
   await publishRosMessage("/initialpose", "geometry_msgs/msg/PoseWithCovarianceStamped", {
     header: {
       stamp: rosHeaderStampNow(),
@@ -1929,9 +2005,9 @@ async function publishInitialPose(x: number, y: number, yaw: number, z = 0) {
       covariance: [
         0.25, 0, 0, 0, 0, 0,
         0, 0.25, 0, 0, 0, 0,
-        0, 0, 0.0, 0, 0, 0,
-        0, 0, 0, 0.0, 0, 0,
-        0, 0, 0, 0, 0.0, 0,
+        0, 0, 0.25, 0, 0, 0,
+        0, 0, 0, 0.0685, 0, 0,
+        0, 0, 0, 0, 0.0685, 0,
         0, 0, 0, 0, 0, 0.0685,
       ],
     },
@@ -1963,6 +2039,255 @@ async function submitManualInitialPose() {
   }
 }
 
+function selectedInitialPosePointCloudOption() {
+  return initialPosePointCloudTopicOptions.value.find((item) => item.key === initialPosePointCloudTopic.value)
+    ?? rosTopicOptions.value.find((item) => item.key === initialPosePointCloudTopic.value)
+    ?? null;
+}
+
+function normalizedInitialPosePointCloudSize() {
+  const parsed = Number(initialPosePointCloudSize.value);
+  return Math.min(0.8, Math.max(0.005, Number.isFinite(parsed) ? parsed : 0.055));
+}
+
+function normalizedOfflineMapVoxelLeaf() {
+  const parsed = Number(formValues.offline_map_voxel_leaf_m || "0.20");
+  return Math.min(5, Math.max(0.01, Number.isFinite(parsed) ? parsed : 0.20));
+}
+
+function normalizedOfflineMapOccupancyVoxel() {
+  const parsed = Number(formValues.offline_map_occupancy_voxel_m || "0.30");
+  return Math.min(2, Math.max(0.05, Number.isFinite(parsed) ? parsed : 0.30));
+}
+
+function normalizedOfflineMapMaxPoints() {
+  const parsed = Number(formValues.offline_map_max_points || "60000");
+  return Math.min(300000, Math.max(1000, Number.isFinite(parsed) ? Math.round(parsed) : 60000));
+}
+
+function normalizedOfflineMapMaxVoxels() {
+  const parsed = Number(formValues.offline_map_max_voxels || "60000");
+  return Math.min(200000, Math.max(1000, Number.isFinite(parsed) ? Math.round(parsed) : 60000));
+}
+
+function offlineMapDisplayedVoxelCount() {
+  const occupancy = offlineMapPreview.value?.occupancy;
+  if (occupancy?.displayed_count && occupancy.displayed_count > 0) {
+    return occupancy.displayed_count;
+  }
+  if (occupancy?.occupied_count && occupancy.occupied_count > 0) {
+    return occupancy.occupied_count;
+  }
+  return offlineMapPreview.value?.pcd?.sampled_count ?? 0;
+}
+
+function offlineMapTotalVoxelCount() {
+  const occupancy = offlineMapPreview.value?.occupancy;
+  if (occupancy?.occupied_count && occupancy.occupied_count > 0) {
+    return occupancy.occupied_count;
+  }
+  return offlineMapDisplayedVoxelCount();
+}
+
+function normalizedInitialPoseBaseHeightOffset() {
+  const parsed = Number(formValues.initial_pose_base_height_offset_m || "0.35");
+  return Math.min(3, Math.max(-1, Number.isFinite(parsed) ? parsed : 0.35));
+}
+
+function normalizedInitialPoseGroundNormalRadius() {
+  const parsed = Number(formValues.initial_pose_ground_normal_radius_m || "0.80");
+  return Math.min(3, Math.max(0.15, Number.isFinite(parsed) ? parsed : 0.80));
+}
+
+function normalizedInitialPoseGroundMaxSlope() {
+  const parsed = Number(formValues.initial_pose_ground_max_slope_deg || "30");
+  return Math.min(75, Math.max(1, Number.isFinite(parsed) ? parsed : 30));
+}
+
+function openInitialPoseTopicDropdown() {
+  initialPoseTopicDropdownOpen.value = true;
+}
+
+function closeInitialPoseTopicDropdown() {
+  initialPoseTopicDropdownOpen.value = false;
+}
+
+function selectInitialPosePointCloudTopic(topic: NavTopicOption) {
+  initialPosePointCloudTopic.value = topic.key;
+  closeInitialPoseTopicDropdown();
+}
+
+function handleInitialPoseTopicInputKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") {
+    closeInitialPoseTopicDropdown();
+    return;
+  }
+  if (event.key === "ArrowDown") {
+    openInitialPoseTopicDropdown();
+  }
+}
+
+function handleDocumentMouseDown(event: MouseEvent) {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    closeInitialPoseTopicDropdown();
+    return;
+  }
+  if (target.closest(".initial-pose-topic-field")) {
+    return;
+  }
+  closeInitialPoseTopicDropdown();
+}
+
+/**
+ * 功能说明：
+ * 为 3D 初始化定位临时订阅一次点云 topic，收到下一帧后立即取消订阅并交给主视图绑定。
+ *
+ * 注意事项：
+ * 1. 优先使用主视图已缓存的最近一帧；没有缓存时再等待订阅后的下一帧。
+ * 2. 超时、成功和异常路径都会释放订阅，避免重复初始化后残留点云监听。
+ */
+async function captureInitialPosePointCloudFrame() {
+  const viewer = navViewerRef.value;
+  if (!viewer?.getInitialPoseCandidate()) {
+    navControlMessage.value = "请先点击“初始化定位”，在主视图拖出候选位姿。";
+    return;
+  }
+  const topic = initialPosePointCloudTopic.value.trim();
+  if (!topic) {
+    navControlMessage.value = "请选择或输入初始化点云 topic。";
+    return;
+  }
+
+  initialPosePointCloudLoading.value = true;
+  navControlMessage.value = `正在抓取 ${topic} 的点云帧...`;
+  let unsubscribe: (() => void) | null = null;
+  let timeoutHandle: number | undefined;
+  try {
+    const pointSize = normalizedInitialPosePointCloudSize();
+    const cachedResult = viewer.attachInitialPoseLatestPointCloud(topic, pointSize);
+    if (cachedResult.ok) {
+      navControlMessage.value = cachedResult.message;
+      return;
+    }
+
+    const option = selectedInitialPosePointCloudOption();
+    const messageType = option?.type || "sensor_msgs/msg/PointCloud2";
+    const adapter = await ensureNavControlAdapterConnected();
+    const message = await new Promise<any>((resolve, reject) => {
+      timeoutHandle = window.setTimeout(() => {
+        unsubscribe?.();
+        unsubscribe = null;
+        reject(new Error(`等待 ${topic} 下一帧点云超时，且主视图没有可用缓存帧`));
+      }, 15000);
+      unsubscribe = adapter.subscribe(topic, messageType, (nextMessage) => {
+        if (timeoutHandle) {
+          window.clearTimeout(timeoutHandle);
+          timeoutHandle = undefined;
+        }
+        unsubscribe?.();
+        unsubscribe = null;
+        resolve(nextMessage);
+      }, { queueLength: 1 });
+    });
+    const result = viewer.attachInitialPosePointCloud({
+      topic,
+      message,
+      color: "#f4d35e",
+      pointSize,
+      pointColorMode: "layered",
+    });
+    navControlMessage.value = result.message;
+  } catch (error) {
+    navControlMessage.value = `抓取初始化点云失败: ${(error as Error).message}`;
+  } finally {
+    if (timeoutHandle) {
+      window.clearTimeout(timeoutHandle);
+    }
+    unsubscribe?.();
+    initialPosePointCloudLoading.value = false;
+  }
+}
+
+async function loadOfflineMapPointCloud() {
+  const pcdPath = formValues.offline_map_pcd?.trim();
+  if (!pcdPath) {
+    offlineMapMessage.value = "请先选择离线地图 PCD。";
+    return;
+  }
+  offlineMapLoading.value = true;
+  offlineMapMessage.value = "正在加载离线地图点云...";
+  try {
+    const result = await fetchRosNavOfflineMapPreview(
+      pcdPath,
+      formValues.offline_map_yaml?.trim() || "",
+      formValues.offline_map_pgm?.trim() || "",
+      String(normalizedOfflineMapVoxelLeaf()),
+      String(normalizedOfflineMapOccupancyVoxel()),
+      String(normalizedOfflineMapMaxPoints()),
+      String(normalizedOfflineMapMaxVoxels()),
+    );
+    offlineMapPreview.value = result;
+    offlineMapDisplayMode.value = "voxel";
+    const attachResult = navViewerRef.value?.attachOfflineMapPointCloud(result);
+    offlineMapMessage.value = attachResult?.message
+      || `已加载离线地图点云: ${result.pcd.sampled_count} / ${result.pcd.input_points} 点`;
+  } catch (error) {
+    const message = (error as Error).message;
+    offlineMapMessage.value = message === "Not Found" || message.includes("404")
+      ? "离线地图点云加载失败: 当前后端还没有加载离线地图接口，请重启 backend 后再试。"
+      : `离线地图点云加载失败: ${message}`;
+  } finally {
+    offlineMapLoading.value = false;
+  }
+}
+
+function clearOfflineMapPointCloud() {
+  navViewerRef.value?.clearOfflineMapPointCloud();
+  offlineMapPreview.value = null;
+  offlineMapDisplayMode.value = "voxel";
+  offlineMapMessage.value = "已清除离线地图点云。";
+}
+
+function setOfflineMapDisplayMode(mode: "voxel" | "pointcloud") {
+  offlineMapDisplayMode.value = mode;
+  const result = navViewerRef.value?.setOfflineMapDisplayMode(mode);
+  offlineMapMessage.value = result?.message || "请先加载离线地图。";
+}
+
+function setInitialPoseTransformMode(mode: "translate" | "rotate") {
+  initialPoseTransformMode.value = mode;
+  const result = navViewerRef.value?.setInitialPoseTransformMode(mode);
+  navControlMessage.value = result?.message || "请先拖出初始化候选位姿。";
+}
+
+function cancelInitialPoseCandidate() {
+  navViewerRef.value?.clearInitialPoseCandidate();
+  navInteractionMode.value = "none";
+  initialPoseCandidateActive.value = false;
+  navControlMessage.value = "已取消初始化候选位姿。";
+}
+
+async function confirmInitialPoseCandidate() {
+  const candidate = navViewerRef.value?.getInitialPoseCandidate() ?? null;
+  if (!candidate) {
+    navControlMessage.value = "当前没有可确认的初始化候选位姿。";
+    return;
+  }
+  navControlLoading.value = true;
+  try {
+    await publishInitialPose(candidate.x, candidate.y, candidate.yaw, candidate.z, candidate.roll, candidate.pitch);
+    navViewerRef.value?.clearInitialPoseCandidate();
+    navInteractionMode.value = "none";
+    initialPoseCandidateActive.value = false;
+    navControlMessage.value = `已下发 3D 初始化定位: (${candidate.x.toFixed(3)}, ${candidate.y.toFixed(3)}, ${candidate.z.toFixed(3)}, roll=${candidate.roll.toFixed(2)}, pitch=${candidate.pitch.toFixed(2)}, yaw=${candidate.yaw.toFixed(2)})`;
+  } catch (error) {
+    navControlMessage.value = `确认初始化定位失败: ${(error as Error).message}`;
+  } finally {
+    navControlLoading.value = false;
+  }
+}
+
 async function publishNavGoal(x: number, y: number, yaw: number) {
   const requestPlanId = nextRequestPlanId();
   await publishRosMessage("/nav2_goal_request", "std_msgs/msg/String", {
@@ -1983,12 +2308,12 @@ async function publishNavGoal(x: number, y: number, yaw: number) {
   navControlMessage.value = `已下发导航目标: ${requestPlanId}`;
 }
 
-async function handleNavViewerInteraction(payload: { mode: "initialpose" | "navgoal"; x: number; y: number; yaw: number }) {
+async function handleNavViewerInteraction(payload: { mode: "initialpose" | "navgoal"; x: number; y: number; z?: number; roll?: number; pitch?: number; yaw: number }) {
   navControlLoading.value = true;
   try {
     if (payload.mode === "initialpose") {
-      await publishInitialPose(payload.x, payload.y, payload.yaw);
-      navControlMessage.value = `已下发初始化定位: (${payload.x.toFixed(2)}, ${payload.y.toFixed(2)}, yaw=${payload.yaw.toFixed(2)})`;
+      initialPoseCandidateActive.value = true;
+      navControlMessage.value = `已生成初始化候选: (${payload.x.toFixed(2)}, ${payload.y.toFixed(2)}, z=${(payload.z ?? 0).toFixed(2)}, yaw=${payload.yaw.toFixed(2)})，请抓取点云后微调并确认。`;
     } else {
       await publishNavGoal(payload.x, payload.y, payload.yaw);
     }
@@ -2355,6 +2680,20 @@ function fieldKind(fieldKey: string) {
   if (fieldKey === "login_session_id") {
     return "hidden";
   }
+  if (
+    props.tool.key === "ros_nav_test"
+    && [
+      "offline_map_pcd",
+      "offline_map_yaml",
+      "offline_map_pgm",
+      "offline_map_voxel_leaf_m",
+      "offline_map_occupancy_voxel_m",
+      "offline_map_max_points",
+      "offline_map_max_voxels",
+    ].includes(fieldKey)
+  ) {
+    return "hidden";
+  }
   if (fieldKey === "login_password") {
     return "password";
   }
@@ -2692,7 +3031,7 @@ function addTopicToMainView(topic: NavTopicOption) {
 }
 
 function createNavPanelFromTopic(topic: NavTopicOption, idPrefix: string): NavPanelItem {
-  const isPointCloudTopic = topic.type === "sensor_msgs/msg/PointCloud2";
+  const isPointCloudTopic = isPointCloudMessageType(topic.type);
   return {
     id: `${idPrefix}-${topic.key.replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "")}`,
     title: `${topic.label}窗`,
@@ -2901,7 +3240,19 @@ watch(
   () => nextTick(drawCostmapFrame)
 );
 
+watch(
+  () => initialPosePointCloudSize.value,
+  () => {
+    navViewerRef.value?.updateInitialPosePointCloudSize(normalizedInitialPosePointCloudSize());
+  }
+);
+
+onMounted(() => {
+  document.addEventListener("mousedown", handleDocumentMouseDown);
+});
+
 onBeforeUnmount(() => {
+  document.removeEventListener("mousedown", handleDocumentMouseDown);
   if (props.tool.key === "ros_nav_test") {
     saveRosNavConfigOnExit();
   }
@@ -3066,6 +3417,10 @@ onBeforeUnmount(() => {
             <div class="stat-chip">
               <span class="stat-chip-label">障碍格</span>
               <strong>{{ props.resultData.obstacle_cells || "0" }}</strong>
+            </div>
+            <div class="stat-chip">
+              <span class="stat-chip-label">未知格</span>
+              <strong>{{ props.resultData.unknown_cells || "0" }}</strong>
             </div>
           </div>
         </section>
@@ -3336,13 +3691,121 @@ data: [0, 0, 100, ...]</pre>
           <p class="section-subtitle">{{ rosSharedSessionStats.message }}</p>
           <div class="nav-control-card">
             <div class="nav-control-card-head">
+              <div class="result-title">离线地图点云</div>
+              <div class="section-subtitle">PCD 会按体素强度下采样后加载，map.yaml/PGM 用于显示地图坐标范围。</div>
+            </div>
+            <div class="offline-map-field-grid">
+              <label class="nav-display-config-item">
+                <span class="kv-key">离线地图 PCD</span>
+                <div class="field-row">
+                  <input v-model="formValues.offline_map_pcd" class="field-input" placeholder="G:/path/map.pcd" />
+                  <button class="field-browse-btn" type="button" @click="browseField('offline_map_pcd', '离线地图 PCD')">选择</button>
+                </div>
+              </label>
+              <label class="nav-display-config-item">
+                <span class="kv-key">map.yaml</span>
+                <div class="field-row">
+                  <input v-model="formValues.offline_map_yaml" class="field-input" placeholder="G:/path/map.yaml" />
+                  <button class="field-browse-btn" type="button" @click="browseField('offline_map_yaml', 'map.yaml')">选择</button>
+                </div>
+              </label>
+              <label class="nav-display-config-item">
+                <span class="kv-key">map.pgm</span>
+                <div class="field-row">
+                  <input v-model="formValues.offline_map_pgm" class="field-input" placeholder="不填则使用 map.yaml 的 image" />
+                  <button class="field-browse-btn" type="button" @click="browseField('offline_map_pgm', 'map.pgm')">选择</button>
+                </div>
+              </label>
+              <label class="nav-display-config-item offline-map-number-field">
+                <span class="kv-key">下采样 m</span>
+                <input v-model="formValues.offline_map_voxel_leaf_m" class="field-input" type="number" min="0.01" max="5" step="0.01" />
+              </label>
+              <label class="nav-display-config-item offline-map-number-field">
+                <span class="kv-key">占据 voxel m</span>
+                <input v-model="formValues.offline_map_occupancy_voxel_m" class="field-input" type="number" min="0.05" max="2" step="0.01" />
+              </label>
+              <label class="nav-display-config-item offline-map-number-field">
+                <span class="kv-key">最大点数</span>
+                <input v-model="formValues.offline_map_max_points" class="field-input" type="number" min="1000" max="300000" step="1000" />
+              </label>
+              <label class="nav-display-config-item offline-map-number-field">
+                <span class="kv-key">最大 voxel</span>
+                <input v-model="formValues.offline_map_max_voxels" class="field-input" type="number" min="1000" max="200000" step="1000" />
+              </label>
+              <label class="nav-display-config-item offline-map-number-field">
+                <span class="kv-key">base 高度偏移 m</span>
+                <input v-model="formValues.initial_pose_base_height_offset_m" class="field-input" type="number" min="-1" max="3" step="0.01" />
+              </label>
+              <label class="nav-display-config-item offline-map-number-field">
+                <span class="kv-key">法线半径 m</span>
+                <input v-model="formValues.initial_pose_ground_normal_radius_m" class="field-input" type="number" min="0.15" max="3" step="0.05" />
+              </label>
+              <label class="nav-display-config-item offline-map-number-field">
+                <span class="kv-key">最大坡度 °</span>
+                <input v-model="formValues.initial_pose_ground_max_slope_deg" class="field-input" type="number" min="1" max="75" step="1" />
+              </label>
+            </div>
+            <div class="offline-map-actions">
+              <button class="primary-btn" type="button" :disabled="offlineMapLoading" @click="loadOfflineMapPointCloud">
+                {{ offlineMapLoading ? "加载中..." : "加载离线点云" }}
+              </button>
+              <button class="secondary-btn" type="button" :disabled="offlineMapLoading || !offlineMapPreview" @click="clearOfflineMapPointCloud">
+                清除离线点云
+              </button>
+              <div class="segmented-control offline-map-display-mode">
+                <button
+                  type="button"
+                  :class="{ active: offlineMapDisplayMode === 'voxel' }"
+                  :disabled="offlineMapLoading || !offlineMapPreview"
+                  @click="setOfflineMapDisplayMode('voxel')"
+                >
+                  占据网格
+                </button>
+                <button
+                  type="button"
+                  :class="{ active: offlineMapDisplayMode === 'pointcloud' }"
+                  :disabled="offlineMapLoading || !offlineMapPreview"
+                  @click="setOfflineMapDisplayMode('pointcloud')"
+                >
+                  点云
+                </button>
+              </div>
+              <span class="nav-viewer-status">
+                {{ offlineMapMessage || "未加载离线地图点云" }}
+              </span>
+            </div>
+            <div v-if="offlineMapPreview" class="stat-strip">
+              <div>
+                <span>输入点数</span>
+                <strong>{{ offlineMapPreview.pcd.input_points }}</strong>
+              </div>
+              <div>
+                <span>显示点数</span>
+                <strong>{{ offlineMapPreview.pcd.sampled_count }}</strong>
+              </div>
+              <div>
+                <span>占据 voxel</span>
+                <strong>{{ offlineMapDisplayedVoxelCount() }} / {{ offlineMapTotalVoxelCount() }}</strong>
+              </div>
+              <div>
+                <span>体素强度</span>
+                <strong>{{ (offlineMapPreview.occupancy?.voxel_m || offlineMapPreview.pcd.voxel_leaf_m).toFixed(2) }}m</strong>
+              </div>
+              <div>
+                <span>PGM 地图</span>
+                <strong>{{ offlineMapPreview.map ? `${offlineMapPreview.map.width}x${offlineMapPreview.map.height}` : "未绑定" }}</strong>
+              </div>
+            </div>
+          </div>
+          <div class="nav-control-card">
+            <div class="nav-control-card-head">
               <div class="result-title">定位与导航控制</div>
-              <div class="section-subtitle">参考 RViz 交互方式，在主视图点击并拖动方向后下发。</div>
+              <div class="section-subtitle">初始化定位会先生成三维候选位姿，可绑定一帧点云微调后再确认下发。</div>
             </div>
 
             <div class="nav-control-grid">
               <button class="primary-btn" type="button" :disabled="navControlLoading" @click="enterInitialPoseMode">
-                {{ navInteractionMode === "initialpose" ? "退出初始化定位" : "初始化定位" }}
+                {{ initialPoseModeButtonLabel }}
               </button>
               <button class="primary-btn" type="button" :disabled="navControlLoading" @click="triggerAutoLocalization">自动定位</button>
               <button class="primary-btn" type="button" :disabled="navControlLoading" @click="enterNavGoalMode">
@@ -3351,6 +3814,76 @@ data: [0, 0, 100, ...]</pre>
               <button class="secondary-btn" type="button" :disabled="navControlLoading" @click="sendNavControlCommand('pause')">暂停</button>
               <button class="secondary-btn" type="button" :disabled="navControlLoading" @click="sendNavControlCommand('resume')">继续</button>
               <button class="secondary-btn" type="button" :disabled="navControlLoading" @click="sendNavControlCommand('cancel')">取消</button>
+            </div>
+            <div class="initial-pose-3d-row">
+              <label class="nav-display-config-item initial-pose-topic-field">
+                <span class="kv-key">点云 Topic</span>
+                <div class="initial-pose-topic-combobox">
+                  <input
+                    v-model="initialPosePointCloudTopic"
+                    class="field-input"
+                    placeholder="/cloud_registered_bl"
+                    autocomplete="off"
+                    @focus="openInitialPoseTopicDropdown"
+                    @input="openInitialPoseTopicDropdown"
+                    @keydown="handleInitialPoseTopicInputKeydown"
+                  />
+                  <button
+                    class="initial-pose-topic-toggle"
+                    type="button"
+                    aria-label="展开点云 Topic"
+                    @mousedown.prevent
+                    @click="initialPoseTopicDropdownOpen = !initialPoseTopicDropdownOpen"
+                  ></button>
+                  <div v-if="initialPoseTopicDropdownOpen" class="initial-pose-topic-menu">
+                    <button
+                      v-for="topic in filteredInitialPosePointCloudTopicOptions"
+                      :key="topic.key"
+                      class="initial-pose-topic-option"
+                      type="button"
+                      @mousedown.prevent="selectInitialPosePointCloudTopic(topic)"
+                    >
+                      <strong>{{ topic.key }}</strong>
+                      <span>{{ topic.label }}</span>
+                    </button>
+                    <div v-if="filteredInitialPosePointCloudTopicOptions.length === 0" class="initial-pose-topic-empty">
+                      没有匹配的点云 topic
+                    </div>
+                  </div>
+                </div>
+              </label>
+              <label class="nav-display-config-item initial-pose-size-field">
+                <span class="kv-key">点大小</span>
+                <input
+                  v-model="initialPosePointCloudSize"
+                  class="field-input"
+                  type="number"
+                  min="0.005"
+                  max="0.8"
+                  step="0.005"
+                />
+              </label>
+              <button class="secondary-btn" type="button" :disabled="navControlLoading || initialPosePointCloudLoading" @click="captureInitialPosePointCloudFrame">
+                {{ initialPosePointCloudLoading ? "抓取中..." : "刷新点云帧" }}
+              </button>
+              <div class="segmented-control initial-pose-transform-toggle">
+                <button
+                  type="button"
+                  :class="{ active: initialPoseTransformMode === 'translate' }"
+                  @click="setInitialPoseTransformMode('translate')"
+                >
+                  平移
+                </button>
+                <button
+                  type="button"
+                  :class="{ active: initialPoseTransformMode === 'rotate' }"
+                  @click="setInitialPoseTransformMode('rotate')"
+                >
+                  旋转
+                </button>
+              </div>
+              <button class="primary-btn" type="button" :disabled="navControlLoading" @click="confirmInitialPoseCandidate">确定初始化位姿</button>
+              <button class="secondary-btn" type="button" :disabled="navControlLoading" @click="cancelInitialPoseCandidate">取消预览</button>
             </div>
             <div class="manual-initial-pose-row">
               <input v-model="manualInitialPoseX" class="field-input compact-input" type="number" step="0.001" placeholder="x" />
@@ -3522,6 +4055,7 @@ data: [0, 0, 100, ...]</pre>
           </div>
 
           <Nav3DViewer
+            ref="navViewerRef"
             :provider="formValues.ros_provider || 'rosbridge'"
             :url="rosDataSourceConfigLoaded ? (formValues.ros_bridge_url || '') : ''"
             :timeout-ms="Number(normalizeRosBridgeTimeoutMs(formValues.timeout_ms))"
@@ -3529,6 +4063,9 @@ data: [0, 0, 100, ...]</pre>
             :displays="navMainDisplays"
             :interaction-mode="navInteractionMode"
             :reconnect-token="rosReconnectToken"
+            :initial-pose-base-height-offset-m="normalizedInitialPoseBaseHeightOffset()"
+            :initial-pose-ground-normal-radius-m="normalizedInitialPoseGroundNormalRadius()"
+            :initial-pose-ground-max-slope-deg="normalizedInitialPoseGroundMaxSlope()"
             @interaction-complete="handleNavViewerInteraction"
             @tf-frames-change="handleTfFramesChange"
             @ros-log="handleRosRuntimeLog"

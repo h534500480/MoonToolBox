@@ -357,6 +357,119 @@ export interface GlobalRelocalizationPcdPreviewResponse {
   points: number[][];
 }
 
+export interface NavOfflineMapInfo {
+  yaml_path: string;
+  image_path: string;
+  resolution: number;
+  origin: number[];
+  width: number;
+  height: number;
+  bounds: Record<string, number>;
+  occupied_thresh?: number;
+  free_thresh?: number;
+  negate?: number;
+}
+
+export interface NavOfflinePcdPreview {
+  path: string;
+  input_points: number;
+  sampled_count: number;
+  voxel_leaf_m: number;
+  input_bounds: Record<string, number>;
+  sampled_bounds: Record<string, number>;
+  points: number[][];
+}
+
+export interface NavOfflineOccupancyPreview {
+  voxel_m: number;
+  occupied_count: number;
+  displayed_count?: number;
+  truncated?: boolean;
+  voxels: number[][];
+}
+
+export interface NavOfflineMapPreviewResponse {
+  pcd: NavOfflinePcdPreview;
+  occupancy: NavOfflineOccupancyPreview;
+  map: NavOfflineMapInfo | null;
+}
+
+export interface NavOfflineMapRaycastResponse {
+  hit: boolean;
+  x?: number;
+  y?: number;
+  z?: number;
+  normal?: number[];
+  neighbor_count?: number;
+  distance_m?: number;
+  confidence?: number;
+  message: string;
+}
+
+export async function fetchRosNavOfflineMapPreview(
+  pcdPath: string,
+  mapYamlPath: string,
+  mapPgmPath = "",
+  voxelLeafM = "0.20",
+  occupancyVoxelM = "0.30",
+  maxPoints = "60000",
+  maxVoxels = "60000"
+): Promise<NavOfflineMapPreviewResponse> {
+  const query = new URLSearchParams({
+    pcd_path: pcdPath,
+    map_yaml_path: mapYamlPath,
+    map_pgm_path: mapPgmPath,
+    voxel_leaf_m: voxelLeafM || "0.20",
+    occupancy_voxel_m: occupancyVoxelM || "0.30",
+    max_points: maxPoints || "60000",
+    max_voxels: maxVoxels || "60000"
+  });
+  const response = await fetch(`${API_BASE}/tools/ros_nav_test/offline-map-preview?${query.toString()}`);
+  if (!response.ok) {
+    let detail = `离线地图预览请求失败: HTTP ${response.status}`;
+    try {
+      const data = await response.json();
+      detail = data.detail ?? detail;
+    } catch {
+      const text = await response.text().catch(() => "");
+      if (text.trim()) {
+        detail = `${detail}: ${text.trim().slice(0, 500)}`;
+      }
+    }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+export async function raycastRosNavOfflineMap(payload: {
+  origin: number[];
+  direction: number[];
+  max_distance_m?: number;
+  normal_radius_m?: number;
+  ground_max_slope_deg?: number;
+  clip_bounds?: Record<string, number>;
+  use_visible_voxels?: boolean;
+}): Promise<NavOfflineMapRaycastResponse> {
+  const response = await fetch(`${API_BASE}/tools/ros_nav_test/offline-map-raycast`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    let detail = "Failed to raycast offline map";
+    try {
+      const data = await response.json();
+      detail = data.detail ?? detail;
+    } catch {
+      // Keep fallback message.
+    }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
 export interface GlobalRelocalizationCandidatesResponse {
   path: string;
   candidate_count: number;

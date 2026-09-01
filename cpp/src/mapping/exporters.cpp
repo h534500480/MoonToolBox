@@ -183,9 +183,12 @@ void write_pgm(const std::filesystem::path& path, const GridResult& result, cons
     for (int row = result.height - 1; row >= 0; --row) {
         for (int col = 0; col < result.width; ++col) {
             const auto cell = result.grid[static_cast<std::size_t>(row) * static_cast<std::size_t>(result.width) + static_cast<std::size_t>(col)];
-            const std::uint8_t value = (cell == static_cast<std::uint8_t>(CellType::Obstacle))
-                ? static_cast<std::uint8_t>(params.obstacle_gray)
-                : static_cast<std::uint8_t>(params.free_gray);
+            std::uint8_t value = static_cast<std::uint8_t>(params.unknown_gray);
+            if (cell == static_cast<std::uint8_t>(CellType::Obstacle)) {
+                value = static_cast<std::uint8_t>(params.obstacle_gray);
+            } else if (cell == static_cast<std::uint8_t>(CellType::Walkable)) {
+                value = static_cast<std::uint8_t>(params.free_gray);
+            }
             out.write(reinterpret_cast<const char*>(&value), 1);
         }
     }
@@ -197,6 +200,7 @@ void write_yaml(const std::filesystem::path& path, const std::string& pgm_name, 
         throw std::runtime_error("failed to create yaml");
     }
     out << "image: " << pgm_name << "\n";
+    out << "mode: trinary\n";
     out << "resolution: " << result.resolution << "\n";
     out << "origin: [" << result.origin_x << ", " << result.origin_y << ", 0.0]\n";
     out << "negate: " << params.negate << "\n";
