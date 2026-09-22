@@ -18,7 +18,7 @@
 
 开发前端 5180，后端/生产静态页面 8100。Python 用工作区 .venv，CLI 位于 cpp/build。配置、录制、测试输出受 ignore 管理。
 
-本分支 worktree 与原工作区分离，原项目未跟踪文件未覆盖。旧首页、收藏、Python GUI、网络扫描、回放、其他导出及 Android 产物已移除。
+本分支 worktree 与原工作区分离，原项目未跟踪文件未覆盖。旧首页、收藏、Python GUI、网络扫描、回放及其他导出已移除。当前保留 frontend/android 原生工程和本地文件/点云预览能力；网页构建资源须经 Capacitor sync 更新，Android 交互适配方案见 docs/ANDROID_ADAPTATION_PLAN.md，方案尚未实施。
 
 IMU 标定工具 key 为 `imu_calibration`，路由 `/tools/imu-calibration`，左上角标题按钮可切换进入。当前支持 `sensor_msgs/msg/Imu` 或 `sensor_msgs/Imu` 且 `serialization_format=cdr` 的 rosbag2 SQLite3 `.db3`，不依赖 Windows 本机 ROS2；输出 gyro/accel 三轴 Allan deviation、noise density、random walk、bias instability 和 YAML 预览。部分驱动可能把 `linear_acceleration` 按 g 发布，页面当前按消息原单位展示。
 
