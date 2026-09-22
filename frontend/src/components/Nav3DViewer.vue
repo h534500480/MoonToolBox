@@ -2,24 +2,69 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import * as THREE from "three";
+import { createPlatformArena } from "../lib/scene/platformArena";
+import { platformState } from "../platform/ui";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
+import { CombinedPoseControls } from "../lib/scene/combinedPoseControls";
+import { poseVisualScale } from "../lib/scene/poseVisualScale";
+import { routeInsertionYaw } from "../lib/navigationTasks";
 
 import { raycastRosNavOfflineMap } from "../api/client";
 import type { NavViewerDisplay } from "../lib/ros/displayRegistry";
-import { createSharedRosLiveAdapter, type RosLiveConfig } from "../lib/ros/liveAdapter";
+import {
+  createOfflineVoxelRender,
+  voxelSurfaceColor,
+} from "../lib/ros/offlineVoxelRender";
+import {
+  configureVoxelGrowthAttributes,
+  createVoxelGrowthGeometry,
+  createVoxelGrowthMaterial,
+  setVoxelGrowthMaterialMode,
+  updateVoxelGrowthTime,
+} from "../lib/ros/voxelGrowth";
+import {
+  createSharedRosLiveAdapter,
+  type RosLiveConfig,
+} from "../lib/ros/liveAdapter";
 
-interface NavViewerExpose {
+import type {
+  TaskPose,
+  TaskPoint,
+  TaskScene,
+  TaskRouteInsertion,
+} from "../lib/navigationTasks";
+
+type OfflineMapDisplayMode = "voxel" | "pointcloud" | "render";
+
+interface OfflineMapVisualSettings {
+  displayMode?: OfflineMapDisplayMode;
+  pointSize?: number;
+  pointColor?: string;
+  voxelColor?: string;
+}
+
+interface NavViewerExpose extends TaskScene {
   focusOnNdtPose: () => { ok: boolean; message: string };
-  attachOfflineMapPointCloud: (payload: OfflineMapPointCloudPayload) => { ok: boolean; message: string };
+  attachOfflineMapPointCloud: (payload: OfflineMapPointCloudPayload) => {
+    ok: boolean;
+    message: string;
+  };
   clearOfflineMapPointCloud: () => void;
-  setOfflineMapDisplayMode: (mode: "voxel" | "pointcloud") => { ok: boolean; message: string };
-  attachInitialPosePointCloud: (payload: InitialPosePointCloudPayload) => { ok: boolean; message: string };
-  attachInitialPoseLatestPointCloud: (topic: string) => { ok: boolean; message: string };
-  updateInitialPosePointCloudSize: (pointSize: number) => { ok: boolean; message: string };
+  setOfflineMapDisplayMode: (mode: OfflineMapDisplayMode) => {
+    ok: boolean;
+    message: string;
+  };
+  updateOfflineMapVisualSettings: (settings: OfflineMapVisualSettings) => void;
+  attachInitialPosePointCloud: (payload: InitialPosePointCloudPayload) => {
+    ok: boolean;
+    message: string;
+  };
+  updateInitialPosePointCloudSize: (pointSize: number) => {
+    ok: boolean;
+    message: string;
+  };
   getInitialPoseCandidate: () => InitialPoseCandidatePayload | null;
   clearInitialPoseCandidate: () => void;
-  setInitialPoseTransformMode: (mode: "translate" | "rotate") => { ok: boolean; message: string };
 }
 
 const props = defineProps<{
@@ -27,18 +72,42 @@ const props = defineProps<{
   url: string;
   timeoutMs: number;
   fixedFrame: string;
+  robotPoseFrame?: string;
   displays: NavViewerDisplay[];
-  interactionMode?: "none" | "initialpose" | "navgoal";
+  interactionMode?: "none" | "initialpose" | "navgoal" | "waypoint";
+  taskPoints?: TaskPoint[];
+  taskEditing?: boolean;
   reconnectToken?: number;
   initialPoseBaseHeightOffsetM?: number;
   initialPoseGroundNormalRadiusM?: number;
   initialPoseGroundMaxSlopeDeg?: number;
+  offlineClipPanelOpen?: boolean;
 }>();
 
 const emit = defineEmits<{
-  interactionComplete: [payload: { mode: "initialpose" | "navgoal"; x: number; y: number; z?: number; roll?: number; pitch?: number; yaw: number }];
+  taskPoseChange: [pose: TaskPose];
+  taskPosePlaced: [pose: TaskPose];
+  taskPointSelect: [point: TaskPoint];
+  taskRouteInsert: [insertion: TaskRouteInsertion];
+  interactionComplete: [
+    payload: {
+      mode: "initialpose" | "navgoal";
+      x: number;
+      y: number;
+      z?: number;
+      roll?: number;
+      pitch?: number;
+      yaw: number;
+    },
+  ];
   tfFramesChange: [payload: { topic: string; frames: string[] }];
-  rosLog: [payload: { source: string; level: "info" | "warning" | "error"; message: string }];
+  rosLog: [
+    payload: {
+      source: string;
+      level: "info" | "warning" | "error";
+      message: string;
+    },
+  ];
 }>();
 
 interface InitialPosePointCloudPayload {
@@ -101,6 +170,28 @@ interface OfflineMapPointCloudPayload {
   map: OfflineMapInfoPayload | null;
 }
 
+interface SceneFadeMaterialState {
+  material: THREE.Material;
+  from: number;
+  to: number;
+}
+
+interface SceneFadeItem {
+  object: THREE.Object3D;
+  startedAt: number;
+  durationMs: number;
+  disposeAfter: boolean;
+  materials: SceneFadeMaterialState[];
+}
+
+interface OfflineRenderEnvironmentTransition {
+  startedAt: number;
+  durationMs: number;
+  from: number;
+  to: number;
+  disposeOnDone: boolean;
+}
+
 const mountRef = ref<HTMLDivElement | null>(null);
 const connectionLabel = ref("未连接");
 const sceneStatus = ref("等待显示项");
@@ -124,6 +215,7 @@ interface TfTransformSample {
   parentFrame: string;
   matrixToParent: THREE.Matrix4;
   stampMs: number | null;
+  receivedAtMs: number;
   staticTransform: boolean;
 }
 
@@ -139,11 +231,16 @@ const OBSTACLE_ZONE_DEFAULTS = {
   },
 } as const;
 
+let arena: ReturnType<typeof createPlatformArena> | null = null;
+let lastFrameTime = performance.now();
+let lastRobotPose: THREE.Matrix4 | null = null;
+let hasConnected = false;
+let previousDemo = true;
 let renderer: THREE.WebGLRenderer | null = null;
 let scene: THREE.Scene | null = null;
 let camera: THREE.PerspectiveCamera | null = null;
 let controls: OrbitControls | null = null;
-let transformControls: TransformControls | null = null;
+let transformControls: CombinedPoseControls | null = null;
 let transformControlsHelper: THREE.Object3D | null = null;
 let animationFrame = 0;
 let rosAdapter: ReturnType<typeof createSharedRosLiveAdapter> | null = null;
@@ -161,9 +258,21 @@ let initialPosePointCloud: THREE.Points | null = null;
 let offlineMapGroup: THREE.Group | null = null;
 let offlineMapPoints: THREE.Points | null = null;
 let offlineMapVoxelMesh: THREE.InstancedMesh | null = null;
+let offlineVoxelRender: ReturnType<typeof createOfflineVoxelRender> | null =
+  null;
 let offlineMapRawPositions: Float32Array | null = null;
 let offlineMapVoxelCenters: Float32Array | null = null;
 let offlineMapVoxelSize = 0.1;
+let offlineMapPointSize = 0.06;
+let offlineMapPointColor = "#d7dee8";
+let offlineMapVoxelColor = "#a79d86";
+let offlineVoxelAnimationStartMs = 0;
+let offlineVoxelAnimationDurationSeconds = 0;
+let offlineVoxelAnimationVersion = 0;
+let offlineRenderEnvironmentTransition: OfflineRenderEnvironmentTransition | null =
+  null;
+let offlineSceneAnchorStartMs = 0;
+let offlineSceneAnchorUntilMs = 0;
 let offlineMapOriginalBounds: BoundsPayload | null = null;
 let offlineMapClipBounds: BoundsPayload | null = null;
 let offlineClipDragStartX = 0;
@@ -176,6 +285,7 @@ const unsubscribeMap = new Map<string, () => void>();
 const supportTfUnsubscribeMap = new Map<string, () => void>();
 const mapMeshByTopic = new Map<string, THREE.Object3D>();
 const mapTextureByTopic = new Map<string, THREE.CanvasTexture>();
+const sceneFadeItems: SceneFadeItem[] = [];
 const pathLineByTopic = new Map<string, THREE.Line>();
 const tfGroupByTopic = new Map<string, THREE.Group>();
 const tfFrameNodeCacheByTopic = new Map<string, Map<string, THREE.Group>>();
@@ -192,7 +302,10 @@ const latestMessageByTopic = new Map<string, any>();
 const sourceFrameByTopic = new Map<string, string>();
 const sourceStampMsByTopic = new Map<string, number | null>();
 const baseLocalMatrixByTopic = new Map<string, THREE.Matrix4>();
-const tfTransformHistoryByTopic = new Map<string, Map<string, TfTransformSample[]>>();
+const tfTransformHistoryByTopic = new Map<
+  string,
+  Map<string, TfTransformSample[]>
+>();
 const tfFrameSignatureByTopic = new Map<string, string>();
 const raycaster = new THREE.Raycaster();
 const interactionPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
@@ -203,9 +316,7 @@ const supportTfTopics = [robotPoseTfTopic, "/tf", "/tf_static"];
 
 const hudDisplayCount = computed(() => props.displays.length);
 const currentInteractionMode = computed(() => props.interactionMode || "none");
-const canConsumeTopicData = computed(
-  () => connectionLabel.value === "已连接"
-);
+const canConsumeTopicData = computed(() => connectionLabel.value === "已连接");
 const emptyStateText = computed(() => {
   if (connectionLabel.value === "未配置地址") {
     return "请先填写 rosbridge 地址，再启动三维主视图。";
@@ -222,6 +333,8 @@ const interactionHintText = computed(() => {
   if (currentInteractionMode.value === "initialpose") {
     return "初始化定位模式: 左键点击地图并拖动方向，松开后生成候选位姿。";
   }
+  if (currentInteractionMode.value === "waypoint")
+    return "任务点位：点击地图并拖动设置朝向，松开后可用控件微调。";
   if (currentInteractionMode.value === "navgoal") {
     return "导航目标模式: 左键点击地图并拖动方向，松开后下发 /nav2_goal_request。";
   }
@@ -231,11 +344,41 @@ const baseLinkHudTone = computed(() => {
   if (connectionLabel.value !== "已连接") {
     return "warning";
   }
-  return baseLinkHudText.value.includes("等待") || baseLinkHudText.value.includes("不可用") ? "warning" : "success";
+  return baseLinkHudText.value.includes("等待") ||
+    baseLinkHudText.value.includes("不可用")
+    ? "warning"
+    : "success";
 });
 const offlineClipActive = ref(false);
 const activeOfflineClipFace = ref<keyof BoundsPayload | null>(null);
-const offlineMapDisplayMode = ref<"voxel" | "pointcloud">("voxel");
+// 悬停高亮状态：与 activeOfflineClipFace 共同驱动同轴读数行亮起
+const hoveredOfflineClipFace = ref<keyof BoundsPayload | null>(null);
+// 裁剪边界响应式镜像：offlineMapClipBounds 是普通对象，模板读数依赖此副本驱动刷新
+const offlineClipBoundsView = ref<BoundsPayload | null>(null);
+const offlineMapDisplayMode = ref<OfflineMapDisplayMode>("voxel");
+
+// 面板展开状态由父组件侧边工具栏统一管理（与话题列表互斥）
+const offlineClipPanelVisible = computed(
+  () => offlineClipActive.value && props.offlineClipPanelOpen !== false,
+);
+
+// 悬停或拖拽中的面所在轴，用于读数行联动高亮
+const highlightedOfflineClipAxis = computed<"x" | "y" | "z" | null>(() => {
+  const face = activeOfflineClipFace.value ?? hoveredOfflineClipFace.value;
+  return face ? clipAxisForFace(face) : null;
+});
+
+function setHoveredOfflineClipFace(face: keyof BoundsPayload | null) {
+  hoveredOfflineClipFace.value = face;
+}
+
+function syncOfflineClipBoundsView() {
+  offlineClipBoundsView.value = offlineMapClipBounds
+    ? { ...offlineMapClipBounds }
+    : null;
+}
+const offlineVoxelBaseColor = new THREE.Color(offlineMapVoxelColor);
+const offlineVoxelColor = new THREE.Color();
 
 function hasOfflineMapRaycastCache() {
   return Boolean(offlineMapRawPositions && offlineMapRawPositions.length > 0);
@@ -248,66 +391,69 @@ function initializeScene() {
   }
 
   scene = new THREE.Scene();
-  scene.background = new THREE.Color("#08111d");
+  scene.background = new THREE.Color("#e8e4da");
   scene.up.set(0, 0, 1);
+  scene.fog = new THREE.Fog("#e8e4da", 34, 80);
 
-  camera = new THREE.PerspectiveCamera(52, 1, 0.01, 500);
+  camera = new THREE.PerspectiveCamera(38, 1, 0.1, 500);
   camera.up.set(0, 0, 1);
-  camera.position.set(7, -9, 8);
+  camera.position.set(-8.2, -8.2, 9);
   camera.lookAt(0, 0, 0);
 
   renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
-  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.setClearColor("#08111d", 1);
+  renderer.setClearColor("#e8e4da", 1);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFShadowMap;
   renderer.domElement.style.display = "block";
   renderer.domElement.style.width = "100%";
   renderer.domElement.style.height = "100%";
-  renderer.domElement.addEventListener("webglcontextlost", handleWebglContextLost, false);
-  renderer.domElement.addEventListener("webglcontextrestored", handleWebglContextRestored, false);
+  renderer.domElement.addEventListener(
+    "webglcontextlost",
+    handleWebglContextLost,
+    false,
+  );
+  renderer.domElement.addEventListener(
+    "webglcontextrestored",
+    handleWebglContextRestored,
+    false,
+  );
   host.appendChild(renderer.domElement);
 
   controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
-  controls.target.set(0, 0, 0);
+  controls.target.set(0, 0, 0.25);
+  controls.dampingFactor = 0.08;
+  controls.rotateSpeed = 0.55;
   controls.screenSpacePanning = false;
   controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
   controls.mouseButtons.RIGHT = THREE.MOUSE.PAN;
 
-  transformControls = new TransformControls(camera, renderer.domElement);
-  transformControls.setSpace("local");
-  transformControls.setMode("translate");
-  transformControls.enabled = false;
-  transformControls.addEventListener("dragging-changed", (event) => {
-    if (controls) {
-      controls.enabled = !event.value;
-    }
-  });
-  transformControls.addEventListener("objectChange", () => {
-    const candidate = getInitialPoseCandidate();
-    if (!candidate) {
-      return;
-    }
-    sceneStatus.value = `初始化候选: x=${candidate.x.toFixed(3)}, y=${candidate.y.toFixed(3)}, z=${candidate.z.toFixed(3)}, roll=${candidate.roll.toFixed(2)}, pitch=${candidate.pitch.toFixed(2)}, yaw=${candidate.yaw.toFixed(2)}`;
-  });
+  transformControls = new CombinedPoseControls(
+    camera,
+    renderer.domElement,
+    (dragging) => {
+      if (controls) controls.enabled = !dragging;
+    },
+    () => {
+      const candidate = getInitialPoseCandidate();
+      if (!candidate) {
+        return;
+      }
+      if (props.taskEditing) {
+        emit("taskPoseChange", candidate);
+        return;
+      }
+      sceneStatus.value = `初始化候选: x=${candidate.x.toFixed(3)}, y=${candidate.y.toFixed(3)}, z=${candidate.z.toFixed(3)}, roll=${candidate.roll.toFixed(2)}, pitch=${candidate.pitch.toFixed(2)}, yaw=${candidate.yaw.toFixed(2)}`;
+    },
+    (event) => !!pickTaskMarker(event),
+  );
   transformControlsHelper = transformControls.getHelper();
   transformControlsHelper.visible = false;
   scene.add(transformControlsHelper);
 
-  const ambient = new THREE.AmbientLight("#c7dcff", 1.35);
-  scene.add(ambient);
-
-  const keyLight = new THREE.DirectionalLight("#9cc9ff", 1.2);
-  keyLight.position.set(7, -5, 10);
-  scene.add(keyLight);
-
-  const grid = new THREE.GridHelper(40, 40, "#2f8cff", "#1d3555");
-  grid.rotateX(Math.PI / 2);
-  scene.add(grid);
-
-  const axes = new THREE.AxesHelper(1.4);
-  scene.add(axes);
-
+  arena = createPlatformArena(scene);
   fitRendererSize();
   animate();
 }
@@ -334,7 +480,58 @@ function animate() {
     return;
   }
   animationFrame = window.requestAnimationFrame(animate);
-  controls?.update();
+  const now = performance.now();
+  const dt = (now - lastFrameTime) / 1000;
+  lastFrameTime = now;
+  const connected = connectionLabel.value === "已连接";
+  if (connected) hasConnected = true;
+  const demo = !hasConnected && !hasOfflineMapRaycastCache();
+  const anchoringOfflineScene = now < offlineSceneAnchorUntilMs;
+  const keepDemoControls = demo || anchoringOfflineScene;
+  platformState.demo = keepDemoControls;
+  platformState.connected = connected;
+  platformState.lidarActive =
+    connected && Date.now() - platformState.lidarAt < 3000;
+  const robotTf = connected ? resolveRobotTfPose() : null;
+  const tf = robotTf?.matrix ?? null;
+  const anchor = resolvePrimaryPoseAnchor();
+  const poseObject = anchor ? poseObjectByTopic.get(anchor.topic) : null;
+  if (tf) lastRobotPose = tf.clone();
+  else if (connected && poseObject?.visible) {
+    poseObject.updateMatrixWorld();
+    lastRobotPose = poseObject.matrixWorld.clone();
+  }
+  const offlineFallbackPose =
+    !connected && hasOfflineMapRaycastCache() ? new THREE.Matrix4() : null;
+  arena?.update(dt, demo, connected, lastRobotPose ?? offlineFallbackPose);
+  arena?.setDemoOpacity(
+    demo ? 1 : anchoringOfflineScene ? 1 - offlineSceneAnchorProgress(now) : 0,
+  );
+  updateOfflineAnchorCamera(now);
+  controls!.enablePan = !keepDemoControls;
+  controls!.minDistance = keepDemoControls ? 5 : 0.1;
+  controls!.maxDistance = keepDemoControls ? 17 : 10000;
+  controls!.minPolarAngle = keepDemoControls ? 0.5 : 0.01;
+  controls!.maxPolarAngle = keepDemoControls ? 1.12 : Math.PI - 0.01;
+  if (keepDemoControls !== previousDemo) {
+    scene.fog = keepDemoControls ? new THREE.Fog("#e8e4da", 34, 80) : null;
+    previousDemo = keepDemoControls;
+  }
+  updateOfflineVoxelGrowthFrame(now);
+  updateSceneFadeItems(now);
+  if (lastRobotPose && !demo) {
+    const p = new THREE.Vector3(),
+      q = new THREE.Quaternion(),
+      scale = new THREE.Vector3();
+    lastRobotPose.decompose(p, q, scale);
+    platformState.pose = `x  ${p.x.toFixed(3)}    y  ${p.y.toFixed(3)}\nz  ${p.z.toFixed(3)}    yaw  ${quaternionToYaw(q).toFixed(3)}${connected ? "" : "\n连接断开 · 最后有效位姿"}`;
+    if (robotTf?.fallback)
+      platformState.pose += "\n使用 base_link · body 暂不可用";
+  }
+  // 拖动位姿时冻结相机阻尼，避免选中控件前残留的相机运动改变拖动平面。
+  if (!transformControls?.dragging) controls?.update();
+  transformControls?.updateScale();
+  updateTaskMarkerScales();
   renderer.render(scene, camera);
 }
 
@@ -382,6 +579,97 @@ function clearThreeObject(object: THREE.Object3D) {
   });
 }
 
+function materialFadeValue(material: THREE.Material) {
+  if (
+    material instanceof THREE.ShaderMaterial &&
+    material.uniforms.uFade &&
+    typeof material.uniforms.uFade.value === "number"
+  ) {
+    return material.uniforms.uFade.value;
+  }
+  return material.opacity;
+}
+
+function setMaterialFadeValue(material: THREE.Material, value: number) {
+  if (
+    material instanceof THREE.ShaderMaterial &&
+    material.uniforms.uFade &&
+    typeof material.uniforms.uFade.value === "number"
+  ) {
+    material.uniforms.uFade.value = value;
+    return;
+  }
+  material.transparent = true;
+  material.opacity = value;
+  material.needsUpdate = true;
+}
+
+function collectObjectMaterials(object: THREE.Object3D) {
+  const materials = new Set<THREE.Material>();
+  object.traverse((child) => {
+    const material = (child as THREE.Mesh).material;
+    if (Array.isArray(material)) {
+      material.forEach((item) => materials.add(item));
+    } else if (material) {
+      materials.add(material);
+    }
+  });
+  return [...materials];
+}
+
+function queueObjectFade(
+  object: THREE.Object3D,
+  to: number,
+  durationMs: number,
+  disposeAfter: boolean,
+) {
+  const materials = collectObjectMaterials(object).map((material) => ({
+    material,
+    from: materialFadeValue(material),
+    to,
+  }));
+  materials.forEach(({ material, from }) => {
+    setMaterialFadeValue(material, from);
+  });
+  sceneFadeItems.push({
+    object,
+    startedAt: performance.now(),
+    durationMs,
+    disposeAfter,
+    materials,
+  });
+}
+
+function updateSceneFadeItems(now: number) {
+  for (let index = sceneFadeItems.length - 1; index >= 0; index -= 1) {
+    const item = sceneFadeItems[index];
+    const progress = THREE.MathUtils.clamp(
+      (now - item.startedAt) / item.durationMs,
+      0,
+      1,
+    );
+    item.materials.forEach(({ material, from, to }) => {
+      setMaterialFadeValue(material, THREE.MathUtils.lerp(from, to, progress));
+    });
+    if (progress < 1) {
+      continue;
+    }
+    sceneFadeItems.splice(index, 1);
+    if (item.disposeAfter) {
+      clearThreeObject(item.object);
+    }
+  }
+}
+
+function clearSceneFadeItems() {
+  while (sceneFadeItems.length > 0) {
+    const item = sceneFadeItems.pop();
+    if (item?.disposeAfter) {
+      clearThreeObject(item.object);
+    }
+  }
+}
+
 function handleWebglContextLost(event: Event) {
   event.preventDefault();
   webglContextLost = true;
@@ -400,15 +688,24 @@ function handleWebglContextRestored() {
 }
 
 function teardownRenderer() {
+  arena?.dispose();
+  arena = null;
   clearInteractionPreview();
   clearInitialPoseCandidate();
   clearOfflineMapPointCloud();
   clearAllTopicVisuals();
+  clearSceneFadeItems();
   tfTransformHistoryByTopic.clear();
   tfFrameNodeCacheByTopic.clear();
   if (renderer?.domElement) {
-    renderer.domElement.removeEventListener("webglcontextlost", handleWebglContextLost);
-    renderer.domElement.removeEventListener("webglcontextrestored", handleWebglContextRestored);
+    renderer.domElement.removeEventListener(
+      "webglcontextlost",
+      handleWebglContextLost,
+    );
+    renderer.domElement.removeEventListener(
+      "webglcontextrestored",
+      handleWebglContextRestored,
+    );
   }
   controls?.dispose();
   controls = null;
@@ -527,10 +824,9 @@ function clearAllTopicVisuals() {
   updateBaseLinkHud();
 }
 
-function replaceObjectGeometry<T extends THREE.Object3D & { geometry?: THREE.BufferGeometry | THREE.Geometry | null }>(
-  object: T,
-  nextGeometry: THREE.BufferGeometry,
-) {
+function replaceObjectGeometry<
+  T extends THREE.Object3D & { geometry?: THREE.BufferGeometry | null },
+>(object: T, nextGeometry: THREE.BufferGeometry) {
   const previousGeometry = object.geometry;
   if (previousGeometry && "dispose" in previousGeometry) {
     previousGeometry.dispose();
@@ -543,7 +839,9 @@ function getDisplayByTopic(topic: string) {
 }
 
 function normalizeFrameId(frameId: unknown) {
-  return String(frameId ?? "").trim().replace(/^\/+/, "");
+  return String(frameId ?? "")
+    .trim()
+    .replace(/^\/+/, "");
 }
 
 function normalizeTfTopicKey(topic: unknown) {
@@ -558,7 +856,9 @@ function tfReferenceTopicKeys(topic: string) {
   if (normalizedTopic === "tf") {
     return ["tf", "tf_static"];
   }
-  return ["tf_static", normalizedTopic].filter((item, index, array) => item && array.indexOf(item) === index);
+  return ["tf_static", normalizedTopic].filter(
+    (item, index, array) => item && array.indexOf(item) === index,
+  );
 }
 
 function tfHistoryMapForTopic(topic: string, createIfMissing = false) {
@@ -583,7 +883,9 @@ function tfFramesForTopic(topic: string) {
       frameSet.add(frameName);
     });
   });
-  return Array.from(frameSet).sort((left, right) => left.localeCompare(right, "zh-CN"));
+  return Array.from(frameSet).sort((left, right) =>
+    left.localeCompare(right, "zh-CN"),
+  );
 }
 
 function tfSamplesForFrame(topic: string, frameId: string) {
@@ -609,24 +911,64 @@ function currentFixedFrame() {
   return normalizeFrameId(props.fixedFrame || "map");
 }
 
+/**
+ * 返回用于机器人模型、HUD 和任务取点的 TF 子坐标系。
+ * 该值由 ROS 接入设置提供；保留 body 默认值以兼容没有保存此项的旧配置。
+ */
+function currentRobotPoseFrame() {
+  return normalizeFrameId(props.robotPoseFrame || "body") || "body";
+}
+let lastRobotTfNotice = "";
+/** 三处机器人位姿入口共用相同解析；仅兼容旧默认 body，不猜测任意自定义坐标系。 */
+function resolveRobotTfPose() {
+  const requested = currentRobotPoseFrame();
+  const resolve = (frame: string) =>
+    resolveFrameTransformToFixed(frame, null, robotPoseTfTopic) ||
+    resolveFrameTransformToFixed(frame);
+  let matrix = resolve(requested);
+  let frame = requested;
+  if (
+    !matrix &&
+    requested === "body" &&
+    tfSamplesForFrame(robotPoseTfTopic, requested).length === 0 &&
+    tfSamplesForFrame("/tf", requested).length === 0
+  ) {
+    matrix = resolve("base_link");
+    if (matrix) frame = "base_link";
+  }
+  if (!matrix) return null;
+  if (frame !== requested && lastRobotTfNotice !== frame) {
+    emitRosLog(
+      "warning",
+      "机器人坐标系 body 未收到 TF，当前使用完整 base_link 变换链；可在 ROS 接入设置中指定机器人坐标系。",
+    );
+  }
+  lastRobotTfNotice = frame;
+  return { matrix, frame, fallback: frame !== requested };
+}
+
 function buildTransformMatrix(translation: any, rotation: any) {
   const position = new THREE.Vector3(
     Number(translation?.x ?? 0),
     Number(translation?.y ?? 0),
-    Number(translation?.z ?? 0)
+    Number(translation?.z ?? 0),
   );
   const quaternion = new THREE.Quaternion(
     Number(rotation?.x ?? 0),
     Number(rotation?.y ?? 0),
     Number(rotation?.z ?? 0),
-    Number(rotation?.w ?? 1)
+    Number(rotation?.w ?? 1),
   );
   const matrix = new THREE.Matrix4();
   matrix.compose(position, quaternion, new THREE.Vector3(1, 1, 1));
   return matrix;
 }
 
-function selectTfTransformSample(frameId: string, targetStampMs: number | null, tfTopic = "/tf") {
+function selectTfTransformSample(
+  frameId: string,
+  targetStampMs: number | null,
+  tfTopic = "/tf",
+) {
   const samples = tfSamplesForFrame(tfTopic, frameId);
   if (samples.length === 0) {
     return null;
@@ -651,7 +993,12 @@ function selectTfTransformSample(frameId: string, targetStampMs: number | null, 
   return bestSample ?? staticSample ?? samples[samples.length - 1] ?? null;
 }
 
-function resolveFrameTransformToFixed(frameId: unknown, targetStampMs: number | null = null, tfTopic = "/tf", trail = new Set<string>()): THREE.Matrix4 | null {
+function resolveFrameTransformToFixed(
+  frameId: unknown,
+  targetStampMs: number | null = null,
+  tfTopic = "/tf",
+  trail = new Set<string>(),
+): THREE.Matrix4 | null {
   const sourceFrame = normalizeFrameId(frameId);
   const fixedFrame = currentFixedFrame();
   if (!sourceFrame || sourceFrame === fixedFrame) {
@@ -665,7 +1012,12 @@ function resolveFrameTransformToFixed(frameId: unknown, targetStampMs: number | 
     return null;
   }
   trail.add(sourceFrame);
-  const parentMatrix = resolveFrameTransformToFixed(sample.parentFrame, targetStampMs, tfTopic, trail);
+  const parentMatrix = resolveFrameTransformToFixed(
+    sample.parentFrame,
+    targetStampMs,
+    tfTopic,
+    trail,
+  );
   trail.delete(sourceFrame);
   if (!parentMatrix) {
     return null;
@@ -673,7 +1025,10 @@ function resolveFrameTransformToFixed(frameId: unknown, targetStampMs: number | 
   return parentMatrix.clone().multiply(sample.matrixToParent);
 }
 
-function transformPositionArrayInPlace(positions: number[], transformMatrix: THREE.Matrix4 | null) {
+function transformPositionArrayInPlace(
+  positions: number[],
+  transformMatrix: THREE.Matrix4 | null,
+) {
   if (!transformMatrix) {
     return;
   }
@@ -694,17 +1049,30 @@ function cacheTopicLocalMatrix(topic: string, matrix: THREE.Matrix4) {
 function composeLocalMatrix(
   position: THREE.Vector3 = new THREE.Vector3(),
   quaternion: THREE.Quaternion = new THREE.Quaternion(),
-  scale: THREE.Vector3 = new THREE.Vector3(1, 1, 1)
+  scale: THREE.Vector3 = new THREE.Vector3(1, 1, 1),
 ) {
   const matrix = new THREE.Matrix4();
   matrix.compose(position, quaternion, scale);
   return matrix;
 }
 
-function applyObjectFrameTransform(topic: string, object: THREE.Object3D, frameId: unknown, targetStampMs: number | null = null, tfTopic = "/tf") {
-  const transformMatrix = resolveFrameTransformToFixed(frameId, targetStampMs, tfTopic);
-  const baseMatrix = baseLocalMatrixByTopic.get(topic) ?? new THREE.Matrix4().identity();
-  const finalMatrix = transformMatrix ? transformMatrix.clone().multiply(baseMatrix) : baseMatrix.clone();
+function applyObjectFrameTransform(
+  topic: string,
+  object: THREE.Object3D,
+  frameId: unknown,
+  targetStampMs: number | null = null,
+  tfTopic = "/tf",
+) {
+  const transformMatrix = resolveFrameTransformToFixed(
+    frameId,
+    targetStampMs,
+    tfTopic,
+  );
+  const baseMatrix =
+    baseLocalMatrixByTopic.get(topic) ?? new THREE.Matrix4().identity();
+  const finalMatrix = transformMatrix
+    ? transformMatrix.clone().multiply(baseMatrix)
+    : baseMatrix.clone();
   const position = new THREE.Vector3();
   const quaternion = new THREE.Quaternion();
   const scale = new THREE.Vector3();
@@ -716,14 +1084,70 @@ function applyObjectFrameTransform(topic: string, object: THREE.Object3D, frameI
 }
 
 function updateTopicTransforms() {
-  mapMeshByTopic.forEach((object, topic) => applyObjectFrameTransform(topic, object, sourceFrameByTopic.get(topic), sourceStampMsByTopic.get(topic) ?? null));
-  pathLineByTopic.forEach((object, topic) => applyObjectFrameTransform(topic, object, sourceFrameByTopic.get(topic), sourceStampMsByTopic.get(topic) ?? null));
-  poseObjectByTopic.forEach((object, topic) => applyObjectFrameTransform(topic, object, sourceFrameByTopic.get(topic), sourceStampMsByTopic.get(topic) ?? null));
-  pointCloudByTopic.forEach((object, topic) => applyObjectFrameTransform(topic, object, sourceFrameByTopic.get(topic), sourceStampMsByTopic.get(topic) ?? null));
-  laserByTopic.forEach((object, topic) => applyObjectFrameTransform(topic, object, sourceFrameByTopic.get(topic), sourceStampMsByTopic.get(topic) ?? null));
-  markerObjectByTopic.forEach((object, topic) => applyObjectFrameTransform(topic, object, sourceFrameByTopic.get(topic), sourceStampMsByTopic.get(topic) ?? null));
-  twistObjectByTopic.forEach((object, topic) => applyObjectFrameTransform(topic, object, sourceFrameByTopic.get(topic), sourceStampMsByTopic.get(topic) ?? null));
-  obstacleZoneGroupByTopic.forEach((object, topic) => applyObjectFrameTransform(topic, object, sourceFrameByTopic.get(topic), sourceStampMsByTopic.get(topic) ?? null));
+  mapMeshByTopic.forEach((object, topic) =>
+    applyObjectFrameTransform(
+      topic,
+      object,
+      sourceFrameByTopic.get(topic),
+      sourceStampMsByTopic.get(topic) ?? null,
+    ),
+  );
+  pathLineByTopic.forEach((object, topic) =>
+    applyObjectFrameTransform(
+      topic,
+      object,
+      sourceFrameByTopic.get(topic),
+      sourceStampMsByTopic.get(topic) ?? null,
+    ),
+  );
+  poseObjectByTopic.forEach((object, topic) =>
+    applyObjectFrameTransform(
+      topic,
+      object,
+      sourceFrameByTopic.get(topic),
+      sourceStampMsByTopic.get(topic) ?? null,
+    ),
+  );
+  pointCloudByTopic.forEach((object, topic) =>
+    applyObjectFrameTransform(
+      topic,
+      object,
+      sourceFrameByTopic.get(topic),
+      sourceStampMsByTopic.get(topic) ?? null,
+    ),
+  );
+  laserByTopic.forEach((object, topic) =>
+    applyObjectFrameTransform(
+      topic,
+      object,
+      sourceFrameByTopic.get(topic),
+      sourceStampMsByTopic.get(topic) ?? null,
+    ),
+  );
+  markerObjectByTopic.forEach((object, topic) =>
+    applyObjectFrameTransform(
+      topic,
+      object,
+      sourceFrameByTopic.get(topic),
+      sourceStampMsByTopic.get(topic) ?? null,
+    ),
+  );
+  twistObjectByTopic.forEach((object, topic) =>
+    applyObjectFrameTransform(
+      topic,
+      object,
+      sourceFrameByTopic.get(topic),
+      sourceStampMsByTopic.get(topic) ?? null,
+    ),
+  );
+  obstacleZoneGroupByTopic.forEach((object, topic) =>
+    applyObjectFrameTransform(
+      topic,
+      object,
+      sourceFrameByTopic.get(topic),
+      sourceStampMsByTopic.get(topic) ?? null,
+    ),
+  );
 }
 
 function safePointCloudSize(display: NavViewerDisplay) {
@@ -734,8 +1158,16 @@ function safePointCloudSize(display: NavViewerDisplay) {
   return Math.min(0.6, Math.max(0.01, value));
 }
 
-function safeTfLabelSize(display: NavViewerDisplay) {
-  const value = Number(display.tfLabelSize ?? 0.5);
+function safePointCloudEmissiveIntensity(display: NavViewerDisplay) {
+  const value = Number(display.pointEmissiveIntensity ?? 0);
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.min(3, Math.max(0, value));
+}
+
+function safeTfLabelSize(display?: NavViewerDisplay) {
+  const value = Number(display?.tfLabelSize ?? 0.5);
   if (!Number.isFinite(value)) {
     return 0.5;
   }
@@ -748,6 +1180,67 @@ function pointColorForDisplay(display: NavViewerDisplay) {
 
 function pointColorModeForDisplay(display: NavViewerDisplay) {
   return display.pointColorMode === "layered" ? "layered" : "solid";
+}
+
+function amplifiedPointColor(colorText: string, intensity: number) {
+  const color = new THREE.Color(colorText);
+  color.multiplyScalar(1 + intensity * 0.75);
+  return color;
+}
+
+function applyPointCloudMaterialConfig(
+  material: THREE.PointsMaterial,
+  display: NavViewerDisplay,
+  useLayeredColors = pointColorModeForDisplay(display) === "layered",
+) {
+  const emissiveIntensity = safePointCloudEmissiveIntensity(display);
+  material.vertexColors = useLayeredColors;
+  material.color = useLayeredColors
+    ? amplifiedPointColor("#ffffff", emissiveIntensity)
+    : amplifiedPointColor(pointColorForDisplay(display), emissiveIntensity);
+  material.size = safePointCloudSize(display);
+  material.opacity = emissiveIntensity > 0 ? 0.98 : 0.96;
+  material.transparent = true;
+  material.depthWrite = emissiveIntensity <= 0;
+  material.depthTest = true;
+  material.blending =
+    emissiveIntensity > 0 ? THREE.AdditiveBlending : THREE.NormalBlending;
+  material.toneMapped = emissiveIntensity <= 0;
+  material.needsUpdate = true;
+}
+
+function syncPointCloudLayeredColorAttribute(
+  points: THREE.Points,
+  display: NavViewerDisplay,
+) {
+  const geometry = points.geometry;
+  const positionAttribute = geometry.getAttribute("position");
+  if (
+    pointColorModeForDisplay(display) !== "layered" ||
+    !positionAttribute ||
+    !(positionAttribute instanceof THREE.BufferAttribute) ||
+    positionAttribute.itemSize !== 3
+  ) {
+    return;
+  }
+  const positions = Array.from(positionAttribute.array as ArrayLike<number>);
+  const colors = buildPointCloudColorBuffer(
+    positions,
+    pointColorForDisplay(display),
+    safePointCloudEmissiveIntensity(display),
+  );
+  const colorAttribute = geometry.getAttribute("color");
+  if (
+    colorAttribute &&
+    colorAttribute instanceof THREE.BufferAttribute &&
+    colorAttribute.itemSize === 3 &&
+    colorAttribute.array.length === colors.length
+  ) {
+    (colorAttribute.array as Float32Array).set(colors);
+    colorAttribute.needsUpdate = true;
+  } else {
+    geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  }
 }
 
 function pathColorForDisplay(display: NavViewerDisplay) {
@@ -774,23 +1267,28 @@ function mapOpacityForDisplay(display: NavViewerDisplay) {
   return Math.min(1, Math.max(0.05, value));
 }
 
+function normalizeOccupancyGridData(data: unknown) {
+  if (Array.isArray(data)) {
+    return data;
+  }
+  if (ArrayBuffer.isView(data) && "length" in data) {
+    return Array.from(data as unknown as ArrayLike<number>);
+  }
+  return [];
+}
+
 function syncPointCloudDisplayConfigs(displays: NavViewerDisplay[]) {
   displays.forEach((display) => {
     if (display.kind !== "pointcloud") {
       return;
     }
     const points = pointCloudByTopic.get(display.topic);
-    const material = points?.material;
+    const material = points?.material as THREE.PointsMaterial | undefined;
     if (!points || !material || Array.isArray(material)) {
       return;
     }
-    material.vertexColors = pointColorModeForDisplay(display) === "layered";
-    material.color = new THREE.Color(pointColorModeForDisplay(display) === "layered" ? "#ffffff" : pointColorForDisplay(display));
-    material.size = safePointCloudSize(display);
-    material.opacity = 0.96;
-    material.transparent = true;
-    material.depthWrite = false;
-    material.needsUpdate = true;
+    syncPointCloudLayeredColorAttribute(points, display);
+    applyPointCloudMaterialConfig(material, display);
   });
 }
 
@@ -800,7 +1298,7 @@ function syncPathDisplayConfigs(displays: NavViewerDisplay[]) {
       return;
     }
     const line = pathLineByTopic.get(display.topic);
-    const material = line?.material;
+    const material = line?.material as THREE.LineBasicMaterial | undefined;
     if (!line || !material || Array.isArray(material)) {
       return;
     }
@@ -847,11 +1345,14 @@ function syncTwistDisplayConfigs(displays: NavViewerDisplay[]) {
     if (display.kind !== "twist") {
       return;
     }
-    const root = twistObjectByTopic.get(display.topic) as THREE.Group | undefined;
+    const root = twistObjectByTopic.get(display.topic) as
+      THREE.Group | undefined;
     if (!root) {
       return;
     }
-    const arrow = root.getObjectByName("twist-arrow") as THREE.ArrowHelper | null;
+    const arrow = root.getObjectByName(
+      "twist-arrow",
+    ) as THREE.ArrowHelper | null;
     if (!arrow) {
       return;
     }
@@ -878,7 +1379,8 @@ function syncPoseDisplayConfigs(displays: NavViewerDisplay[]) {
       if (!material || Array.isArray(material) || !("color" in material)) {
         return;
       }
-      (material as THREE.MeshStandardMaterial | THREE.MeshBasicMaterial).color = color;
+      (material as THREE.MeshStandardMaterial | THREE.MeshBasicMaterial).color =
+        color;
       material.needsUpdate = true;
     });
   });
@@ -923,7 +1425,10 @@ function shouldConsumeDisplayMessage(display: NavViewerDisplay) {
   if (latestDisplay.kind !== "pointcloud") {
     return true;
   }
-  const hzLimit = Math.max(0, Math.round(Number(latestDisplay.hzLimit ?? 0) || 0));
+  const hzLimit = Math.max(
+    0,
+    Math.round(Number(latestDisplay.hzLimit ?? 0) || 0),
+  );
   if (hzLimit <= 0) {
     return true;
   }
@@ -971,7 +1476,7 @@ function renderOccupancyGrid(topic: string, message: any) {
   const originY = Number(message?.info?.origin?.position?.y ?? 0);
   const originZ = Number(message?.info?.origin?.position?.z ?? 0);
   const originRotation = message?.info?.origin?.orientation ?? {};
-  const data = Array.isArray(message?.data) ? message.data : [];
+  const data = normalizeOccupancyGridData(message?.data);
   if (width <= 0 || height <= 0 || resolution <= 0 || data.length === 0) {
     return;
   }
@@ -1013,20 +1518,27 @@ function renderOccupancyGrid(topic: string, message: any) {
 
   const oldMesh = mapMeshByTopic.get(topic);
   if (oldMesh) {
-    clearThreeObject(oldMesh);
+    queueObjectFade(oldMesh, 0, 450, true);
+    mapMeshByTopic.delete(topic);
   }
-  mapTextureByTopic.get(topic)?.dispose();
+  mapTextureByTopic.delete(topic);
 
-  const geometry = new THREE.PlaneGeometry(width * resolution, height * resolution);
-  const material = new THREE.MeshBasicMaterial({
-    map: texture,
-    transparent: true,
-    opacity: mapOpacityForDisplay(display ?? {
+  const geometry = new THREE.PlaneGeometry(
+    width * resolution,
+    height * resolution,
+  );
+  const targetOpacity = mapOpacityForDisplay(
+    display ?? {
       topic,
       messageType: "nav_msgs/msg/OccupancyGrid",
       kind: "map",
       label: topic,
-    }),
+    },
+  );
+  const material = new THREE.MeshBasicMaterial({
+    map: texture,
+    transparent: true,
+    opacity: 0,
     side: THREE.DoubleSide,
     depthWrite: false,
     polygonOffset: true,
@@ -1034,7 +1546,11 @@ function renderOccupancyGrid(topic: string, message: any) {
     polygonOffsetUnits: 1,
   });
   const plane = new THREE.Mesh(geometry, material);
-  plane.position.set((width * resolution) / 2, (height * resolution) / 2, -0.05);
+  plane.position.set(
+    (width * resolution) / 2,
+    (height * resolution) / 2,
+    -0.05,
+  );
 
   const root = new THREE.Group();
   root.position.set(originX, originY, originZ);
@@ -1042,17 +1558,26 @@ function renderOccupancyGrid(topic: string, message: any) {
     Number(originRotation.x ?? 0),
     Number(originRotation.y ?? 0),
     Number(originRotation.z ?? 0),
-    Number(originRotation.w ?? 1)
+    Number(originRotation.w ?? 1),
   );
   root.add(plane);
   sourceFrameByTopic.set(topic, normalizeFrameId(message?.header?.frame_id));
   sourceStampMsByTopic.set(topic, extractHeaderStampMs(message));
-  cacheTopicLocalMatrix(topic, composeLocalMatrix(root.position.clone(), root.quaternion.clone()));
-  applyObjectFrameTransform(topic, root, message?.header?.frame_id, sourceStampMsByTopic.get(topic) ?? null);
+  cacheTopicLocalMatrix(
+    topic,
+    composeLocalMatrix(root.position.clone(), root.quaternion.clone()),
+  );
+  applyObjectFrameTransform(
+    topic,
+    root,
+    message?.header?.frame_id,
+    sourceStampMsByTopic.get(topic) ?? null,
+  );
 
   scene.add(root);
   mapMeshByTopic.set(topic, root);
   mapTextureByTopic.set(topic, texture);
+  queueObjectFade(root, targetOpacity, 650, false);
 }
 
 function renderPath(topic: string, message: any) {
@@ -1070,39 +1595,53 @@ function renderPath(topic: string, message: any) {
     return new THREE.Vector3(
       Number(position.x ?? 0),
       Number(position.y ?? 0),
-      Number(position.z ?? 0) + 0.05
+      Number(position.z ?? 0) + 0.05,
     );
   });
 
   const geometry = new THREE.BufferGeometry().setFromPoints(points);
   let line = pathLineByTopic.get(topic);
   if (!line) {
-    const material = new THREE.LineBasicMaterial({ color: pathColorForDisplay(display ?? {
-      topic,
-      messageType: "nav_msgs/Path",
-      kind: "path",
-      label: topic,
-    }), linewidth: 2 });
+    const material = new THREE.LineBasicMaterial({
+      color: pathColorForDisplay(
+        display ?? {
+          topic,
+          messageType: "nav_msgs/Path",
+          kind: "path",
+          label: topic,
+        },
+      ),
+      linewidth: 2,
+    });
     line = new THREE.Line(geometry, material);
     scene.add(line);
     pathLineByTopic.set(topic, line);
   } else {
     replaceObjectGeometry(line, geometry);
-    const material = line.material;
+    const material = line.material as THREE.LineBasicMaterial;
     if (material && !Array.isArray(material)) {
-      material.color = new THREE.Color(pathColorForDisplay(display ?? {
-        topic,
-        messageType: "nav_msgs/Path",
-        kind: "path",
-        label: topic,
-      }));
+      material.color = new THREE.Color(
+        pathColorForDisplay(
+          display ?? {
+            topic,
+            messageType: "nav_msgs/Path",
+            kind: "path",
+            label: topic,
+          },
+        ),
+      );
       material.needsUpdate = true;
     }
   }
   sourceFrameByTopic.set(topic, normalizeFrameId(message?.header?.frame_id));
   sourceStampMsByTopic.set(topic, extractHeaderStampMs(message));
   cacheTopicLocalMatrix(topic, composeLocalMatrix());
-  applyObjectFrameTransform(topic, line, message?.header?.frame_id, sourceStampMsByTopic.get(topic) ?? null);
+  applyObjectFrameTransform(
+    topic,
+    line,
+    message?.header?.frame_id,
+    sourceStampMsByTopic.get(topic) ?? null,
+  );
   line.visible = true;
 }
 
@@ -1121,29 +1660,46 @@ function sampleBsplinePositions(message: any) {
     return [];
   }
   if (controlPoints.length <= 2 || order <= 1) {
-    return controlPoints.flatMap((point: any) => [Number(point?.x ?? 0), Number(point?.y ?? 0), Number(point?.z ?? 0)]);
+    return controlPoints.flatMap((point: any) => [
+      Number(point?.x ?? 0),
+      Number(point?.y ?? 0),
+      Number(point?.z ?? 0),
+    ]);
   }
 
   const degree = Math.max(1, order - 1);
   const knots = Array.isArray(message?.knots)
-    ? message.knots.map((value: unknown) => Number(value)).filter((value: number) => Number.isFinite(value))
+    ? message.knots
+        .map((value: unknown) => Number(value))
+        .filter((value: number) => Number.isFinite(value))
     : [];
   const expectedKnotCount = controlPoints.length + order;
   if (knots.length < expectedKnotCount) {
-    return controlPoints.flatMap((point: any) => [Number(point?.x ?? 0), Number(point?.y ?? 0), Number(point?.z ?? 0)]);
+    return controlPoints.flatMap((point: any) => [
+      Number(point?.x ?? 0),
+      Number(point?.y ?? 0),
+      Number(point?.z ?? 0),
+    ]);
   }
 
   const start = knots[Math.min(degree, knots.length - 1)];
   const end = knots[Math.max(degree, knots.length - degree - 1)];
   if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
-    return controlPoints.flatMap((point: any) => [Number(point?.x ?? 0), Number(point?.y ?? 0), Number(point?.z ?? 0)]);
+    return controlPoints.flatMap((point: any) => [
+      Number(point?.x ?? 0),
+      Number(point?.y ?? 0),
+      Number(point?.z ?? 0),
+    ]);
   }
 
-  const points = controlPoints.map((point: any) => new THREE.Vector3(
-    Number(point?.x ?? 0),
-    Number(point?.y ?? 0),
-    Number(point?.z ?? 0),
-  ));
+  const points = controlPoints.map(
+    (point: any) =>
+      new THREE.Vector3(
+        Number(point?.x ?? 0),
+        Number(point?.y ?? 0),
+        Number(point?.z ?? 0),
+      ),
+  );
   const sampleCount = Math.max(24, Math.min(240, controlPoints.length * 12));
   const positions: number[] = [];
 
@@ -1165,13 +1721,16 @@ function sampleBsplinePositions(message: any) {
   function evaluatePoint(t: number) {
     const clampedT = Math.min(end - 1e-6, Math.max(start, t));
     const span = findSpan(clampedT);
-    const work = Array.from({ length: degree + 1 }, (_, index) => points[span - degree + index].clone());
+    const work = Array.from({ length: degree + 1 }, (_, index) =>
+      points[span - degree + index].clone(),
+    );
     for (let level = 1; level <= degree; level += 1) {
       for (let index = degree; index >= level; index -= 1) {
         const knotLeft = knots[span - degree + index];
         const knotRight = knots[span + 1 + index - level];
         const denominator = knotRight - knotLeft;
-        const alpha = denominator > 1e-6 ? (clampedT - knotLeft) / denominator : 0;
+        const alpha =
+          denominator > 1e-6 ? (clampedT - knotLeft) / denominator : 0;
         work[index].lerp(work[index - 1], 1 - alpha);
       }
     }
@@ -1196,23 +1755,42 @@ function renderBspline(display: NavViewerDisplay, message: any) {
   let line = pathLineByTopic.get(topic);
   if (!line) {
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.Float32BufferAttribute(sampledPositions, 3));
-    const material = new THREE.LineBasicMaterial({ color: pathColorForDisplay(latestDisplay) });
+    geometry.setAttribute(
+      "position",
+      new THREE.Float32BufferAttribute(sampledPositions, 3),
+    );
+    const material = new THREE.LineBasicMaterial({
+      color: pathColorForDisplay(latestDisplay),
+    });
     line = new THREE.Line(geometry, material);
     scene?.add(line);
     pathLineByTopic.set(topic, line);
   } else {
-    replaceObjectGeometry(line, new THREE.BufferGeometry().setAttribute("position", new THREE.Float32BufferAttribute(sampledPositions, 3)));
-    const material = line.material;
+    replaceObjectGeometry(
+      line,
+      new THREE.BufferGeometry().setAttribute(
+        "position",
+        new THREE.Float32BufferAttribute(sampledPositions, 3),
+      ),
+    );
+    const material = line.material as THREE.LineBasicMaterial;
     if (material && !Array.isArray(material)) {
       material.color = new THREE.Color(pathColorForDisplay(latestDisplay));
       material.needsUpdate = true;
     }
   }
-  sourceFrameByTopic.set(topic, normalizeFrameId(message?.header?.frame_id) || currentFixedFrame());
+  sourceFrameByTopic.set(
+    topic,
+    normalizeFrameId(message?.header?.frame_id) || currentFixedFrame(),
+  );
   sourceStampMsByTopic.set(topic, extractHeaderStampMs(message));
   cacheTopicLocalMatrix(topic, composeLocalMatrix());
-  applyObjectFrameTransform(topic, line, sourceFrameByTopic.get(topic), sourceStampMsByTopic.get(topic) ?? null);
+  applyObjectFrameTransform(
+    topic,
+    line,
+    sourceFrameByTopic.get(topic),
+    sourceStampMsByTopic.get(topic) ?? null,
+  );
   line.visible = true;
 }
 
@@ -1235,7 +1813,10 @@ function normalizePointCloudBytes(data: unknown): Uint8Array | null {
 }
 
 function resolveFieldOffset(fields: any[], fieldName: string) {
-  const match = fields.find((field) => String(field?.name ?? "").toLowerCase() === fieldName);
+  const match = fields.find(
+    (field: { name: string }) =>
+      String(field?.name ?? "").toLowerCase() === fieldName,
+  );
   return typeof match?.offset === "number" ? match.offset : -1;
 }
 
@@ -1265,7 +1846,11 @@ function pointColorForTopic(topic: string) {
  * 2. 高度分层基于点云自身的中位高度参考面，而不是简单依赖世界坐标 z 的全局范围。
  * 3. 为了避免每帧全量排序，统计只使用固定上限采样点估计参考面和局部范围。
  */
-function buildPointCloudColorBuffer(positions: number[], baseColorText: string) {
+function buildPointCloudColorBuffer(
+  positions: number[],
+  baseColorText: string,
+  emissiveIntensity = 0,
+) {
   const pointCount = Math.floor(positions.length / 3);
   const colors = new Float32Array(pointCount * 3);
   if (pointCount <= 0) {
@@ -1273,11 +1858,17 @@ function buildPointCloudColorBuffer(positions: number[], baseColorText: string) 
   }
 
   const statsSampleCount = Math.min(pointCount, 1024);
-  const statsSampleStep = Math.max(1, Math.floor(pointCount / statsSampleCount));
+  const statsSampleStep = Math.max(
+    1,
+    Math.floor(pointCount / statsSampleCount),
+  );
   const zSamples: number[] = [];
   for (let index = 0; index < positions.length; index += 3) {
     const z = positions[index + 2];
-    if (((index / 3) % statsSampleStep) === 0 && zSamples.length < statsSampleCount) {
+    if (
+      (index / 3) % statsSampleStep === 0 &&
+      zSamples.length < statsSampleCount
+    ) {
       zSamples.push(z);
     }
   }
@@ -1288,26 +1879,59 @@ function buildPointCloudColorBuffer(positions: number[], baseColorText: string) 
   const sortedZValues = [...zSamples].sort((left, right) => left - right);
   const medianIndex = Math.floor(sortedZValues.length / 2);
   const medianZ = sortedZValues[medianIndex];
-  const upperQuartileZ = sortedZValues[Math.min(sortedZValues.length - 1, Math.floor(sortedZValues.length * 0.75))];
-  const upperReferenceRange = Math.max(0.08, upperQuartileZ - medianZ, sortedZValues[sortedZValues.length - 1] - medianZ);
+  const upperQuartileZ =
+    sortedZValues[
+      Math.min(
+        sortedZValues.length - 1,
+        Math.floor(sortedZValues.length * 0.75),
+      )
+    ];
+  const upperReferenceRange = Math.max(
+    0.08,
+    upperQuartileZ - medianZ,
+    sortedZValues[sortedZValues.length - 1] - medianZ,
+  );
   const complementaryColor = new THREE.Color().setHSL(
     (baseHsl.h + 0.5) % 1,
     Math.min(1, Math.max(0.45, baseHsl.s * 0.95 + 0.06)),
     Math.min(0.68, Math.max(0.26, baseHsl.l * 0.9)),
   );
   const color = new THREE.Color();
+  const colorBoost = 1 + Math.min(3, Math.max(0, emissiveIntensity)) * 0.75;
 
-  for (let pointIndex = 0, index = 0; index < positions.length; index += 3, pointIndex += 1) {
+  for (
+    let pointIndex = 0, index = 0;
+    index < positions.length;
+    index += 3, pointIndex += 1
+  ) {
     const z = positions[index + 2];
     const relativeHeight = (z - medianZ) / upperReferenceRange;
     const positiveHeightRatio = Math.min(1, Math.max(0, relativeHeight));
-    const negativeHeightRatio = Math.min(1, Math.max(0, -relativeHeight * 0.45));
+    const negativeHeightRatio = Math.min(
+      1,
+      Math.max(0, -relativeHeight * 0.45),
+    );
     const obstacleBlend = positiveHeightRatio * positiveHeightRatio;
-    color.copy(baseColor).lerp(complementaryColor, Math.min(0.82, obstacleBlend * 0.78));
+    color
+      .copy(baseColor)
+      .lerp(complementaryColor, Math.min(0.82, obstacleBlend * 0.78));
     const currentHsl = color.getHSL({ h: 0, s: 0, l: 0 });
-    const saturation = Math.min(1, Math.max(0.38, currentHsl.s + obstacleBlend * 0.08 - negativeHeightRatio * 0.04));
-    const lightness = Math.min(0.72, Math.max(0.24, currentHsl.l - obstacleBlend * 0.06 - negativeHeightRatio * 0.02));
+    const saturation = Math.min(
+      1,
+      Math.max(
+        0.38,
+        currentHsl.s + obstacleBlend * 0.08 - negativeHeightRatio * 0.04,
+      ),
+    );
+    const lightness = Math.min(
+      0.72,
+      Math.max(
+        0.24,
+        currentHsl.l - obstacleBlend * 0.06 - negativeHeightRatio * 0.02,
+      ),
+    );
     color.setHSL(currentHsl.h, saturation, lightness);
+    color.multiplyScalar(colorBoost);
     const offset = pointIndex * 3;
     colors[offset] = color.r;
     colors[offset + 1] = color.g;
@@ -1347,14 +1971,27 @@ function createMapYamlReference(mapInfo: OfflineMapInfoPayload | null) {
   const yaw = Number(origin[2] ?? 0);
   const widthM = Number(mapInfo.width) * Number(mapInfo.resolution);
   const heightM = Number(mapInfo.height) * Number(mapInfo.resolution);
-  if (!Number.isFinite(widthM) || !Number.isFinite(heightM) || widthM <= 0 || heightM <= 0) {
+  if (
+    !Number.isFinite(widthM) ||
+    !Number.isFinite(heightM) ||
+    widthM <= 0 ||
+    heightM <= 0
+  ) {
     return null;
   }
 
   const group = new THREE.Group();
   group.name = "offline-map-yaml-reference";
-  const centerLocal = new THREE.Vector3(widthM / 2, heightM / 2, -0.015).applyAxisAngle(new THREE.Vector3(0, 0, 1), yaw);
-  group.position.set(originX + centerLocal.x, originY + centerLocal.y, centerLocal.z);
+  const centerLocal = new THREE.Vector3(
+    widthM / 2,
+    heightM / 2,
+    -0.015,
+  ).applyAxisAngle(new THREE.Vector3(0, 0, 1), yaw);
+  group.position.set(
+    originX + centerLocal.x,
+    originY + centerLocal.y,
+    centerLocal.z,
+  );
   group.rotation.z = yaw;
 
   const planeMaterial = new THREE.MeshBasicMaterial({
@@ -1402,7 +2039,11 @@ function createMapYamlReference(mapInfo: OfflineMapInfoPayload | null) {
   ];
   const border = new THREE.Line(
     new THREE.BufferGeometry().setFromPoints(borderPoints),
-    new THREE.LineBasicMaterial({ color: "#8cd867", transparent: true, opacity: 0.86 }),
+    new THREE.LineBasicMaterial({
+      color: "#8cd867",
+      transparent: true,
+      opacity: 0.86,
+    }),
   );
   border.name = "offline-map-yaml-border";
   group.add(border);
@@ -1417,13 +2058,229 @@ function updateOfflineMapGeometry() {
   updateOfflineMapVoxelGeometry();
 }
 
+function disposeOfflineVoxelRender() {
+  offlineVoxelRender?.dispose();
+  offlineVoxelRender = null;
+  offlineRenderEnvironmentTransition = null;
+  if (offlineMapVoxelMesh) {
+    setVoxelGrowthMaterialMode(offlineMapVoxelMesh.material, "voxel");
+    updateVoxelGrowthTime(
+      offlineMapVoxelMesh.material,
+      offlineVoxelAnimationDurationSeconds || 9999,
+    );
+  }
+}
+
+function currentOfflineRenderEnvironmentProgress(now = performance.now()) {
+  if (!offlineRenderEnvironmentTransition) {
+    return offlineMapDisplayMode.value === "render" ? 1 : 0;
+  }
+  const transition = offlineRenderEnvironmentTransition;
+  const progress = THREE.MathUtils.clamp(
+    (now - transition.startedAt) / transition.durationMs,
+    0,
+    1,
+  );
+  return THREE.MathUtils.lerp(transition.from, transition.to, progress);
+}
+
+function startOfflineRenderEnvironmentTransition(
+  to: number,
+  disposeOnDone: boolean,
+  from = currentOfflineRenderEnvironmentProgress(),
+) {
+  offlineRenderEnvironmentTransition = {
+    startedAt: performance.now(),
+    durationMs: 650,
+    from,
+    to,
+    disposeOnDone,
+  };
+}
+
+function updateOfflineRenderEnvironmentTransition(now: number) {
+  if (!offlineVoxelRender || !offlineRenderEnvironmentTransition) {
+    return;
+  }
+  const transition = offlineRenderEnvironmentTransition;
+  const progress = THREE.MathUtils.clamp(
+    (now - transition.startedAt) / transition.durationMs,
+    0,
+    1,
+  );
+  offlineVoxelRender.setTransitionProgress(
+    THREE.MathUtils.lerp(transition.from, transition.to, progress),
+  );
+  if (progress < 1) {
+    return;
+  }
+  const shouldDispose = transition.disposeOnDone;
+  offlineRenderEnvironmentTransition = null;
+  if (shouldDispose) {
+    disposeOfflineVoxelRender();
+  }
+}
+
+function syncOfflineVoxelRender() {
+  if (offlineMapDisplayMode.value !== "render") {
+    return;
+  }
+  if (!scene || !renderer || !offlineMapVoxelMesh) {
+    return;
+  }
+  setVoxelGrowthMaterialMode(offlineMapVoxelMesh.material, "render");
+  if (!offlineVoxelRender) {
+    offlineVoxelRender = createOfflineVoxelRender(
+      scene,
+      renderer,
+      offlineMapVoxelMesh,
+    );
+    startOfflineRenderEnvironmentTransition(1, false, 0);
+  } else {
+    offlineVoxelRender.update();
+  }
+}
+
 function updateOfflineMapVisibility() {
   if (offlineMapPoints) {
     offlineMapPoints.visible = offlineMapDisplayMode.value === "pointcloud";
   }
   if (offlineMapVoxelMesh) {
-    offlineMapVoxelMesh.visible = offlineMapDisplayMode.value === "voxel";
+    offlineMapVoxelMesh.visible =
+      offlineMapDisplayMode.value === "voxel" ||
+      offlineMapDisplayMode.value === "render";
   }
+  syncOfflineVoxelRender();
+}
+
+function offlineModeObject(mode: OfflineMapDisplayMode) {
+  if (mode === "pointcloud") {
+    return offlineMapPoints;
+  }
+  return offlineMapVoxelMesh;
+}
+
+function offlineModeTargetFade(mode: OfflineMapDisplayMode) {
+  return mode === "pointcloud" ? 0.88 : 1;
+}
+
+function fadeOfflineModeObjects(
+  previousMode: OfflineMapDisplayMode,
+  nextMode: OfflineMapDisplayMode,
+) {
+  const previousObject = offlineModeObject(previousMode);
+  const nextObject = offlineModeObject(nextMode);
+  if (!previousObject || !nextObject || previousObject === nextObject) {
+    return;
+  }
+  previousObject.visible = true;
+  nextObject.visible = true;
+  const nextMaterialTargets = collectObjectMaterials(nextObject).map(
+    (material) => ({
+      material,
+      target: offlineModeTargetFade(nextMode),
+    }),
+  );
+  nextMaterialTargets.forEach(({ material }) =>
+    setMaterialFadeValue(material, 0),
+  );
+  queueObjectFade(previousObject, 0, 320, false);
+  sceneFadeItems.push({
+    object: nextObject,
+    startedAt: performance.now(),
+    durationMs: 420,
+    disposeAfter: false,
+    materials: nextMaterialTargets.map(({ material, target }) => ({
+      material,
+      from: 0,
+      to: target,
+    })),
+  });
+}
+
+function restartOfflineVoxelGrowth(options: { anchorDemo?: boolean } = {}) {
+  if (!offlineMapVoxelMesh) {
+    return;
+  }
+  offlineVoxelAnimationStartMs = performance.now();
+  updateVoxelGrowthTime(offlineMapVoxelMesh.material, 0);
+  if (options.anchorDemo) {
+    offlineSceneAnchorStartMs = offlineVoxelAnimationStartMs;
+    offlineSceneAnchorUntilMs =
+      offlineVoxelAnimationStartMs +
+      Math.max(offlineVoxelAnimationDurationSeconds * 1000, 650);
+  }
+}
+
+function settleOfflineVoxelGrowth() {
+  if (!offlineMapVoxelMesh) {
+    return;
+  }
+  const durationSeconds = offlineVoxelAnimationDurationSeconds || 9999;
+  offlineVoxelAnimationStartMs = performance.now() - durationSeconds * 1000;
+  updateVoxelGrowthTime(offlineMapVoxelMesh.material, durationSeconds);
+  if (offlineMapDisplayMode.value === "render" && offlineVoxelRender) {
+    offlineVoxelRender.setTransitionProgress(1);
+  }
+}
+
+function currentOfflineVoxelVisualCenter() {
+  if (lastRobotPose) {
+    const position = new THREE.Vector3();
+    lastRobotPose.decompose(
+      position,
+      new THREE.Quaternion(),
+      new THREE.Vector3(),
+    );
+    return new THREE.Vector2(position.x, position.y);
+  }
+  if (controls) {
+    return new THREE.Vector2(controls.target.x, controls.target.y);
+  }
+  return new THREE.Vector2(0, 0);
+}
+
+function updateOfflineVoxelGrowthFrame(now: number) {
+  if (!offlineMapVoxelMesh || !offlineMapVoxelMesh.visible) {
+    updateOfflineRenderEnvironmentTransition(now);
+    return;
+  }
+  const elapsedSeconds = Math.max(
+    0,
+    (now - offlineVoxelAnimationStartMs) / 1000,
+  );
+  updateVoxelGrowthTime(offlineMapVoxelMesh.material, elapsedSeconds);
+  if (offlineMapDisplayMode.value === "render" && offlineVoxelRender) {
+    updateOfflineRenderEnvironmentTransition(now);
+  } else {
+    updateOfflineRenderEnvironmentTransition(now);
+  }
+  if (offlineMapDisplayMode.value === "render" && renderer) {
+    renderer.shadowMap.needsUpdate = true;
+  }
+}
+
+function offlineSceneAnchorProgress(now: number) {
+  if (offlineSceneAnchorUntilMs <= offlineSceneAnchorStartMs) {
+    return 1;
+  }
+  return THREE.MathUtils.clamp(
+    (now - offlineSceneAnchorStartMs) /
+      (offlineSceneAnchorUntilMs - offlineSceneAnchorStartMs),
+    0,
+    1,
+  );
+}
+
+function updateOfflineAnchorCamera(now: number) {
+  if (!controls || !camera || !arena || now >= offlineSceneAnchorUntilMs) {
+    return;
+  }
+  const robotPosition = arena.getRobotPosition();
+  const target = new THREE.Vector3(robotPosition.x, robotPosition.y, 0.25);
+  const previousTarget = controls.target.clone();
+  controls.target.lerp(target, 0.08);
+  camera.position.add(controls.target.clone().sub(previousTarget));
 }
 
 function updateOfflineMapPointCloudGeometry() {
@@ -1436,15 +2293,31 @@ function updateOfflineMapPointCloudGeometry() {
     const x = offlineMapRawPositions[index];
     const y = offlineMapRawPositions[index + 1];
     const z = offlineMapRawPositions[index + 2];
-    if (x < bounds.xmin || x > bounds.xmax || y < bounds.ymin || y > bounds.ymax || z < bounds.zmin || z > bounds.zmax) {
+    if (
+      x < bounds.xmin ||
+      x > bounds.xmax ||
+      y < bounds.ymin ||
+      y > bounds.ymax ||
+      z < bounds.zmin ||
+      z > bounds.zmax
+    ) {
       continue;
     }
     positions.push(x, y, z);
   }
 
   const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-  geometry.setAttribute("color", new THREE.BufferAttribute(buildPointCloudColorBuffer(positions, "#d7dee8"), 3));
+  geometry.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(positions, 3),
+  );
+  geometry.setAttribute(
+    "color",
+    new THREE.BufferAttribute(
+      buildPointCloudColorBuffer(positions, offlineMapPointColor),
+      3,
+    ),
+  );
   geometry.computeBoundingSphere();
   replaceObjectGeometry(offlineMapPoints, geometry);
   const material = offlineMapPoints.material;
@@ -1456,14 +2329,25 @@ function updateOfflineMapPointCloudGeometry() {
   sceneStatus.value = `离线地图点云显示 ${Math.floor(positions.length / 3)} / ${Math.floor(offlineMapRawPositions.length / 3)} 点`;
 }
 
-function updateOfflineMapVoxelGeometry() {
-  if (!offlineMapVoxelCenters || !offlineMapVoxelMesh || !offlineMapClipBounds) {
+function updateOfflineMapVoxelGeometry(
+  options: { animate?: boolean; anchorDemo?: boolean } = {},
+) {
+  if (
+    !offlineMapVoxelCenters ||
+    !offlineMapVoxelMesh ||
+    !offlineMapClipBounds
+  ) {
     return;
   }
   const bounds = offlineMapClipBounds;
   const matrix = new THREE.Matrix4();
-  const scale = new THREE.Vector3(1, 1, 1);
+  const scale = new THREE.Vector3(
+    offlineMapVoxelSize * 0.94,
+    offlineMapVoxelSize * 0.94,
+    offlineMapVoxelSize * 0.94,
+  );
   const rotation = new THREE.Quaternion();
+  const visibleCenters: number[] = [];
   let visibleCount = 0;
   for (let index = 0; index < offlineMapVoxelCenters.length; index += 3) {
     const x = offlineMapVoxelCenters[index];
@@ -1471,24 +2355,52 @@ function updateOfflineMapVoxelGeometry() {
     const z = offlineMapVoxelCenters[index + 2];
     const half = offlineMapVoxelSize * 0.5;
     if (
-      x + half < bounds.xmin
-      || x - half > bounds.xmax
-      || y + half < bounds.ymin
-      || y - half > bounds.ymax
-      || z + half < bounds.zmin
-      || z - half > bounds.zmax
+      x + half < bounds.xmin ||
+      x - half > bounds.xmax ||
+      y + half < bounds.ymin ||
+      y - half > bounds.ymax ||
+      z + half < bounds.zmin ||
+      z - half > bounds.zmax
     ) {
       continue;
     }
     matrix.compose(new THREE.Vector3(x, y, z), rotation, scale);
     offlineMapVoxelMesh.setMatrixAt(visibleCount, matrix);
+    offlineMapVoxelMesh.setColorAt(
+      visibleCount,
+      voxelSurfaceColor(
+        x,
+        y,
+        z,
+        offlineMapVoxelSize,
+        offlineVoxelBaseColor,
+        offlineVoxelColor,
+      ),
+    );
+    visibleCenters.push(x, y, z);
     visibleCount += 1;
   }
-  offlineMapVoxelMesh.count = visibleCount;
   offlineMapVoxelMesh.instanceMatrix.needsUpdate = true;
+  if (offlineMapVoxelMesh.instanceColor) {
+    offlineMapVoxelMesh.instanceColor.needsUpdate = true;
+  }
+  offlineVoxelAnimationDurationSeconds = configureVoxelGrowthAttributes(
+    offlineMapVoxelMesh,
+    visibleCenters,
+    offlineMapVoxelSize,
+    (offlineVoxelAnimationVersion += 1),
+    currentOfflineVoxelVisualCenter(),
+  );
+  if (options.animate) {
+    restartOfflineVoxelGrowth({ anchorDemo: options.anchorDemo });
+  } else {
+    settleOfflineVoxelGrowth();
+  }
   updateOfflineMapVisibility();
   if (offlineMapDisplayMode.value === "voxel") {
     sceneStatus.value = `离线占据网格显示 ${visibleCount} / ${Math.floor(offlineMapVoxelCenters.length / 3)} 个 voxel`;
+  } else if (offlineMapDisplayMode.value === "render") {
+    sceneStatus.value = `离线渲染显示 ${visibleCount} / ${Math.floor(offlineMapVoxelCenters.length / 3)} 个 voxel`;
   }
 }
 
@@ -1497,20 +2409,19 @@ function buildOfflineMapVoxelMesh() {
     return null;
   }
   const voxelCount = Math.floor(offlineMapVoxelCenters.length / 3);
-  const geometry = new THREE.BoxGeometry(offlineMapVoxelSize, offlineMapVoxelSize, offlineMapVoxelSize);
-  const material = new THREE.MeshBasicMaterial({
-    color: "#4cc9f0",
-    transparent: true,
-    opacity: 0.22,
-    depthWrite: false,
-  });
+  const geometry = createVoxelGrowthGeometry();
+  const material = createVoxelGrowthMaterial("voxel");
   const mesh = new THREE.InstancedMesh(geometry, material, voxelCount);
   mesh.name = "offline-map-voxel-preview";
   mesh.frustumCulled = false;
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   return mesh;
 }
 
-function buildVoxelCentersFromPointCloud(positions: Float32Array, voxelSize: number) {
+function buildVoxelCentersFromPointCloud(
+  positions: Float32Array,
+  voxelSize: number,
+) {
   const occupied = new Map<string, [number, number, number]>();
   const half = voxelSize * 0.5;
   for (let index = 0; index < positions.length; index += 3) {
@@ -1537,14 +2448,52 @@ function buildVoxelCentersFromPointCloud(positions: Float32Array, voxelSize: num
   return centers;
 }
 
-function setOfflineMapDisplayMode(mode: "voxel" | "pointcloud") {
+function setOfflineMapDisplayMode(mode: OfflineMapDisplayMode) {
   if (!offlineMapRawPositions && !offlineMapVoxelCenters) {
     return { ok: false, message: "请先加载离线地图。" };
   }
+  const previousMode = offlineMapDisplayMode.value;
+  const environmentProgress = currentOfflineRenderEnvironmentProgress();
   offlineMapDisplayMode.value = mode;
+  if (previousMode === "render" && mode !== "render" && offlineVoxelRender) {
+    offlineVoxelRender.restoreMeshMaterial();
+    if (offlineMapVoxelMesh) {
+      setVoxelGrowthMaterialMode(offlineMapVoxelMesh.material, "voxel");
+      collectObjectMaterials(offlineMapVoxelMesh).forEach((material) =>
+        setMaterialFadeValue(material, 1),
+      );
+      updateVoxelGrowthTime(
+        offlineMapVoxelMesh.material,
+        offlineVoxelAnimationDurationSeconds || 9999,
+      );
+    }
+  }
   updateOfflineMapVisibility();
+  if (mode !== previousMode) {
+    fadeOfflineModeObjects(previousMode, mode);
+  }
+  if (previousMode === "render" && mode !== "render" && offlineVoxelRender) {
+    startOfflineRenderEnvironmentTransition(0, true, environmentProgress);
+  } else if (
+    previousMode !== "render" &&
+    mode === "render" &&
+    offlineVoxelRender
+  ) {
+    startOfflineRenderEnvironmentTransition(1, false, environmentProgress);
+  }
+  if (mode !== previousMode && (mode === "voxel" || mode === "render")) {
+    restartOfflineVoxelGrowth();
+  }
   if (mode === "voxel" && offlineMapVoxelCenters) {
     sceneStatus.value = `已切换到占据网格显示: ${Math.floor(offlineMapVoxelCenters.length / 3)} 个 voxel。`;
+    return { ok: true, message: sceneStatus.value };
+  } else if (
+    mode === "render" &&
+    offlineMapVoxelMesh &&
+    offlineMapVoxelCenters
+  ) {
+    offlineVoxelRender?.update();
+    sceneStatus.value = `已切换到渲染显示: ${offlineMapVoxelMesh.count} / ${Math.floor(offlineMapVoxelCenters.length / 3)} 个 voxel。`;
     return { ok: true, message: sceneStatus.value };
   } else if (mode === "pointcloud" && offlineMapRawPositions) {
     sceneStatus.value = `已切换到点云显示: ${Math.floor(offlineMapRawPositions.length / 3)} 点。`;
@@ -1553,10 +2502,44 @@ function setOfflineMapDisplayMode(mode: "voxel" | "pointcloud") {
   return { ok: false, message: "当前离线地图缺少对应显示数据。" };
 }
 
+/**
+ * 更新已经加载的离线地图外观，不重新读取 PCD，避免调整点大小或配色时造成额外加载等待。
+ * 颜色只接受由控制器校验后的十六进制值，保证 Three.js 材质始终能正确解析。
+ */
+function updateOfflineMapVisualSettings(settings: OfflineMapVisualSettings) {
+  if (
+    typeof settings.pointSize === "number" &&
+    Number.isFinite(settings.pointSize)
+  ) {
+    offlineMapPointSize = settings.pointSize;
+    if (
+      offlineMapPoints &&
+      offlineMapPoints.material instanceof THREE.PointsMaterial
+    ) {
+      offlineMapPoints.material.size = offlineMapPointSize;
+      offlineMapPoints.material.needsUpdate = true;
+    }
+  }
+  if (typeof settings.pointColor === "string" && settings.pointColor) {
+    offlineMapPointColor = settings.pointColor;
+    updateOfflineMapPointCloudGeometry();
+  }
+  if (typeof settings.voxelColor === "string" && settings.voxelColor) {
+    offlineMapVoxelColor = settings.voxelColor;
+    offlineVoxelBaseColor.set(offlineMapVoxelColor);
+    updateOfflineMapVoxelGeometry();
+  }
+  if (settings.displayMode) {
+    setOfflineMapDisplayMode(settings.displayMode);
+  }
+}
+
 function attachOfflineMapPointCloud(payload: OfflineMapPointCloudPayload) {
   if (!scene) {
     return { ok: false, message: "三维场景尚未初始化。" };
   }
+  const shouldAnchorDemoTransition =
+    !hasConnected && !hasOfflineMapRaycastCache();
   const points = Array.isArray(payload?.pcd?.points) ? payload.pcd.points : [];
   const positions = new Float32Array(points.length * 3);
   let cursor = 0;
@@ -1576,11 +2559,16 @@ function attachOfflineMapPointCloud(payload: OfflineMapPointCloudPayload) {
     return { ok: false, message: "离线 PCD 没有可显示的有效点。" };
   }
 
-  clearOfflineMapPointCloud();
+  clearOfflineMapPointCloud(true);
   offlineMapDisplayMode.value = "voxel";
   offlineMapRawPositions = positions.slice(0, cursor);
-  offlineMapVoxelSize = Math.max(0.03, Number(payload.occupancy?.voxel_m || payload.pcd.voxel_leaf_m || 0.1));
-  const voxelCenters = Array.isArray(payload.occupancy?.voxels) ? payload.occupancy.voxels : [];
+  offlineMapVoxelSize = Math.max(
+    0.03,
+    Number(payload.occupancy?.voxel_m || payload.pcd.voxel_leaf_m || 0.1),
+  );
+  const voxelCenters = Array.isArray(payload.occupancy?.voxels)
+    ? payload.occupancy.voxels
+    : [];
   const voxelPositions = new Float32Array(voxelCenters.length * 3);
   let voxelCursor = 0;
   for (const voxel of voxelCenters) {
@@ -1595,11 +2583,16 @@ function attachOfflineMapPointCloud(payload: OfflineMapPointCloudPayload) {
     voxelPositions[voxelCursor + 2] = z;
     voxelCursor += 3;
   }
-  offlineMapVoxelCenters = voxelCursor > 0
-    ? voxelPositions.slice(0, voxelCursor)
-    : buildVoxelCentersFromPointCloud(offlineMapRawPositions, offlineMapVoxelSize);
+  offlineMapVoxelCenters =
+    voxelCursor > 0
+      ? voxelPositions.slice(0, voxelCursor)
+      : buildVoxelCentersFromPointCloud(
+          offlineMapRawPositions,
+          offlineMapVoxelSize,
+        );
   offlineMapOriginalBounds = cloneBounds(payload.pcd.sampled_bounds);
   offlineMapClipBounds = cloneBounds(payload.pcd.sampled_bounds);
+  syncOfflineClipBoundsView();
   offlineClipActive.value = true;
   offlineMapGroup = new THREE.Group();
   offlineMapGroup.name = "offline-map-pointcloud-root";
@@ -1611,12 +2604,21 @@ function attachOfflineMapPointCloud(payload: OfflineMapPointCloudPayload) {
 
   const geometry = new THREE.BufferGeometry();
   const initialPositions = Array.from(offlineMapRawPositions);
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(initialPositions, 3));
-  geometry.setAttribute("color", new THREE.BufferAttribute(buildPointCloudColorBuffer(initialPositions, "#d7dee8"), 3));
+  geometry.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(initialPositions, 3),
+  );
+  geometry.setAttribute(
+    "color",
+    new THREE.BufferAttribute(
+      buildPointCloudColorBuffer(initialPositions, offlineMapPointColor),
+      3,
+    ),
+  );
   geometry.computeBoundingSphere();
   const material = new THREE.PointsMaterial({
     color: "#ffffff",
-    size: 0.06,
+    size: offlineMapPointSize,
     sizeAttenuation: true,
     vertexColors: true,
     transparent: true,
@@ -1630,21 +2632,37 @@ function attachOfflineMapPointCloud(payload: OfflineMapPointCloudPayload) {
   offlineMapVoxelMesh = buildOfflineMapVoxelMesh();
   if (offlineMapVoxelMesh) {
     offlineMapGroup.add(offlineMapVoxelMesh);
-    updateOfflineMapVoxelGeometry();
+    updateOfflineMapVoxelGeometry({
+      animate: true,
+      anchorDemo: shouldAnchorDemoTransition,
+    });
   }
-  updateOfflineMapVisibility();
   scene.add(offlineMapGroup);
-  const displayedVoxelCount = Math.floor((offlineMapVoxelCenters?.length ?? 0) / 3);
-  const sourceVoxelCount = payload.occupancy?.occupied_count && payload.occupancy.occupied_count > 0
-    ? payload.occupancy.occupied_count
-    : displayedVoxelCount;
+  setOfflineMapDisplayMode("render");
+  const displayedVoxelCount = Math.floor(
+    (offlineMapVoxelCenters?.length ?? 0) / 3,
+  );
+  const sourceVoxelCount =
+    payload.occupancy?.occupied_count && payload.occupancy.occupied_count > 0
+      ? payload.occupancy.occupied_count
+      : displayedVoxelCount;
   sceneStatus.value = `已加载离线地图: ${payload.pcd.sampled_count} / ${payload.pcd.input_points} 点，${displayedVoxelCount} / ${sourceVoxelCount} 个占据 voxel。`;
   return { ok: true, message: sceneStatus.value };
 }
 
-function clearOfflineMapPointCloud() {
+function clearOfflineMapPointCloud(fadeOut = false) {
+  const groupToClear = offlineMapGroup;
+  if (fadeOut && groupToClear) {
+    offlineVoxelRender?.dispose({ restoreMaterial: false });
+    offlineVoxelRender = null;
+    queueObjectFade(groupToClear, 0, 450, true);
+  } else {
+    disposeOfflineVoxelRender();
+    if (groupToClear) {
+      clearThreeObject(groupToClear);
+    }
+  }
   if (offlineMapGroup) {
-    clearThreeObject(offlineMapGroup);
     offlineMapGroup = null;
   }
   offlineMapPoints = null;
@@ -1654,6 +2672,7 @@ function clearOfflineMapPointCloud() {
   offlineMapVoxelSize = 0.1;
   offlineMapOriginalBounds = null;
   offlineMapClipBounds = null;
+  syncOfflineClipBoundsView();
   offlineClipActive.value = false;
   activeOfflineClipFace.value = null;
 }
@@ -1673,9 +2692,15 @@ function moveOfflineClipFace(face: keyof BoundsPayload, direction: -1 | 1) {
   const originalMax = offlineMapOriginalBounds[maxKey];
   const nextValue = offlineMapClipBounds[face] + direction * step;
   if (face.endsWith("min")) {
-    offlineMapClipBounds[face] = Math.min(Math.max(nextValue, originalMin), offlineMapClipBounds[maxKey] - minGap);
+    offlineMapClipBounds[face] = Math.min(
+      Math.max(nextValue, originalMin),
+      offlineMapClipBounds[maxKey] - minGap,
+    );
   } else {
-    offlineMapClipBounds[face] = Math.max(Math.min(nextValue, originalMax), offlineMapClipBounds[minKey] + minGap);
+    offlineMapClipBounds[face] = Math.max(
+      Math.min(nextValue, originalMax),
+      offlineMapClipBounds[minKey] + minGap,
+    );
   }
   updateOfflineMapGeometry();
 }
@@ -1686,6 +2711,7 @@ function resetOfflineClipBounds() {
     return;
   }
   offlineMapClipBounds = cloneBounds(offlineMapOriginalBounds);
+  syncOfflineClipBoundsView();
   updateOfflineMapGeometry();
 }
 
@@ -1705,11 +2731,56 @@ function setOfflineClipFaceValue(face: keyof BoundsPayload, value: number) {
   const originalMin = offlineMapOriginalBounds[minKey];
   const originalMax = offlineMapOriginalBounds[maxKey];
   if (face.endsWith("min")) {
-    offlineMapClipBounds[face] = Math.min(Math.max(value, originalMin), offlineMapClipBounds[maxKey] - minGap);
+    offlineMapClipBounds[face] = Math.min(
+      Math.max(value, originalMin),
+      offlineMapClipBounds[maxKey] - minGap,
+    );
   } else {
-    offlineMapClipBounds[face] = Math.max(Math.min(value, originalMax), offlineMapClipBounds[minKey] + minGap);
+    offlineMapClipBounds[face] = Math.max(
+      Math.min(value, originalMax),
+      offlineMapClipBounds[minKey] + minGap,
+    );
   }
+  syncOfflineClipBoundsView();
   updateOfflineMapGeometry();
+}
+
+// 手柄方向键映射：按键方向与手柄朝向一致表示扩大该方向裁剪范围，相反则收缩
+const offlineClipFaceArrowMap: Record<
+  keyof BoundsPayload,
+  { expand: string[]; shrink: string[] }
+> = {
+  xmin: { expand: ["ArrowLeft"], shrink: ["ArrowRight"] },
+  xmax: { expand: ["ArrowRight"], shrink: ["ArrowLeft"] },
+  ymin: {
+    expand: ["ArrowLeft", "ArrowDown"],
+    shrink: ["ArrowRight", "ArrowUp"],
+  },
+  ymax: {
+    expand: ["ArrowRight", "ArrowUp"],
+    shrink: ["ArrowLeft", "ArrowDown"],
+  },
+  zmin: { expand: ["ArrowDown"], shrink: ["ArrowUp"] },
+  zmax: { expand: ["ArrowUp"], shrink: ["ArrowDown"] },
+};
+
+function handleOfflineClipFaceKeydown(
+  face: keyof BoundsPayload,
+  event: KeyboardEvent,
+) {
+  if (!offlineClipActive.value) {
+    return;
+  }
+  const arrowKeys = offlineClipFaceArrowMap[face];
+  // max 面向正方向扩展为“扩大”，min 面向负方向扩展为“扩大”
+  const outwardDirection: 1 | -1 = face.endsWith("max") ? 1 : -1;
+  if (arrowKeys.expand.includes(event.key)) {
+    event.preventDefault();
+    moveOfflineClipFace(face, outwardDirection);
+  } else if (arrowKeys.shrink.includes(event.key)) {
+    event.preventDefault();
+    moveOfflineClipFace(face, -outwardDirection as 1 | -1);
+  }
 }
 
 function clipDragDirectionMultiplier(face: keyof BoundsPayload) {
@@ -1717,7 +2788,10 @@ function clipDragDirectionMultiplier(face: keyof BoundsPayload) {
   return face === "xmin" || face === "ymin" || face === "zmin" ? -1 : 1;
 }
 
-function beginOfflineClipFaceDrag(face: keyof BoundsPayload, event: PointerEvent) {
+function beginOfflineClipFaceDrag(
+  face: keyof BoundsPayload,
+  event: PointerEvent,
+) {
   if (!offlineClipActive.value || !offlineMapClipBounds) {
     sceneStatus.value = "请先加载离线地图点云。";
     return;
@@ -1730,6 +2804,8 @@ function beginOfflineClipFaceDrag(face: keyof BoundsPayload, event: PointerEvent
   const target = event.currentTarget;
   if (target instanceof HTMLElement) {
     target.setPointerCapture(event.pointerId);
+    // pointerdown 被 prevent 后浏览器不会自动聚焦，这里补上以便方向键微调
+    target.focus();
   }
 }
 
@@ -1744,7 +2820,9 @@ function dragOfflineClipFace(event: PointerEvent) {
   const deltaY = event.clientY - offlineClipDragStartY;
   const movementScale = span / 180;
   const projectedDistance = axis === "z" ? -deltaY : deltaX;
-  const baseSignedDistance = face.endsWith("min") ? -projectedDistance * movementScale : projectedDistance * movementScale;
+  const baseSignedDistance = face.endsWith("min")
+    ? -projectedDistance * movementScale
+    : projectedDistance * movementScale;
   const signedDistance = baseSignedDistance * clipDragDirectionMultiplier(face);
   setOfflineClipFaceValue(face, offlineClipDragStartValue + signedDistance);
 }
@@ -1816,14 +2894,22 @@ function extractPointCloud2Positions(message: any) {
 
 function describePointCloud2ForWarning(message: any) {
   const fields = Array.isArray(message?.fields)
-    ? message.fields.map((field) => `${String(field?.name ?? "?")}:${String(field?.offset ?? "?")}`).join(",")
+    ? message.fields
+        .map(
+          (field: { name?: string; offset?: number }) =>
+            `${String(field?.name ?? "?")}:${String(field?.offset ?? "?")}`,
+        )
+        .join(",")
     : "none";
   const bytes = normalizePointCloudBytes(message?.data);
   const dataLength = bytes?.byteLength ?? 0;
   return `fields=${fields || "none"}, point_step=${String(message?.point_step ?? "?")}, width=${String(message?.width ?? "?")}, height=${String(message?.height ?? "?")}, data=${dataLength}B`;
 }
 
-function renderPointCloud(display: NavViewerDisplay, message: any): PointCloudRenderResult {
+function renderPointCloud(
+  display: NavViewerDisplay,
+  message: any,
+): PointCloudRenderResult {
   if (!scene) {
     return { ok: false, message: "3D 场景未初始化，暂不能渲染点云。" };
   }
@@ -1843,8 +2929,17 @@ function renderPointCloud(display: NavViewerDisplay, message: any): PointCloudRe
       warningSignature: `${topic}:${detail}`,
     };
   }
-  const useLayeredColors = pointColorModeForDisplay(latestDisplay) === "layered";
-  const pointColors = useLayeredColors ? buildPointCloudColorBuffer(positions, pointColorForDisplay(latestDisplay)) : null;
+  platformState.lidarAt = Date.now();
+  const useLayeredColors =
+    pointColorModeForDisplay(latestDisplay) === "layered";
+  const emissiveIntensity = safePointCloudEmissiveIntensity(latestDisplay);
+  const pointColors = useLayeredColors
+    ? buildPointCloudColorBuffer(
+        positions,
+        pointColorForDisplay(latestDisplay),
+        emissiveIntensity,
+      )
+    : null;
 
   let points = pointCloudByTopic.get(topic);
   if (!points) {
@@ -1857,14 +2952,22 @@ function renderPointCloud(display: NavViewerDisplay, message: any): PointCloudRe
     }
     geometry.computeBoundingSphere();
     const material = new THREE.PointsMaterial({
-      color: useLayeredColors ? "#ffffff" : pointColorForDisplay(latestDisplay),
+      color: useLayeredColors
+        ? amplifiedPointColor("#ffffff", emissiveIntensity)
+        : amplifiedPointColor(
+            pointColorForDisplay(latestDisplay),
+            emissiveIntensity,
+          ),
       size: safePointCloudSize(latestDisplay),
       sizeAttenuation: true,
       vertexColors: useLayeredColors,
       transparent: true,
-      opacity: 0.96,
-      depthWrite: true,
+      opacity: emissiveIntensity > 0 ? 0.98 : 0.96,
+      depthWrite: emissiveIntensity <= 0,
       depthTest: true,
+      blending:
+        emissiveIntensity > 0 ? THREE.AdditiveBlending : THREE.NormalBlending,
+      toneMapped: emissiveIntensity <= 0,
     });
     points = new THREE.Points(geometry, material);
     scene.add(points);
@@ -1875,14 +2978,14 @@ function renderPointCloud(display: NavViewerDisplay, message: any): PointCloudRe
     const existingColorAttribute = geometry.getAttribute("color");
     const nextPointCount = positions.length / 3;
     if (
-      existingAttribute
-      && existingAttribute instanceof THREE.BufferAttribute
-      && existingAttribute.itemSize === 3
-      && existingAttribute.array.length === positions.length
+      existingAttribute &&
+      existingAttribute instanceof THREE.BufferAttribute &&
+      existingAttribute.itemSize === 3 &&
+      existingAttribute.array.length === positions.length
     ) {
       (existingAttribute.array as Float32Array).set(positions);
       existingAttribute.needsUpdate = true;
-      existingAttribute.count = nextPointCount;
+
       geometry.setDrawRange(0, nextPointCount);
     } else {
       const nextAttribute = new THREE.Float32BufferAttribute(positions, 3);
@@ -1892,16 +2995,18 @@ function renderPointCloud(display: NavViewerDisplay, message: any): PointCloudRe
     }
     if (pointColors) {
       if (
-        existingColorAttribute
-        && existingColorAttribute instanceof THREE.BufferAttribute
-        && existingColorAttribute.itemSize === 3
-        && existingColorAttribute.array.length === pointColors.length
+        existingColorAttribute &&
+        existingColorAttribute instanceof THREE.BufferAttribute &&
+        existingColorAttribute.itemSize === 3 &&
+        existingColorAttribute.array.length === pointColors.length
       ) {
         (existingColorAttribute.array as Float32Array).set(pointColors);
         existingColorAttribute.needsUpdate = true;
-        existingColorAttribute.count = nextPointCount;
       } else {
-        geometry.setAttribute("color", new THREE.BufferAttribute(pointColors, 3));
+        geometry.setAttribute(
+          "color",
+          new THREE.BufferAttribute(pointColors, 3),
+        );
       }
     } else {
       if (existingColorAttribute) {
@@ -1909,22 +3014,20 @@ function renderPointCloud(display: NavViewerDisplay, message: any): PointCloudRe
       }
     }
     geometry.computeBoundingSphere();
-    const material = points.material;
+    const material = points.material as THREE.PointsMaterial;
     if (material && !Array.isArray(material)) {
-      material.color = new THREE.Color(useLayeredColors ? "#ffffff" : pointColorForDisplay(latestDisplay));
-      material.size = safePointCloudSize(latestDisplay);
-      material.vertexColors = useLayeredColors;
-      material.opacity = 0.96;
-      material.transparent = true;
-      material.depthWrite = true;
-      material.depthTest = true;
-      material.needsUpdate = true;
+      applyPointCloudMaterialConfig(material, latestDisplay, useLayeredColors);
     }
   }
   sourceFrameByTopic.set(topic, normalizeFrameId(message?.header?.frame_id));
   sourceStampMsByTopic.set(topic, extractHeaderStampMs(message));
   cacheTopicLocalMatrix(topic, composeLocalMatrix());
-  applyObjectFrameTransform(topic, points, message?.header?.frame_id, sourceStampMsByTopic.get(topic) ?? null);
+  applyObjectFrameTransform(
+    topic,
+    points,
+    message?.header?.frame_id,
+    sourceStampMsByTopic.get(topic) ?? null,
+  );
   points.visible = true;
   pointCloudWarningSignatureByTopic.delete(topic);
   return { ok: true, message: `已更新点云: ${topic}` };
@@ -1934,7 +3037,10 @@ function candidateQuaternionFromYaw(yaw: number) {
   return new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, yaw, "XYZ"));
 }
 
-function candidateQuaternionFromGroundNormal(yaw: number, normal: THREE.Vector3 | null) {
+function candidateQuaternionFromGroundNormal(
+  yaw: number,
+  normal: THREE.Vector3 | null,
+) {
   if (!normal || normal.lengthSq() < 1e-8) {
     return candidateQuaternionFromYaw(yaw);
   }
@@ -1943,7 +3049,9 @@ function candidateQuaternionFromGroundNormal(yaw: number, normal: THREE.Vector3 
     zAxis.multiplyScalar(-1);
   }
   const horizontalForward = new THREE.Vector3(Math.cos(yaw), Math.sin(yaw), 0);
-  const projectedForward = horizontalForward.sub(zAxis.clone().multiplyScalar(horizontalForward.dot(zAxis)));
+  const projectedForward = horizontalForward.sub(
+    zAxis.clone().multiplyScalar(horizontalForward.dot(zAxis)),
+  );
   if (projectedForward.lengthSq() < 1e-8) {
     return candidateQuaternionFromYaw(yaw);
   }
@@ -1959,7 +3067,11 @@ function createInitialPoseArrowObject() {
 
   const anchor = new THREE.Mesh(
     new THREE.CircleGeometry(0.16, 28),
-    new THREE.MeshBasicMaterial({ color: "#31d28a", transparent: true, opacity: 0.92 })
+    new THREE.MeshBasicMaterial({
+      color: "#31d28a",
+      transparent: true,
+      opacity: 0.92,
+    }),
   );
   anchor.name = "initial-pose-anchor";
   anchor.position.set(0, 0, 0.025);
@@ -1971,7 +3083,7 @@ function createInitialPoseArrowObject() {
     1.25,
     "#31d28a",
     0.32,
-    0.15
+    0.15,
   );
   arrow.name = "initial-pose-arrow";
   group.add(arrow);
@@ -1982,7 +3094,7 @@ function createInitialPoseArrowObject() {
     0.58,
     "#61ecff",
     0.16,
-    0.08
+    0.08,
   );
   zAxis.name = "initial-pose-z-axis";
   group.add(zAxis);
@@ -1990,13 +3102,26 @@ function createInitialPoseArrowObject() {
   return group;
 }
 
-function applyInitialPoseCandidateTransform(group: THREE.Group, x: number, y: number, z: number, yaw: number, normal: THREE.Vector3 | null = null) {
+function applyInitialPoseCandidateTransform(
+  group: THREE.Group,
+  x: number,
+  y: number,
+  z: number,
+  yaw: number,
+  normal: THREE.Vector3 | null = null,
+) {
   group.position.set(x, y, z);
   group.quaternion.copy(candidateQuaternionFromGroundNormal(yaw, normal));
   group.updateMatrixWorld(true);
 }
 
-function ensureInitialPoseCandidateGroup(x: number, y: number, z: number, yaw: number, normal: THREE.Vector3 | null = null) {
+function ensureInitialPoseCandidateGroup(
+  x: number,
+  y: number,
+  z: number,
+  yaw: number,
+  normal: THREE.Vector3 | null = null,
+) {
   if (!scene) {
     return null;
   }
@@ -2006,12 +3131,15 @@ function ensureInitialPoseCandidateGroup(x: number, y: number, z: number, yaw: n
     initialPoseCandidateGroup.add(createInitialPoseArrowObject());
     scene.add(initialPoseCandidateGroup);
   }
-  applyInitialPoseCandidateTransform(initialPoseCandidateGroup, x, y, z, yaw, normal);
-  transformControls?.attach(initialPoseCandidateGroup);
-  if (transformControls) {
-    transformControls.enabled = true;
-    transformControls.setSize(1.1);
-  }
+  applyInitialPoseCandidateTransform(
+    initialPoseCandidateGroup,
+    x,
+    y,
+    z,
+    yaw,
+    normal,
+  );
+  transformControls?.attach(initialPoseCandidateGroup, props.taskEditing);
   if (transformControlsHelper) {
     transformControlsHelper.visible = true;
   }
@@ -2020,9 +3148,6 @@ function ensureInitialPoseCandidateGroup(x: number, y: number, z: number, yaw: n
 
 function clearInitialPoseCandidate() {
   transformControls?.detach();
-  if (transformControls) {
-    transformControls.enabled = false;
-  }
   if (transformControlsHelper) {
     transformControlsHelper.visible = false;
   }
@@ -2031,15 +3156,6 @@ function clearInitialPoseCandidate() {
     initialPoseCandidateGroup = null;
   }
   initialPosePointCloud = null;
-}
-
-function setInitialPoseTransformMode(mode: "translate" | "rotate") {
-  if (!transformControls || !initialPoseCandidateGroup) {
-    return { ok: false, message: "请先在主视图拖出初始化候选位姿。" };
-  }
-  transformControls.setMode(mode);
-  transformControls.setSpace("local");
-  return { ok: true, message: mode === "translate" ? "已切换到位置移动控件。" : "已切换到姿态旋转控件。" };
 }
 
 /**
@@ -2103,9 +3219,17 @@ function attachInitialPosePointCloud(payload: InitialPosePointCloudPayload) {
     return { ok: false, message: "点云帧没有解析到有效 x/y/z 点。" };
   }
 
-  const localized = localizePointCloudPositionsToBase(payload.message, rawPositions);
+  const localized = localizePointCloudPositionsToBase(
+    payload.message,
+    rawPositions,
+  );
   const useLayeredColors = pointColorModeForDisplay(display) === "layered";
-  const pointColors = useLayeredColors ? buildPointCloudColorBuffer(localized.positions, pointColorForDisplay(display)) : null;
+  const pointColors = useLayeredColors
+    ? buildPointCloudColorBuffer(
+        localized.positions,
+        pointColorForDisplay(display),
+      )
+    : null;
 
   if (initialPosePointCloud) {
     clearThreeObject(initialPosePointCloud);
@@ -2113,7 +3237,10 @@ function attachInitialPosePointCloud(payload: InitialPosePointCloudPayload) {
   }
 
   const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(localized.positions, 3));
+  geometry.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(localized.positions, 3),
+  );
   if (pointColors) {
     geometry.setAttribute("color", new THREE.BufferAttribute(pointColors, 3));
   }
@@ -2141,7 +3268,7 @@ function updateInitialPosePointCloudSize(pointSize: number) {
     return { ok: false, message: "当前还没有初始化点云预览。" };
   }
   const safeSize = Math.min(0.8, Math.max(0.005, Number(pointSize) || 0.055));
-  const material = initialPosePointCloud.material;
+  const material = initialPosePointCloud.material as THREE.PointsMaterial;
   if (Array.isArray(material)) {
     return { ok: false, message: "初始化点云材质格式不支持直接调整点大小。" };
   }
@@ -2151,29 +3278,14 @@ function updateInitialPosePointCloudSize(pointSize: number) {
   return { ok: true, message: sceneStatus.value };
 }
 
-function attachInitialPoseLatestPointCloud(topic: string, pointSize = 0.055) {
-  const message = latestMessageByTopic.get(topic);
-  if (!message) {
-    return { ok: false, message: `主视图还没有缓存 ${topic} 的点云帧。` };
-  }
-  const result = attachInitialPosePointCloud({
-    topic,
-    message,
-    color: "#f4d35e",
-    pointSize,
-    pointColorMode: "layered",
-  });
-  if (!result.ok) {
-    return result;
-  }
-  return { ok: true, message: `${result.message}（使用主视图已收到的最近一帧）` };
-}
-
 function getInitialPoseCandidate() {
   if (!initialPoseCandidateGroup) {
     return null;
   }
-  const euler = new THREE.Euler().setFromQuaternion(initialPoseCandidateGroup.quaternion, "XYZ");
+  const euler = new THREE.Euler().setFromQuaternion(
+    initialPoseCandidateGroup.quaternion,
+    "XYZ",
+  );
   return {
     x: initialPoseCandidateGroup.position.x,
     y: initialPoseCandidateGroup.position.y,
@@ -2191,7 +3303,10 @@ function clearInteractionPreview() {
   }
 }
 
-function buildInteractionPreview(startPoint: THREE.Vector3, endPoint: THREE.Vector3) {
+function buildInteractionPreview(
+  startPoint: THREE.Vector3,
+  endPoint: THREE.Vector3,
+) {
   if (!scene) {
     return;
   }
@@ -2205,7 +3320,10 @@ function buildInteractionPreview(startPoint: THREE.Vector3, endPoint: THREE.Vect
 
   const anchor = new THREE.Mesh(
     new THREE.CircleGeometry(0.12, 20),
-    new THREE.MeshBasicMaterial({ color: currentInteractionMode.value === "initialpose" ? "#31d28a" : "#f6a237" })
+    new THREE.MeshBasicMaterial({
+      color:
+        currentInteractionMode.value === "initialpose" ? "#31d28a" : "#f6a237",
+    }),
   );
   anchor.position.set(startPoint.x, startPoint.y, startPoint.z + 0.02);
   group.add(anchor);
@@ -2216,7 +3334,7 @@ function buildInteractionPreview(startPoint: THREE.Vector3, endPoint: THREE.Vect
     length,
     currentInteractionMode.value === "initialpose" ? "#31d28a" : "#f6a237",
     0.26,
-    0.14
+    0.14,
   );
   group.add(arrow);
 
@@ -2231,9 +3349,12 @@ function worldPointFromMouse(event: MouseEvent, planeZ = 0) {
   const rect = renderer.domElement.getBoundingClientRect();
   const x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
   const y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-  raycaster.setFromCamera({ x, y }, camera);
+  raycaster.setFromCamera(new THREE.Vector2(x, y), camera);
   const point = new THREE.Vector3();
-  const plane = planeZ === 0 ? interactionPlane : new THREE.Plane(new THREE.Vector3(0, 0, 1), -planeZ);
+  const plane =
+    planeZ === 0
+      ? interactionPlane
+      : new THREE.Plane(new THREE.Vector3(0, 0, 1), -planeZ);
   const hit = raycaster.ray.intersectPlane(plane, point);
   return hit ? point.clone() : null;
 }
@@ -2245,10 +3366,18 @@ function rayPayloadFromMouse(event: MouseEvent) {
   const rect = renderer.domElement.getBoundingClientRect();
   const x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
   const y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-  raycaster.setFromCamera({ x, y }, camera);
+  raycaster.setFromCamera(new THREE.Vector2(x, y), camera);
   return {
-    origin: [raycaster.ray.origin.x, raycaster.ray.origin.y, raycaster.ray.origin.z],
-    direction: [raycaster.ray.direction.x, raycaster.ray.direction.y, raycaster.ray.direction.z],
+    origin: [
+      raycaster.ray.origin.x,
+      raycaster.ray.origin.y,
+      raycaster.ray.origin.z,
+    ],
+    direction: [
+      raycaster.ray.direction.x,
+      raycaster.ray.direction.y,
+      raycaster.ray.direction.z,
+    ],
   };
 }
 
@@ -2282,46 +3411,192 @@ async function resolveInitialPoseStartPoint(event: MouseEvent) {
       max_distance_m: 80,
       normal_radius_m: Number(props.initialPoseGroundNormalRadiusM ?? 0.8),
       ground_max_slope_deg: Number(props.initialPoseGroundMaxSlopeDeg ?? 30),
-      clip_bounds: currentOfflineMapClipBoundsPayload(),
+      clip_bounds: currentOfflineMapClipBoundsPayload() as unknown as
+        Record<string, number> | undefined,
       use_visible_voxels: true,
     });
-    if (!result.hit || !Number.isFinite(result.x) || !Number.isFinite(result.y) || !Number.isFinite(result.z)) {
-      interactionStartGroundMessage = result.message || "射线未命中可靠地面，已回退到平面初始化。";
+    if (
+      !result.hit ||
+      !Number.isFinite(result.x) ||
+      !Number.isFinite(result.y) ||
+      !Number.isFinite(result.z)
+    ) {
+      interactionStartGroundMessage =
+        result.message || "射线未命中可靠地面，已回退到平面初始化。";
       return fallback;
     }
-    const normal = Array.isArray(result.normal) && result.normal.length >= 3
-      ? new THREE.Vector3(Number(result.normal[0]), Number(result.normal[1]), Number(result.normal[2])).normalize()
-      : new THREE.Vector3(0, 0, 1);
+    const normal =
+      Array.isArray(result.normal) && result.normal.length >= 3
+        ? new THREE.Vector3(
+            Number(result.normal[0]),
+            Number(result.normal[1]),
+            Number(result.normal[2]),
+          ).normalize()
+        : new THREE.Vector3(0, 0, 1);
     interactionStartGroundNormal = normal;
-    interactionStartGroundMessage = result.message || "已通过离线点云占据射线吸附地面。";
-    return new THREE.Vector3(Number(result.x), Number(result.y), Number(result.z) + safeInitialPoseBaseHeightOffset());
+    interactionStartGroundMessage =
+      result.message || "已通过离线点云占据射线吸附地面。";
+    return new THREE.Vector3(
+      Number(result.x),
+      Number(result.y),
+      Number(result.z) + safeInitialPoseBaseHeightOffset(),
+    );
   } catch (error) {
     interactionStartGroundMessage = `离线点云射线吸附失败: ${(error as Error).message}`;
     return fallback;
   }
 }
 
-async function handlePointerDown(event: MouseEvent) {
-  if (event.button !== 0 || currentInteractionMode.value === "none") {
-    return;
+// 离线射线请求可能晚于鼠标松开返回，保留终点并用序号丢弃过期结果。
+let taskPickSerial = 0;
+let pendingRouteClick: {
+  insertion: TaskRouteInsertion;
+  x: number;
+  y: number;
+  mode: string;
+  moved: boolean;
+} | null = null;
+/** 以屏幕像素判定路线命中，避免缩放后世界坐标拾取范围过宽。 */
+function pickTaskRoute(event: MouseEvent): TaskRouteInsertion | null {
+  if (!props.taskEditing || !camera || !renderer) return null;
+  const points = props.taskPoints || [];
+  const rect = renderer.domElement.getBoundingClientRect();
+  rayPayloadFromMouse(event);
+  let best = 8;
+  let result: TaskRouteInsertion | null = null;
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i],
+      b = points[i + 1];
+    const start = new THREE.Vector3(a.x, a.y, a.z + 0.04);
+    const end = new THREE.Vector3(b.x, b.y, b.z + 0.04);
+    if (start.distanceToSquared(end) < 1e-10) continue;
+    const hit = new THREE.Vector3();
+    raycaster.ray.distanceSqToSegment(start, end, undefined, hit);
+    const projected = hit.clone().project(camera);
+    if (projected.z < -1 || projected.z > 1) continue;
+    const distance = Math.hypot(
+      rect.left + ((projected.x + 1) * rect.width) / 2 - event.clientX,
+      rect.top + ((1 - projected.y) * rect.height) / 2 - event.clientY,
+    );
+    const t = hit.distanceTo(start) / start.distanceTo(end);
+    if (distance >= best || t <= 0.001 || t >= 0.999) continue;
+    best = distance;
+    result = {
+      beforeId: a.id,
+      afterId: b.id,
+      pose: {
+        x: hit.x,
+        y: hit.y,
+        z: a.z + (b.z - a.z) * t,
+        roll: 0,
+        pitch: 0,
+        yaw: routeInsertionYaw(
+          a,
+          {
+            x: hit.x,
+            y: hit.y,
+            z: hit.z,
+            yaw: Math.atan2(b.y - a.y, b.x - a.x),
+          },
+          b,
+        ),
+      },
+    };
   }
-  const point = currentInteractionMode.value === "initialpose"
-    ? await resolveInitialPoseStartPoint(event)
-    : worldPointFromMouse(event);
-  if (currentInteractionMode.value === "none") {
+  return result;
+}
+let pendingTaskPick: {
+  serial: number;
+  released: boolean;
+  end: MouseEvent;
+} | null = null;
+async function handlePointerDown(event: MouseEvent) {
+  pendingRouteClick = null;
+  if (
+    event.button !== 0 ||
+    transformControls?.dragging ||
+    transformControls?.axis
+  )
+    return;
+  if (["none", "waypoint"].includes(currentInteractionMode.value)) {
+    if (taskRouteGroup) {
+      const hit = pickTaskMarker(event);
+      if (hit) {
+        // 选中已有点优先于空白打点，并废弃尚未返回的地面查询。
+        taskPickSerial++;
+        pendingTaskPick = null;
+        finishInteraction(false);
+        if (controls) controls.enabled = true;
+        emit("taskPointSelect", hit.object.userData.taskPoint);
+        return;
+      }
+    }
+    const insertion = pickTaskRoute(event);
+    if (insertion) {
+      taskPickSerial++;
+      pendingTaskPick = null;
+      finishInteraction(false);
+      pendingRouteClick = {
+        insertion,
+        x: event.clientX,
+        y: event.clientY,
+        mode: currentInteractionMode.value,
+        moved: false,
+      };
+      return;
+    }
+    if (currentInteractionMode.value === "none") return;
+  }
+  const startedMode = currentInteractionMode.value;
+  const request =
+    startedMode === "waypoint"
+      ? { serial: ++taskPickSerial, released: false, end: event }
+      : null;
+  if (request) {
+    pendingTaskPick = request;
+    if (controls) controls.enabled = false;
+  }
+  const point =
+    currentInteractionMode.value === "initialpose" ||
+    currentInteractionMode.value === "waypoint"
+      ? await resolveInitialPoseStartPoint(event)
+      : worldPointFromMouse(event);
+  if (
+    currentInteractionMode.value !== startedMode ||
+    (request && request.serial !== taskPickSerial)
+  ) {
     return;
   }
   if (!point) {
+    if (request) {
+      pendingTaskPick = null;
+      if (controls) controls.enabled = true;
+    }
     return;
   }
   interactionStartPoint = point;
   interactionCurrentPoint = point.clone();
   controls && (controls.enabled = false);
   buildInteractionPreview(interactionStartPoint, interactionCurrentPoint);
+  if (request) {
+    pendingTaskPick = null;
+    interactionCurrentPoint =
+      worldPointFromMouse(request.end, point.z) || point.clone();
+    if (request.released) finishInteraction(true);
+  }
   event.preventDefault();
 }
 
 function handlePointerMove(event: MouseEvent) {
+  if (
+    pendingRouteClick &&
+    Math.hypot(
+      event.clientX - pendingRouteClick.x,
+      event.clientY - pendingRouteClick.y,
+    ) > 5
+  )
+    pendingRouteClick.moved = true;
+  if (pendingTaskPick) pendingTaskPick.end = event;
   if (!interactionStartPoint || currentInteractionMode.value === "none") {
     return;
   }
@@ -2345,9 +3620,18 @@ function finishInteraction(emitResult: boolean) {
   const targetX = interactionStartPoint.x;
   const targetY = interactionStartPoint.y;
   const targetZ = interactionStartPoint.z;
-  const groundNormal = mode === "initialpose" ? interactionStartGroundNormal?.clone() ?? null : null;
-  const candidateQuaternion = candidateQuaternionFromGroundNormal(yaw, groundNormal);
-  const candidateEuler = new THREE.Euler().setFromQuaternion(candidateQuaternion, "XYZ");
+  const groundNormal =
+    mode === "initialpose" || mode === "waypoint"
+      ? (interactionStartGroundNormal?.clone() ?? null)
+      : null;
+  const candidateQuaternion = candidateQuaternionFromGroundNormal(
+    yaw,
+    groundNormal,
+  );
+  const candidateEuler = new THREE.Euler().setFromQuaternion(
+    candidateQuaternion,
+    "XYZ",
+  );
   const groundMessage = interactionStartGroundMessage;
   clearInteractionPreview();
   interactionStartPoint = null;
@@ -2360,8 +3644,27 @@ function finishInteraction(emitResult: boolean) {
     return;
   }
   if (mode === "initialpose") {
-    ensureInitialPoseCandidateGroup(targetX, targetY, targetZ, yaw, groundNormal);
+    ensureInitialPoseCandidateGroup(
+      targetX,
+      targetY,
+      targetZ,
+      yaw,
+      groundNormal,
+    );
     sceneStatus.value = `已生成初始化候选位姿，可抓取点云并用三维控件微调。${groundMessage ? ` ${groundMessage}` : ""}`;
+  }
+  if (mode === "waypoint") {
+    const pose = {
+      x: targetX,
+      y: targetY,
+      z: targetZ,
+      roll: candidateEuler.x,
+      pitch: candidateEuler.y,
+      yaw: candidateEuler.z,
+    };
+    editTaskPose(pose);
+    emit("taskPosePlaced", pose);
+    return;
   }
   emit("interactionComplete", {
     mode,
@@ -2375,6 +3678,23 @@ function finishInteraction(emitResult: boolean) {
 }
 
 function handlePointerUp(event: MouseEvent) {
+  if (pendingRouteClick) {
+    const click = pendingRouteClick;
+    pendingRouteClick = null;
+    if (
+      event.button === 0 &&
+      !click.moved &&
+      click.mode === currentInteractionMode.value &&
+      Math.hypot(event.clientX - click.x, event.clientY - click.y) <= 5 &&
+      !transformControls?.dragging
+    )
+      emit("taskRouteInsert", click.insertion);
+    return;
+  }
+  if (event.button === 0 && pendingTaskPick) {
+    pendingTaskPick.released = true;
+    pendingTaskPick.end = event;
+  }
   if (event.button !== 0) {
     return;
   }
@@ -2382,6 +3702,8 @@ function handlePointerUp(event: MouseEvent) {
 }
 
 function handlePointerLeave() {
+  pendingRouteClick = null;
+  if (pendingTaskPick) pendingTaskPick.released = true;
   if (!interactionStartPoint) {
     return;
   }
@@ -2429,15 +3751,16 @@ function updateBaseLinkHud() {
     return;
   }
 
-  const baseLinkTransform = resolveFrameTransformToFixed("base_link", null, robotPoseTfTopic);
+  const robotTf = resolveRobotTfPose();
+  const baseLinkTransform = robotTf?.matrix;
   if (baseLinkTransform) {
     const position = new THREE.Vector3();
     const quaternion = new THREE.Quaternion();
     const scale = new THREE.Vector3();
     baseLinkTransform.decompose(position, quaternion, scale);
     baseLinkHudText.value = [
-      `topic: ${robotPoseTfTopic}`,
-      `frame: ${currentFixedFrame()} <- base_link`,
+      "来源: TF",
+      `frame: ${currentFixedFrame()} <- ${robotTf!.frame}`,
       `x: ${formatHudCoordinate(position.x)}`,
       `y: ${formatHudCoordinate(position.y)}`,
       `z: ${formatHudCoordinate(position.z)}`,
@@ -2459,7 +3782,7 @@ function updateBaseLinkHud() {
     return;
   }
 
-  baseLinkHudText.value = `${robotPoseTfTopic} 中 base_link 位姿暂不可用`;
+  baseLinkHudText.value = `${robotPoseTfTopic} 中 ${currentRobotPoseFrame()} 位姿暂不可用`;
 }
 
 function createCircleLine(radius: number, color: string, dashed = false) {
@@ -2467,11 +3790,23 @@ function createCircleLine(radius: number, color: string, dashed = false) {
   const segments = 96;
   for (let index = 0; index <= segments; index += 1) {
     const angle = (index / segments) * Math.PI * 2;
-    points.push(new THREE.Vector3(Math.cos(angle) * radius, Math.sin(angle) * radius, 0.03));
+    points.push(
+      new THREE.Vector3(
+        Math.cos(angle) * radius,
+        Math.sin(angle) * radius,
+        0.03,
+      ),
+    );
   }
   const geometry = new THREE.BufferGeometry().setFromPoints(points);
   const material = dashed
-    ? new THREE.LineDashedMaterial({ color, dashSize: 0.22, gapSize: 0.12, transparent: true, opacity: 0.9 })
+    ? new THREE.LineDashedMaterial({
+        color,
+        dashSize: 0.22,
+        gapSize: 0.12,
+        transparent: true,
+        opacity: 0.9,
+      })
     : new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.95 });
   const line = new THREE.LineLoop(geometry, material);
   if (line instanceof THREE.Line && "computeLineDistances" in line) {
@@ -2491,19 +3826,26 @@ function createIgnoreZoneOutline() {
   const geometry = new THREE.BufferGeometry().setFromPoints(points);
   return new THREE.LineLoop(
     geometry,
-    new THREE.LineBasicMaterial({ color: "#8ea1ba", transparent: true, opacity: 0.88 })
+    new THREE.LineBasicMaterial({
+      color: "#8ea1ba",
+      transparent: true,
+      opacity: 0.88,
+    }),
   );
 }
 
 function obstacleStateFromMessage(message: any): ObstacleZoneState {
-  const rawValue = typeof message?.data === "number"
-    ? message.data
-    : typeof message?.data === "string"
-      ? Number(message.data)
-      : typeof message?.state === "number"
-        ? message.state
-        : Number.NaN;
-  const code = Number.isFinite(rawValue) ? Math.max(0, Math.min(2, Math.round(rawValue))) : 0;
+  const rawValue =
+    typeof message?.data === "number"
+      ? message.data
+      : typeof message?.data === "string"
+        ? Number(message.data)
+        : typeof message?.state === "number"
+          ? message.state
+          : Number.NaN;
+  const code = Number.isFinite(rawValue)
+    ? Math.max(0, Math.min(2, Math.round(rawValue)))
+    : 0;
   if (code === 2) {
     return { code, label: "danger_zone" };
   }
@@ -2514,27 +3856,42 @@ function obstacleStateFromMessage(message: any): ObstacleZoneState {
 }
 
 function resolvePrimaryPoseAnchor() {
-  const poseDisplays = props.displays.filter((display) => display.kind === "pose");
+  const poseDisplays = props.displays.filter(
+    (display) => display.kind === "pose",
+  );
   if (poseDisplays.length === 0) {
     return null;
   }
   const preferredDisplay = poseDisplays
     .slice()
     .sort((left, right) => {
-      const leftScore = left.topic.includes("ndt_pose") ? 0 : left.topic.includes("pose") ? 1 : 2;
-      const rightScore = right.topic.includes("ndt_pose") ? 0 : right.topic.includes("pose") ? 1 : 2;
+      const leftScore = left.topic.includes("ndt_pose")
+        ? 0
+        : left.topic.includes("pose")
+          ? 1
+          : 2;
+      const rightScore = right.topic.includes("ndt_pose")
+        ? 0
+        : right.topic.includes("pose")
+          ? 1
+          : 2;
       if (leftScore !== rightScore) {
         return leftScore - rightScore;
       }
       return left.topic.localeCompare(right.topic, "zh-CN");
     })
     .find((display) => poseAnchorByTopic.has(display.topic));
-  return preferredDisplay ? poseAnchorByTopic.get(preferredDisplay.topic) ?? null : null;
+  return preferredDisplay
+    ? (poseAnchorByTopic.get(preferredDisplay.topic) ?? null)
+    : null;
 }
 
 function resolveNdtPoseAnchor() {
   const preferredTopic = props.displays
-    .filter((display) => display.kind === "pose" && display.topic.includes("ndt_pose"))
+    .filter(
+      (display) =>
+        display.kind === "pose" && display.topic.includes("ndt_pose"),
+    )
     .map((display) => display.topic)
     .find((topic) => poseAnchorByTopic.has(topic));
   if (!preferredTopic) {
@@ -2549,7 +3906,10 @@ function focusCameraOnAnchor(anchor: NavPoseAnchor) {
   }
   const transformMatrix = resolveFrameTransformToFixed(anchor.frameId, null);
   if (!transformMatrix) {
-    return { ok: false, message: `缺少 ${anchor.frameId} 到 ${currentFixedFrame()} 的 TF，无法聚焦定位位姿。` };
+    return {
+      ok: false,
+      message: `缺少 ${anchor.frameId} 到 ${currentFixedFrame()} 的 TF，无法聚焦定位位姿。`,
+    };
   }
 
   const target = new THREE.Vector3(anchor.x, anchor.y, anchor.z);
@@ -2557,24 +3917,46 @@ function focusCameraOnAnchor(anchor: NavPoseAnchor) {
 
   const currentOffset = camera.position.clone().sub(controls.target);
   const currentDistance = currentOffset.length();
-  const desiredDistance = Number.isFinite(currentDistance) ? Math.max(2, currentDistance) : 8;
+  const desiredDistance = Number.isFinite(currentDistance)
+    ? Math.max(2, currentDistance)
+    : 8;
   const currentHorizontalRadius = currentOffset.clone().setZ(0).length();
-  const fallbackHorizontalRadius = Math.min(desiredDistance * 0.42, Math.max(0.9, desiredDistance * 0.22));
+  const fallbackHorizontalRadius = Math.min(
+    desiredDistance * 0.42,
+    Math.max(0.9, desiredDistance * 0.22),
+  );
   const horizontalRadius = Math.min(
     Math.max(currentHorizontalRadius, fallbackHorizontalRadius),
-    Math.max(0.9, desiredDistance * 0.92)
+    Math.max(0.9, desiredDistance * 0.92),
   );
-  const verticalDistance = Math.sqrt(Math.max(0.36, (desiredDistance * desiredDistance) - (horizontalRadius * horizontalRadius)));
+  const verticalDistance = Math.sqrt(
+    Math.max(
+      0.36,
+      desiredDistance * desiredDistance - horizontalRadius * horizontalRadius,
+    ),
+  );
 
   const frameRotation = new THREE.Quaternion();
   const framePosition = new THREE.Vector3();
   const frameScale = new THREE.Vector3();
   transformMatrix.decompose(framePosition, frameRotation, frameScale);
-  const poseRotation = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), anchor.yaw);
+  const poseRotation = new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(0, 0, 1),
+    anchor.yaw,
+  );
   const worldPoseRotation = frameRotation.clone().multiply(poseRotation);
-  const poseForward = new THREE.Vector3(1, 0, 0).applyQuaternion(worldPoseRotation).setZ(0);
-  const horizontalDirection = poseForward.lengthSq() > 1e-6 ? poseForward.normalize().multiplyScalar(-horizontalRadius) : new THREE.Vector3(-horizontalRadius, 0, 0);
-  const nextOffset = new THREE.Vector3(horizontalDirection.x, horizontalDirection.y, Math.max(0.6, verticalDistance));
+  const poseForward = new THREE.Vector3(1, 0, 0)
+    .applyQuaternion(worldPoseRotation)
+    .setZ(0);
+  const horizontalDirection =
+    poseForward.lengthSq() > 1e-6
+      ? poseForward.normalize().multiplyScalar(-horizontalRadius)
+      : new THREE.Vector3(-horizontalRadius, 0, 0);
+  const nextOffset = new THREE.Vector3(
+    horizontalDirection.x,
+    horizontalDirection.y,
+    Math.max(0.6, verticalDistance),
+  );
 
   camera.up.set(0, 0, 1);
   camera.position.copy(target.clone().add(nextOffset));
@@ -2590,41 +3972,51 @@ function focusCameraOnAnchor(anchor: NavPoseAnchor) {
 function focusOnNdtPose() {
   const anchor = resolveNdtPoseAnchor();
   if (!anchor) {
-    return { ok: false, message: "当前还没有收到 /ndt_pose 的有效位姿，暂时无法定位镜头。" };
+    return {
+      ok: false,
+      message: "当前还没有收到 /ndt_pose 的有效位姿，暂时无法定位镜头。",
+    };
   }
   return focusCameraOnAnchor(anchor);
 }
 
-function handleFocusButtonClick() {
-  focusOnNdtPose();
-}
-
 function applyObstacleZoneStyle(group: THREE.Group, state: ObstacleZoneState) {
-  const detectionRing = group.getObjectByName("detection-ring") as THREE.Line | null;
-  const calmRing = group.getObjectByName("calm-ring") as THREE.Line | null;
-  const dangerRing = group.getObjectByName("danger-ring") as THREE.Line | null;
+  const detectionRing = group.getObjectByName("detection-ring") as THREE.Line<
+    THREE.BufferGeometry,
+    THREE.LineBasicMaterial
+  > | null;
+  const calmRing = group.getObjectByName("calm-ring") as THREE.Line<
+    THREE.BufferGeometry,
+    THREE.LineBasicMaterial
+  > | null;
+  const dangerRing = group.getObjectByName("danger-ring") as THREE.Line<
+    THREE.BufferGeometry,
+    THREE.LineBasicMaterial
+  > | null;
   const calmFill = group.getObjectByName("calm-fill") as THREE.Mesh | null;
   const dangerFill = group.getObjectByName("danger-fill") as THREE.Mesh | null;
 
   const calmActive = state.code === 1;
   const dangerActive = state.code === 2;
 
-  (detectionRing?.material as THREE.Material | undefined)?.setValues?.({
-    opacity: dangerActive ? 0.98 : calmActive ? 0.92 : 0.72,
-  });
-  (calmRing?.material as THREE.Material | undefined)?.setValues?.({
+  (detectionRing?.material as THREE.MeshBasicMaterial | undefined)?.setValues?.(
+    {
+      opacity: dangerActive ? 0.98 : calmActive ? 0.92 : 0.72,
+    },
+  );
+  (calmRing?.material as THREE.MeshBasicMaterial | undefined)?.setValues?.({
     color: calmActive ? "#ffe178" : "#e4c45d",
     opacity: calmActive ? 1 : 0.76,
   });
-  (dangerRing?.material as THREE.Material | undefined)?.setValues?.({
+  (dangerRing?.material as THREE.MeshBasicMaterial | undefined)?.setValues?.({
     color: dangerActive ? "#ff5f76" : "#df6b84",
     opacity: dangerActive ? 1 : 0.78,
   });
-  (calmFill?.material as THREE.Material | undefined)?.setValues?.({
+  (calmFill?.material as THREE.MeshBasicMaterial | undefined)?.setValues?.({
     opacity: calmActive ? 0.2 : 0.1,
     color: calmActive ? "#ffe178" : "#f1cf6a",
   });
-  (dangerFill?.material as THREE.Material | undefined)?.setValues?.({
+  (dangerFill?.material as THREE.MeshBasicMaterial | undefined)?.setValues?.({
     opacity: dangerActive ? 0.26 : 0.1,
     color: dangerActive ? "#ff5f76" : "#ff7f94",
   });
@@ -2633,31 +4025,53 @@ function applyObstacleZoneStyle(group: THREE.Group, state: ObstacleZoneState) {
 function buildObstacleZoneGroup(state: ObstacleZoneState) {
   const group = new THREE.Group();
 
-  const detectionRing = createCircleLine(OBSTACLE_ZONE_DEFAULTS.detectionRange, "#5c88bc", true);
+  const detectionRing = createCircleLine(
+    OBSTACLE_ZONE_DEFAULTS.detectionRange,
+    "#5c88bc",
+    true,
+  );
   detectionRing.name = "detection-ring";
   group.add(detectionRing);
 
   const calmFill = new THREE.Mesh(
     new THREE.CircleGeometry(OBSTACLE_ZONE_DEFAULTS.calmRadius, 72),
-    new THREE.MeshBasicMaterial({ color: "#f1cf6a", transparent: true, opacity: 0.1, side: THREE.DoubleSide, depthWrite: false })
+    new THREE.MeshBasicMaterial({
+      color: "#f1cf6a",
+      transparent: true,
+      opacity: 0.1,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    }),
   );
   calmFill.name = "calm-fill";
   calmFill.position.z = 0.015;
   group.add(calmFill);
 
-  const calmRing = createCircleLine(OBSTACLE_ZONE_DEFAULTS.calmRadius, "#e4c45d");
+  const calmRing = createCircleLine(
+    OBSTACLE_ZONE_DEFAULTS.calmRadius,
+    "#e4c45d",
+  );
   calmRing.name = "calm-ring";
   group.add(calmRing);
 
   const dangerFill = new THREE.Mesh(
     new THREE.CircleGeometry(OBSTACLE_ZONE_DEFAULTS.dangerRadius, 72),
-    new THREE.MeshBasicMaterial({ color: "#ff7f94", transparent: true, opacity: 0.1, side: THREE.DoubleSide, depthWrite: false })
+    new THREE.MeshBasicMaterial({
+      color: "#ff7f94",
+      transparent: true,
+      opacity: 0.1,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    }),
   );
   dangerFill.name = "danger-fill";
   dangerFill.position.z = 0.02;
   group.add(dangerFill);
 
-  const dangerRing = createCircleLine(OBSTACLE_ZONE_DEFAULTS.dangerRadius, "#df6b84");
+  const dangerRing = createCircleLine(
+    OBSTACLE_ZONE_DEFAULTS.dangerRadius,
+    "#df6b84",
+  );
   dangerRing.name = "danger-ring";
   group.add(dangerRing);
 
@@ -2690,7 +4104,8 @@ function renderPose(topic: string, message: any) {
   const yaw = quaternionToYaw(orientation);
   const posePosition = vectorFromPosePosition(position);
   const poseQuaternion = quaternionFromPoseOrientation(orientation);
-  const frameId = normalizeFrameId(message?.header?.frame_id) || currentFixedFrame();
+  const frameId =
+    normalizeFrameId(message?.header?.frame_id) || currentFixedFrame();
   const display = getDisplayByTopic(topic) ?? {
     topic,
     messageType: "geometry_msgs/msg/PoseStamped",
@@ -2718,8 +4133,16 @@ function renderPose(topic: string, message: any) {
 
   sourceFrameByTopic.set(topic, frameId);
   sourceStampMsByTopic.set(topic, extractHeaderStampMs(message));
-  cacheTopicLocalMatrix(topic, composeLocalMatrix(posePosition, poseQuaternion));
-  applyObjectFrameTransform(topic, group, frameId, sourceStampMsByTopic.get(topic) ?? null);
+  cacheTopicLocalMatrix(
+    topic,
+    composeLocalMatrix(posePosition, poseQuaternion),
+  );
+  applyObjectFrameTransform(
+    topic,
+    group,
+    frameId,
+    sourceStampMsByTopic.get(topic) ?? null,
+  );
   group.visible = true;
   poseAnchorByTopic.set(topic, {
     topic,
@@ -2737,7 +4160,7 @@ function createPoseMarker(color: string, scale: number) {
   const marker = new THREE.Group();
   const body = new THREE.Mesh(
     new THREE.ConeGeometry(0.22 * scale, 0.68 * scale, 18),
-    new THREE.MeshStandardMaterial({ color })
+    new THREE.MeshStandardMaterial({ color }),
   );
   body.name = "pose-body";
   body.rotation.z = -Math.PI / 2;
@@ -2746,7 +4169,7 @@ function createPoseMarker(color: string, scale: number) {
 
   const tail = new THREE.Mesh(
     new THREE.CircleGeometry(0.12 * scale, 16),
-    new THREE.MeshBasicMaterial({ color })
+    new THREE.MeshBasicMaterial({ color }),
   );
   tail.name = "pose-tail";
   tail.position.set(0, 0, 0);
@@ -2759,7 +4182,8 @@ function renderPoseArray(topic: string, message: any) {
     return;
   }
   const poses = Array.isArray(message?.poses) ? message.poses : [];
-  const frameId = normalizeFrameId(message?.header?.frame_id) || currentFixedFrame();
+  const frameId =
+    normalizeFrameId(message?.header?.frame_id) || currentFixedFrame();
   const display = getDisplayByTopic(topic) ?? {
     topic,
     messageType: "geometry_msgs/msg/PoseArray",
@@ -2805,7 +4229,12 @@ function renderPoseArray(topic: string, message: any) {
   sourceFrameByTopic.set(topic, frameId);
   sourceStampMsByTopic.set(topic, extractHeaderStampMs(message));
   cacheTopicLocalMatrix(topic, composeLocalMatrix());
-  applyObjectFrameTransform(topic, group, frameId, sourceStampMsByTopic.get(topic) ?? null);
+  applyObjectFrameTransform(
+    topic,
+    group,
+    frameId,
+    sourceStampMsByTopic.get(topic) ?? null,
+  );
   group.visible = true;
   updateBaseLinkHud();
 }
@@ -2851,7 +4280,11 @@ function buildTfLabelSprite(label: string, sizeScale: number) {
   return sprite;
 }
 
-function ensureTfFrameNode(topic: string, frameName: string, display: NavViewerDisplay | null) {
+function ensureTfFrameNode(
+  topic: string,
+  frameName: string,
+  display: NavViewerDisplay | null,
+) {
   let frameNodeMap = tfFrameNodeCacheByTopic.get(topic);
   if (!frameNodeMap) {
     frameNodeMap = new Map<string, THREE.Group>();
@@ -2871,13 +4304,16 @@ function ensureTfFrameNode(topic: string, frameName: string, display: NavViewerD
 
   const point = new THREE.Mesh(
     new THREE.SphereGeometry(0.06, 12, 12),
-    new THREE.MeshBasicMaterial({ color: "#8ea1ba" })
+    new THREE.MeshBasicMaterial({ color: "#8ea1ba" }),
   );
   point.name = "tf-point";
   frameNode.add(point);
 
   if (display?.tfShowNames !== false) {
-    const label = buildTfLabelSprite(frameName, safeTfLabelSize(display));
+    const label = buildTfLabelSprite(
+      frameName,
+      safeTfLabelSize(display ?? undefined),
+    );
     if (label) {
       label.name = "tf-label";
       frameNode.add(label);
@@ -2888,7 +4324,13 @@ function ensureTfFrameNode(topic: string, frameName: string, display: NavViewerD
   return frameNode;
 }
 
-function updateTfFrameNode(frameNode: THREE.Group, frameName: string, position: THREE.Vector3, quaternion: THREE.Quaternion, display: NavViewerDisplay | null) {
+function updateTfFrameNode(
+  frameNode: THREE.Group,
+  frameName: string,
+  position: THREE.Vector3,
+  quaternion: THREE.Quaternion,
+  display: NavViewerDisplay | null,
+) {
   frameNode.visible = true;
   const axes = frameNode.getObjectByName("tf-axes") as THREE.AxesHelper | null;
   if (axes) {
@@ -2904,7 +4346,10 @@ function updateTfFrameNode(frameNode: THREE.Group, frameName: string, position: 
   const showNames = display?.tfShowNames !== false;
   let label = frameNode.getObjectByName("tf-label") as THREE.Sprite | null;
   if (!label && showNames) {
-    label = buildTfLabelSprite(frameName, safeTfLabelSize(display ?? undefined as never));
+    label = buildTfLabelSprite(
+      frameName,
+      safeTfLabelSize(display ?? (undefined as never)),
+    );
     if (label) {
       label.name = "tf-label";
       frameNode.add(label);
@@ -2913,10 +4358,12 @@ function updateTfFrameNode(frameNode: THREE.Group, frameName: string, position: 
   if (label) {
     label.visible = showNames;
     label.position.set(position.x, position.y, position.z + 0.22);
-    const sizeScale = safeTfLabelSize(display ?? undefined as never);
+    const sizeScale = safeTfLabelSize(display ?? (undefined as never));
     const texture = (label.material as THREE.SpriteMaterial | undefined)?.map;
-    const width = texture?.image?.width ?? 80;
-    const height = texture?.image?.height ?? 40;
+    const width =
+      (texture?.image as { width?: number } | undefined)?.width ?? 80;
+    const height =
+      (texture?.image as { height?: number } | undefined)?.height ?? 40;
     label.scale.set(sizeScale * (width / 80), sizeScale * (height / 80), 1);
   }
 }
@@ -2929,13 +4376,21 @@ function renderTf(topic: string) {
   const display = getDisplayByTopic(topic);
   const visibleFrames = new Set(display?.tfVisibleFrames ?? []);
   const showAllFrames = visibleFrames.size === 0;
+  // 机器人当前选用的坐标系不能被历史 TF 筛选配置遮蔽，否则 HUD 可解析位姿但三维轴不显示。
+  if (
+    !showAllFrames &&
+    normalizeTfTopicKey(topic) === normalizeTfTopicKey(robotPoseTfTopic)
+  ) {
+    visibleFrames.add(currentRobotPoseFrame());
+  }
   let group = tfGroupByTopic.get(topic);
   if (!group) {
     group = new THREE.Group();
     scene.add(group);
     tfGroupByTopic.set(topic, group);
   }
-  const frameNodeMap = tfFrameNodeCacheByTopic.get(topic) ?? new Map<string, THREE.Group>();
+  const frameNodeMap =
+    tfFrameNodeCacheByTopic.get(topic) ?? new Map<string, THREE.Group>();
   const frames = tfFramesForTopic(topic)
     .filter((frameName) => showAllFrames || visibleFrames.has(frameName))
     .sort((left, right) => left.localeCompare(right, "zh-CN"));
@@ -2948,7 +4403,11 @@ function renderTf(topic: string) {
   });
 
   frames.forEach((frameName) => {
-    const transformMatrix = resolveFrameTransformToFixed(frameName, null, topic);
+    const transformMatrix = resolveFrameTransformToFixed(
+      frameName,
+      null,
+      topic,
+    );
     if (!transformMatrix) {
       const hiddenNode = frameNodeMap.get(frameName);
       if (hiddenNode) {
@@ -2996,7 +4455,10 @@ function renderLaser(topic: string, message: any) {
   }
 
   const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(positions, 3),
+  );
   const material = new THREE.PointsMaterial({
     color: "#ffdd57",
     size: 0.05,
@@ -3006,7 +4468,12 @@ function renderLaser(topic: string, message: any) {
   sourceFrameByTopic.set(topic, normalizeFrameId(message?.header?.frame_id));
   sourceStampMsByTopic.set(topic, extractHeaderStampMs(message));
   cacheTopicLocalMatrix(topic, composeLocalMatrix());
-  applyObjectFrameTransform(topic, points, message?.header?.frame_id, sourceStampMsByTopic.get(topic) ?? null);
+  applyObjectFrameTransform(
+    topic,
+    points,
+    message?.header?.frame_id,
+    sourceStampMsByTopic.get(topic) ?? null,
+  );
   scene.add(points);
   laserByTopic.set(topic, points);
 }
@@ -3058,14 +4525,23 @@ function markerPosition(message: any) {
   );
 }
 
-function buildMarkerLine(points: any[], color: THREE.Color, opacity: number, closed = false, lineWidth = 0.05) {
+function buildMarkerLine(
+  points: any[],
+  color: THREE.Color,
+  opacity: number,
+  closed = false,
+  lineWidth = 0.05,
+) {
   const positions = points.flatMap((point: any) => [
     Number(point?.x ?? 0),
     Number(point?.y ?? 0),
     Number(point?.z ?? 0),
   ]);
   const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(positions, 3),
+  );
   const material = new THREE.LineBasicMaterial({
     color,
     transparent: opacity < 1,
@@ -3078,7 +4554,13 @@ function buildMarkerLine(points: any[], color: THREE.Color, opacity: number, clo
   return line;
 }
 
-function buildMarkerSphereList(points: any[], scale: any, colors: any[], fallbackColor: THREE.Color, fallbackOpacity: number) {
+function buildMarkerSphereList(
+  points: any[],
+  scale: any,
+  colors: any[],
+  fallbackColor: THREE.Color,
+  fallbackOpacity: number,
+) {
   const group = new THREE.Group();
   const radius = Math.max(0.01, Number(scale?.x ?? 0.1) / 2);
   points.forEach((point: any, index: number) => {
@@ -3093,7 +4575,11 @@ function buildMarkerSphereList(points: any[], scale: any, colors: any[], fallbac
         opacity: colorInfo.opacity,
       }),
     );
-    mesh.position.set(Number(point?.x ?? 0), Number(point?.y ?? 0), Number(point?.z ?? 0));
+    mesh.position.set(
+      Number(point?.x ?? 0),
+      Number(point?.y ?? 0),
+      Number(point?.z ?? 0),
+    );
     group.add(mesh);
   });
   return group;
@@ -3102,11 +4588,28 @@ function buildMarkerSphereList(points: any[], scale: any, colors: any[], fallbac
 function buildMarkerArrow(message: any, color: THREE.Color, opacity: number) {
   const group = new THREE.Group();
   const points = Array.isArray(message?.points) ? message.points : [];
-  const start = points.length >= 1 ? new THREE.Vector3(Number(points[0]?.x ?? 0), Number(points[0]?.y ?? 0), Number(points[0]?.z ?? 0)) : new THREE.Vector3();
-  const end = points.length >= 2 ? new THREE.Vector3(Number(points[1]?.x ?? 0), Number(points[1]?.y ?? 0), Number(points[1]?.z ?? 0)) : new THREE.Vector3(0.4, 0, 0);
+  const start =
+    points.length >= 1
+      ? new THREE.Vector3(
+          Number(points[0]?.x ?? 0),
+          Number(points[0]?.y ?? 0),
+          Number(points[0]?.z ?? 0),
+        )
+      : new THREE.Vector3();
+  const end =
+    points.length >= 2
+      ? new THREE.Vector3(
+          Number(points[1]?.x ?? 0),
+          Number(points[1]?.y ?? 0),
+          Number(points[1]?.z ?? 0),
+        )
+      : new THREE.Vector3(0.4, 0, 0);
   const direction = end.clone().sub(start);
   const length = Math.max(0.05, direction.length());
-  const normalized = direction.lengthSq() > 1e-8 ? direction.normalize() : new THREE.Vector3(1, 0, 0);
+  const normalized =
+    direction.lengthSq() > 1e-8
+      ? direction.normalize()
+      : new THREE.Vector3(1, 0, 0);
   const arrow = new THREE.ArrowHelper(
     normalized,
     start,
@@ -3116,10 +4619,10 @@ function buildMarkerArrow(message: any, color: THREE.Color, opacity: number) {
     Math.max(0.04, Number(message?.scale?.y ?? 0.12)),
   );
   arrow.name = "marker-arrow";
-  arrow.line.material.transparent = opacity < 1;
-  arrow.line.material.opacity = opacity;
-  arrow.cone.material.transparent = opacity < 1;
-  arrow.cone.material.opacity = opacity;
+  (arrow.line.material as THREE.Material).transparent = opacity < 1;
+  (arrow.line.material as THREE.Material).opacity = opacity;
+  (arrow.cone.material as THREE.Material).transparent = opacity < 1;
+  (arrow.cone.material as THREE.Material).opacity = opacity;
   group.add(arrow);
   return group;
 }
@@ -3133,7 +4636,11 @@ function buildMarkerObject(display: NavViewerDisplay, message: any) {
   }
   if (type === 2) {
     const mesh = new THREE.Mesh(
-      new THREE.SphereGeometry(Math.max(0.01, Number(message?.scale?.x ?? 0.15) / 2), 18, 14),
+      new THREE.SphereGeometry(
+        Math.max(0.01, Number(message?.scale?.x ?? 0.15) / 2),
+        18,
+        14,
+      ),
       new THREE.MeshStandardMaterial({
         color: fallback.color,
         transparent: fallback.opacity < 1,
@@ -3147,7 +4654,10 @@ function buildMarkerObject(display: NavViewerDisplay, message: any) {
   if (type === 3) {
     const geometry = new THREE.CylinderGeometry(
       Math.max(0.01, Number(message?.scale?.x ?? 0.2) / 2),
-      Math.max(0.01, Number(message?.scale?.y ?? Number(message?.scale?.x ?? 0.2)) / 2),
+      Math.max(
+        0.01,
+        Number(message?.scale?.y ?? Number(message?.scale?.x ?? 0.2)) / 2,
+      ),
       Math.max(0.01, Number(message?.scale?.z ?? 0.3)),
       24,
     );
@@ -3169,13 +4679,31 @@ function buildMarkerObject(display: NavViewerDisplay, message: any) {
     return mesh;
   }
   if (type === 4 && points.length >= 2) {
-    return buildMarkerLine(points, fallback.color, fallback.opacity, false, Number(message?.scale?.x ?? 0.05));
+    return buildMarkerLine(
+      points,
+      fallback.color,
+      fallback.opacity,
+      false,
+      Number(message?.scale?.x ?? 0.05),
+    );
   }
   if (type === 5 && points.length >= 2) {
-    return buildMarkerLine(points, fallback.color, fallback.opacity, false, Number(message?.scale?.x ?? 0.05));
+    return buildMarkerLine(
+      points,
+      fallback.color,
+      fallback.opacity,
+      false,
+      Number(message?.scale?.x ?? 0.05),
+    );
   }
   if (type === 7 && points.length >= 1) {
-    return buildMarkerSphereList(points, message?.scale, Array.isArray(message?.colors) ? message.colors : [], fallback.color, fallback.opacity);
+    return buildMarkerSphereList(
+      points,
+      message?.scale,
+      Array.isArray(message?.colors) ? message.colors : [],
+      fallback.color,
+      fallback.opacity,
+    );
   }
   return null;
 }
@@ -3201,7 +4729,8 @@ function ensureMarkerTopicGroup(topic: string) {
 
 function removeMarkerEntry(topic: string, entryKey: string) {
   const group = markerObjectByTopic.get(topic) as THREE.Group | undefined;
-  const entryMap = group?.userData?.markerEntries as Map<string, THREE.Object3D> | undefined;
+  const entryMap = group?.userData?.markerEntries as
+    Map<string, THREE.Object3D> | undefined;
   if (!group || !entryMap) {
     return;
   }
@@ -3267,18 +4796,28 @@ function renderMarker(display: NavViewerDisplay, message: any) {
   }
   group.add(markerObject);
   entryMap.set(entryKey, markerObject);
-  sourceFrameByTopic.set(topic, normalizeFrameId(message?.header?.frame_id) || currentFixedFrame());
+  sourceFrameByTopic.set(
+    topic,
+    normalizeFrameId(message?.header?.frame_id) || currentFixedFrame(),
+  );
   sourceStampMsByTopic.set(topic, extractHeaderStampMs(message));
   cacheTopicLocalMatrix(topic, composeLocalMatrix());
-  applyObjectFrameTransform(topic, group, sourceFrameByTopic.get(topic), sourceStampMsByTopic.get(topic) ?? null);
+  applyObjectFrameTransform(
+    topic,
+    group,
+    sourceFrameByTopic.get(topic),
+    sourceStampMsByTopic.get(topic) ?? null,
+  );
   group.visible = true;
 
   const lifetimeMs = markerLifetimeMs(message);
   const shouldAutoRemove = lifetimeMs > 0 && lifetimeMs >= 800;
   if (shouldAutoRemove) {
     window.setTimeout(() => {
-      const latestGroup = markerObjectByTopic.get(topic) as THREE.Group | undefined;
-      const latestEntryMap = latestGroup?.userData?.markerEntries as Map<string, THREE.Object3D> | undefined;
+      const latestGroup = markerObjectByTopic.get(topic) as
+        THREE.Group | undefined;
+      const latestEntryMap = latestGroup?.userData?.markerEntries as
+        Map<string, THREE.Object3D> | undefined;
       if (latestEntryMap?.get(entryKey) === markerObject) {
         removeMarkerEntry(topic, entryKey);
       }
@@ -3320,9 +4859,14 @@ function renderTwist(display: NavViewerDisplay, message: any) {
     twistObjectByTopic.set(topic, group);
   }
 
-  const arrow = group.getObjectByName("twist-arrow") as THREE.ArrowHelper | null;
+  const arrow = group.getObjectByName(
+    "twist-arrow",
+  ) as THREE.ArrowHelper | null;
   if (arrow) {
-    const direction = speed > 1e-6 ? speedVector.clone().normalize() : new THREE.Vector3(1, 0, 0);
+    const direction =
+      speed > 1e-6
+        ? speedVector.clone().normalize()
+        : new THREE.Vector3(1, 0, 0);
     arrow.setDirection(direction);
     arrow.setLength(Math.max(0.18, speed), 0.18, 0.1);
     arrow.setColor(new THREE.Color(twistColorForDisplay(display)));
@@ -3331,8 +4875,16 @@ function renderTwist(display: NavViewerDisplay, message: any) {
   group.quaternion.setFromAxisAngle(new THREE.Vector3(0, 0, 1), anchor.yaw);
   sourceFrameByTopic.set(topic, anchor.frameId);
   sourceStampMsByTopic.set(topic, extractHeaderStampMs(message));
-  cacheTopicLocalMatrix(topic, composeLocalMatrix(group.position.clone(), group.quaternion.clone()));
-  applyObjectFrameTransform(topic, group, anchor.frameId, sourceStampMsByTopic.get(topic) ?? null);
+  cacheTopicLocalMatrix(
+    topic,
+    composeLocalMatrix(group.position.clone(), group.quaternion.clone()),
+  );
+  applyObjectFrameTransform(
+    topic,
+    group,
+    anchor.frameId,
+    sourceStampMsByTopic.get(topic) ?? null,
+  );
   group.visible = true;
 }
 
@@ -3362,14 +4914,22 @@ function renderObstacleZone(topic: string, message: any) {
 
   sourceFrameByTopic.set(topic, anchor.frameId);
   sourceStampMsByTopic.set(topic, null);
-  cacheTopicLocalMatrix(topic, composeLocalMatrix(zoneGroup.position.clone(), zoneGroup.quaternion.clone()));
+  cacheTopicLocalMatrix(
+    topic,
+    composeLocalMatrix(
+      zoneGroup.position.clone(),
+      zoneGroup.quaternion.clone(),
+    ),
+  );
   applyObjectFrameTransform(topic, zoneGroup, anchor.frameId, null);
   zoneGroup.visible = true;
   sceneStatus.value = `已更新风险区: ${topic} (${state.label})`;
 }
 
 function ingestTfMessage(topic: string, message: any) {
-  const transforms = Array.isArray(message?.transforms) ? message.transforms : [];
+  const transforms = Array.isArray(message?.transforms)
+    ? message.transforms
+    : [];
   const normalizedTopic = normalizeTfTopicKey(topic);
   const topicHistoryMap = tfHistoryMapForTopic(normalizedTopic, true);
   if (!topicHistoryMap) {
@@ -3385,13 +4945,25 @@ function ingestTfMessage(topic: string, message: any) {
     }
     const nextSample: TfTransformSample = {
       parentFrame,
-      matrixToParent: buildTransformMatrix(item?.transform?.translation, item?.transform?.rotation),
+      matrixToParent: buildTransformMatrix(
+        item?.transform?.translation,
+        item?.transform?.rotation,
+      ),
       stampMs: isStaticTopic ? null : extractHeaderStampMs(item),
+      // ROS 时钟可与浏览器系统时钟不同步；缓存淘汰只能依据本地实际接收时刻。
+      receivedAtMs: currentTimeMs,
       staticTransform: isStaticTopic,
     };
     const history = topicHistoryMap.get(childFrame) ?? [];
-    const nextHistory = [...history.filter((sample) => sample.staticTransform !== isStaticTopic), nextSample]
-      .filter((sample) => sample.staticTransform || sample.stampMs === null || currentTimeMs - sample.stampMs <= maxTfHistoryAgeMs)
+    const nextHistory = [
+      ...history.filter((sample) => sample.staticTransform !== isStaticTopic),
+      nextSample,
+    ]
+      .filter(
+        (sample) =>
+          sample.staticTransform ||
+          currentTimeMs - sample.receivedAtMs <= maxTfHistoryAgeMs,
+      )
       .slice(-maxTfHistorySamplesPerFrame);
     topicHistoryMap.set(childFrame, nextHistory);
   });
@@ -3407,15 +4979,19 @@ function ensureSupportTfSubscriptions() {
     if (supportTfUnsubscribeMap.has(topic) || unsubscribeMap.has(topic)) {
       return;
     }
-    const unsubscribe = rosAdapter.subscribe(topic, "tf2_msgs/msg/TFMessage", (message) => {
-      ingestTfMessage(topic, message);
-      updateTopicTransforms();
-      props.displays.forEach((display) => {
-        if (display.kind === "tf") {
-          renderTf(display.topic);
-        }
-      });
-    });
+    const unsubscribe = rosAdapter!.subscribe(
+      topic,
+      "tf2_msgs/msg/TFMessage",
+      (message) => {
+        ingestTfMessage(topic, message);
+        updateTopicTransforms();
+        props.displays.forEach((display) => {
+          if (display.kind === "tf") {
+            renderTf(display.topic);
+          }
+        });
+      },
+    );
     supportTfUnsubscribeMap.set(topic, unsubscribe);
   });
 }
@@ -3430,14 +5006,19 @@ function ensureDisplaySubscription(display: NavViewerDisplay) {
     return;
   }
 
-  const unsubscribe = rosAdapter.subscribe(display.topic, display.messageType, (message) => {
-    const latestDisplay = getDisplayByTopic(display.topic) || display;
-    if (!shouldConsumeDisplayMessage(latestDisplay)) {
-      return;
-    }
-    latestMessageByTopic.set(latestDisplay.topic, message);
-    renderDisplayMessage(latestDisplay, message);
-  }, subscriptionOptionsForDisplay(display));
+  const unsubscribe = rosAdapter!.subscribe(
+    display.topic,
+    display.messageType,
+    (message) => {
+      const latestDisplay = getDisplayByTopic(display.topic) || display;
+      if (!shouldConsumeDisplayMessage(latestDisplay)) {
+        return;
+      }
+      latestMessageByTopic.set(latestDisplay.topic, message);
+      renderDisplayMessage(latestDisplay, message);
+    },
+    subscriptionOptionsForDisplay(display),
+  );
 
   unsubscribeMap.set(display.topic, unsubscribe);
 }
@@ -3462,10 +5043,19 @@ function renderDisplayMessage(display: NavViewerDisplay, message: any) {
     const result = renderPointCloud(display, message);
     sceneStatus.value = result.message;
     if (!result.ok && result.warningSignature) {
-      const previousSignature = pointCloudWarningSignatureByTopic.get(display.topic);
+      const previousSignature = pointCloudWarningSignatureByTopic.get(
+        display.topic,
+      );
       if (previousSignature !== result.warningSignature) {
-        pointCloudWarningSignatureByTopic.set(display.topic, result.warningSignature);
-        emit("rosLog", { source: "3DViewer", level: "warning", message: result.message });
+        pointCloudWarningSignatureByTopic.set(
+          display.topic,
+          result.warningSignature,
+        );
+        emit("rosLog", {
+          source: "3DViewer",
+          level: "warning",
+          message: result.message,
+        });
       }
     }
     return;
@@ -3540,14 +5130,20 @@ async function reconnectAndResubscribe() {
   tfTransformHistoryByTopic.clear();
   props.displays
     .filter((display) => display.kind === "tf")
-    .forEach((display) => emit("tfFramesChange", { topic: display.topic, frames: [] }));
+    .forEach((display) =>
+      emit("tfFramesChange", { topic: display.topic, frames: [] }),
+    );
 
   rosAdapter?.disconnect();
   rosAdapter = createSharedRosLiveAdapter({
     ...buildSharedRosConfig(),
     adapterName: "三维主视图",
     onStatusChange: (snapshot) => {
-      connectionLabel.value = snapshot.connected ? "已连接" : snapshot.reconnecting ? "重连中" : "未连接";
+      connectionLabel.value = snapshot.connected
+        ? "已连接"
+        : snapshot.reconnecting
+          ? "重连中"
+          : "未连接";
       sceneStatus.value = snapshot.message;
       updateBaseLinkHud();
       if (snapshot.connected) {
@@ -3558,7 +5154,7 @@ async function reconnectAndResubscribe() {
     onError: (event) => {
       emitRosLog(
         event.recoverable ? "warning" : "error",
-        `${event.scope}: ${event.message}${event.detail ? ` (${event.detail})` : ""}`
+        `${event.scope}: ${event.message}${event.detail ? ` (${event.detail})` : ""}`,
       );
     },
   });
@@ -3600,12 +5196,17 @@ function scheduleReconnectAndResubscribe() {
 
 watch(
   () => [props.provider, props.url, props.timeoutMs, props.fixedFrame],
-  () => scheduleReconnectAndResubscribe()
+  () => scheduleReconnectAndResubscribe(),
+);
+
+watch(
+  () => props.robotPoseFrame,
+  () => updateBaseLinkHud(),
 );
 
 watch(
   () => props.reconnectToken,
-  () => scheduleReconnectAndResubscribe()
+  () => scheduleReconnectAndResubscribe(),
 );
 
 watch(
@@ -3620,7 +5221,9 @@ watch(
     }
 
     const nextTopics = new Set(nextDisplays.map((item) => item.topic));
-    const previousTopics = new Set((previousDisplays ?? []).map((item) => item.topic));
+    const previousTopics = new Set(
+      (previousDisplays ?? []).map((item) => item.topic),
+    );
 
     previousTopics.forEach((topic) => {
       if (!nextTopics.has(topic)) {
@@ -3628,45 +5231,253 @@ watch(
       }
     });
 
-      nextDisplays.forEach((display) => ensureDisplaySubscription(display));
-      syncMapDisplayConfigs(nextDisplays);
-      syncPointCloudDisplayConfigs(nextDisplays);
-      syncPathDisplayConfigs(nextDisplays);
-      syncPoseDisplayConfigs(nextDisplays);
-      syncMarkerDisplayConfigs(nextDisplays);
-      syncTwistDisplayConfigs(nextDisplays);
-      nextDisplays
-        .filter((display) => display.kind === "tf")
-        .forEach((display) => renderTf(display.topic));
+    nextDisplays.forEach((display) => ensureDisplaySubscription(display));
+    syncMapDisplayConfigs(nextDisplays);
+    syncPointCloudDisplayConfigs(nextDisplays);
+    syncPathDisplayConfigs(nextDisplays);
+    syncPoseDisplayConfigs(nextDisplays);
+    syncMarkerDisplayConfigs(nextDisplays);
+    syncTwistDisplayConfigs(nextDisplays);
+    nextDisplays
+      .filter((display) => display.kind === "tf")
+      .forEach((display) => renderTf(display.topic));
     if (nextDisplays.length === 0) {
       sceneStatus.value = "等待显示项";
     }
   },
-  { deep: true }
+  { deep: true },
 );
 
 watch(
   () => currentInteractionMode.value,
   () => {
+    taskPickSerial++;
+    pendingTaskPick = null;
+    if (controls) controls.enabled = true;
     finishInteraction(false);
-  }
+  },
 );
 
+watch(
+  () => platformState.cameraReset,
+  () => {
+    if (!camera || !controls) return;
+    if (platformState.demo) {
+      camera.position.set(-8.2, -8.2, 9);
+      controls.target.set(0, 0, 0.25);
+    } else {
+      focusOnNdtPose();
+    }
+    controls.update();
+  },
+);
+watch(
+  () => props.url,
+  (url) => {
+    if (!url) {
+      hasConnected = false;
+      lastRobotPose = null;
+      arena?.reset();
+      platformState.pose = "等待位姿数据";
+    }
+  },
+);
+
+// 任务覆盖层与 ROS 显示对象独立，切换侧栏不重建场景或连接。
+let taskRouteGroup: THREE.Group | null = null;
+/** 编号优先于坐标轴拾取，和最终绘制层级保持一致。 */
+function pickTaskMarker(event: MouseEvent) {
+  if (!props.taskEditing || !taskRouteGroup || !renderer || !camera)
+    return null;
+  updateTaskMarkerScales();
+  taskRouteGroup.updateMatrixWorld(true);
+  rayPayloadFromMouse(event);
+  return (
+    raycaster.intersectObjects(
+      taskRouteGroup.children.filter((item) => item.userData.taskPoint),
+      false,
+    )[0] || null
+  );
+}
+/** 图标世界尺寸缓慢增长，屏幕高度封顶；锚点固定在点位，不随缩放漂移。 */
+function updateTaskMarkerScales() {
+  if (!camera || !renderer || !taskRouteGroup) return;
+  const height = Math.max(1, renderer.domElement.clientHeight);
+  taskRouteGroup.children.forEach((object) => {
+    if (!(object instanceof THREE.Sprite)) return;
+    const distance = camera!.position.distanceTo(object.position);
+    const depth = -object.position
+      .clone()
+      .applyMatrix4(camera!.matrixWorldInverse).z;
+    const unitsPerPixel =
+      (2 *
+        Math.max(0.01, depth) *
+        Math.tan(THREE.MathUtils.degToRad(camera!.fov / 2))) /
+      height;
+    const worldHeight = Math.min(
+      0.76 * poseVisualScale(distance),
+      56 * unitsPerPixel,
+    );
+    object.scale.set((worldHeight * 96) / 112, worldHeight, 1);
+  });
+}
+/** 复制当前可解析的真实位姿，断开连接时拒绝使用缓存或演示坐标。 */
+function getTaskRobotPose(): TaskPose | null {
+  if (connectionLabel.value !== "已连接") return null;
+  const matrix = resolveRobotTfPose()?.matrix;
+  if (matrix) {
+    const position = new THREE.Vector3(),
+      rotation = new THREE.Quaternion();
+    matrix.decompose(position, rotation, new THREE.Vector3());
+    const angles = new THREE.Euler().setFromQuaternion(rotation, "XYZ");
+    return {
+      x: position.x,
+      y: position.y,
+      z: position.z,
+      yaw: angles.z,
+      roll: angles.x,
+      pitch: angles.y,
+    };
+  }
+  const anchor = resolvePrimaryPoseAnchor();
+  if (!anchor) return null;
+  const poseObject = poseObjectByTopic.get(anchor.topic);
+  if (!poseObject) return null;
+  const angles = new THREE.Euler().setFromQuaternion(
+    poseObject.getWorldQuaternion(new THREE.Quaternion()),
+    "XYZ",
+  );
+  return {
+    x: anchor.x,
+    y: anchor.y,
+    z: anchor.z,
+    roll: angles.x,
+    pitch: angles.y,
+    yaw: angles.z,
+  };
+}
+/** 复用初始化的变换控件，但任务候选永远不进入定位发布链路。 */
+function editTaskPose(pose: TaskPose) {
+  const group = ensureInitialPoseCandidateGroup(
+    pose.x,
+    pose.y,
+    pose.z,
+    pose.yaw,
+  );
+  group?.quaternion.setFromEuler(
+    new THREE.Euler(pose.roll ?? 0, pose.pitch ?? 0, pose.yaw, "XYZ"),
+  );
+  group?.updateMatrixWorld(true);
+}
+function focusTaskPose(pose: TaskPose) {
+  if (!camera || !controls) return;
+  const target = new THREE.Vector3(pose.x, pose.y, pose.z);
+  camera.position.add(target.clone().sub(controls.target));
+  controls.target.copy(target);
+  controls.update();
+}
+/** 编号和虚线表示任务顺序；朝向箭头使用 ROS Z-up 坐标。 */
+function rebuildTaskRoute() {
+  if (taskRouteGroup) clearThreeObject(taskRouteGroup);
+  taskRouteGroup = null;
+  if (!scene || !props.taskPoints?.length) return;
+  const group = new THREE.Group();
+  const points = props.taskPoints;
+  points.forEach((point, index) => {
+    const color =
+      index === 0
+        ? "#76b933"
+        : index === points.length - 1
+          ? "#ef5368"
+          : "#2895ef";
+    const canvas = document.createElement("canvas");
+    canvas.width = 96;
+    canvas.height = 112;
+    const context = canvas.getContext("2d")!;
+    context.fillStyle = color;
+    context.beginPath();
+    context.arc(48, 45, 36, 0, Math.PI * 2);
+    context.fill();
+    context.beginPath();
+    context.moveTo(32, 73);
+    context.lineTo(48, 108);
+    context.lineTo(64, 73);
+    context.fill();
+    context.strokeStyle = "white";
+    context.lineWidth = 3;
+    context.beginPath();
+    context.arc(48, 45, 36, 0, Math.PI * 2);
+    context.stroke();
+    context.fillStyle = "white";
+    context.font = "bold 40px sans-serif";
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillText(String(index + 1), 48, 46);
+    const marker = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: new THREE.CanvasTexture(canvas),
+        depthTest: false,
+        depthWrite: false,
+      }),
+    );
+    marker.position.set(point.x, point.y, point.z + 0.06);
+    marker.center.set(0.5, 0);
+    marker.scale.set(0.65, 0.76, 1);
+    marker.renderOrder = 1000;
+    marker.userData.taskPoint = point;
+    group.add(marker);
+    group.add(
+      new THREE.ArrowHelper(
+        new THREE.Vector3(1, 0, 0).applyEuler(
+          new THREE.Euler(point.roll ?? 0, point.pitch ?? 0, point.yaw, "XYZ"),
+        ),
+        new THREE.Vector3(point.x, point.y, point.z + 0.05),
+        0.7,
+        color,
+        0.2,
+        0.12,
+      ),
+    );
+  });
+  if (points.length > 1) {
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(
+        points.map(
+          (point) => new THREE.Vector3(point.x, point.y, point.z + 0.04),
+        ),
+      ),
+      new THREE.LineDashedMaterial({
+        color: "#2895ef",
+        dashSize: 0.3,
+        gapSize: 0.18,
+      }),
+    );
+    line.computeLineDistances();
+    group.add(line);
+  }
+  scene.add(group);
+  taskRouteGroup = group;
+}
+watch(() => props.taskPoints, rebuildTaskRoute, { deep: true });
+
 defineExpose<NavViewerExpose>({
+  getTaskRobotPose,
+  editTaskPose,
+  focusTaskPose,
   focusOnNdtPose,
   attachOfflineMapPointCloud,
   clearOfflineMapPointCloud,
   setOfflineMapDisplayMode,
+  updateOfflineMapVisualSettings,
   attachInitialPosePointCloud,
-  attachInitialPoseLatestPointCloud,
   updateInitialPosePointCloudSize,
   getInitialPoseCandidate,
   clearInitialPoseCandidate,
-  setInitialPoseTransformMode,
 });
 
 onMounted(async () => {
   initializeScene();
+  rebuildTaskRoute();
   resizeObserver = new ResizeObserver(() => fitRendererSize());
   if (mountRef.value) {
     resizeObserver.observe(mountRef.value);
@@ -3702,16 +5513,30 @@ onBeforeUnmount(() => {
 <template>
   <div class="nav-viewer-shell">
     <div class="nav-viewer-toolbar">
-      <span class="status-pill" :class="{ success: connectionLabel === '已连接' }">{{ connectionLabel }}</span>
+      <span
+        class="status-pill"
+        :class="{ success: connectionLabel === '已连接' }"
+        >{{ connectionLabel }}</span
+      >
       <span class="nav-viewer-meta">Fixed Frame: {{ fixedFrame }}</span>
       <span class="nav-viewer-meta">显示项: {{ hudDisplayCount }}</span>
     </div>
 
     <div class="nav-viewer-stage">
       <div ref="mountRef" class="nav-viewer-canvas-host"></div>
-      <div class="nav-offline-clip-widget" :class="{ disabled: !offlineClipActive }">
-        <div class="nav-offline-clip-title">离线地图裁剪</div>
-        <div class="nav-offline-display-toggle" aria-label="离线地图显示模式">
+      <div
+        class="nav-offline-clip-widget"
+        :class="{ disabled: !offlineClipPanelVisible }"
+      >
+        <div class="nav-offline-clip-head">
+          <span class="nav-offline-clip-title">坐标裁剪</span>
+          <span class="nav-offline-clip-hint">拖动轴向裁剪点云</span>
+        </div>
+        <div
+          class="nav-offline-display-toggle"
+          role="group"
+          aria-label="离线地图显示模式"
+        >
           <button
             type="button"
             :class="{ active: offlineMapDisplayMode === 'voxel' }"
@@ -3730,108 +5555,190 @@ onBeforeUnmount(() => {
           >
             点云
           </button>
+          <button
+            type="button"
+            :class="{ active: offlineMapDisplayMode === 'render' }"
+            :disabled="!offlineClipActive"
+            title="使用暮光材质和阴影渲染占据 voxel"
+            @click="setOfflineMapDisplayMode('render')"
+          >
+            渲染
+          </button>
         </div>
-        <div class="nav-offline-clip-axis-control" aria-label="离线点云六向裁剪">
-          <span
-            class="clip-axis-arrow axis-xmin"
+        <div
+          class="nav-offline-clip-axis-control"
+          :class="
+            activeOfflineClipFace
+              ? `dragging dragging-${clipAxisForFace(activeOfflineClipFace)}`
+              : ''
+          "
+          aria-label="离线点云六向裁剪"
+        >
+          <!-- 纯视觉几何层：同心辅助圆与轴向细杆，不承载任何交互 -->
+          <svg
+            class="clip-axis-geometry"
+            viewBox="0 0 170 160"
+            aria-hidden="true"
+          >
+            <circle class="geo-ring" cx="85" cy="80" r="30"></circle>
+            <circle class="geo-ring faint" cx="85" cy="80" r="44"></circle>
+            <line class="geo-rod rod-x" x1="98" y1="80" x2="128" y2="80"></line>
+            <line class="geo-rod rod-x" x1="72" y1="80" x2="42" y2="80"></line>
+            <line class="geo-rod rod-z" x1="85" y1="67" x2="85" y2="37"></line>
+            <line class="geo-rod rod-z" x1="85" y1="93" x2="85" y2="123"></line>
+            <line
+              class="geo-rod rod-y"
+              x1="94.2"
+              y1="69.8"
+              x2="116.8"
+              y2="47.2"
+            ></line>
+            <line
+              class="geo-rod rod-y"
+              x1="75.8"
+              y1="90.2"
+              x2="53.2"
+              y2="112.8"
+            ></line>
+          </svg>
+          <span class="clip-axis-hub" aria-hidden="true"></span>
+          <button
+            type="button"
+            class="clip-axis-arrow axis-x axis-xmin"
             :class="{ active: activeOfflineClipFace === 'xmin' }"
-            title="拖动左面裁剪边界"
+            title="左边界 X−：拖动或 ←→ 键调整"
             @pointerdown.stop.prevent="beginOfflineClipFaceDrag('xmin', $event)"
             @pointermove.stop.prevent="dragOfflineClipFace"
             @pointerup.stop.prevent="endOfflineClipFaceDrag"
             @pointercancel.stop.prevent="endOfflineClipFaceDrag"
-          ></span>
-          <span
-            class="clip-axis-arrow axis-xmax"
+            @keydown="handleOfflineClipFaceKeydown('xmin', $event)"
+            @mouseenter="setHoveredOfflineClipFace('xmin')"
+            @mouseleave="setHoveredOfflineClipFace(null)"
+          ></button>
+          <button
+            type="button"
+            class="clip-axis-arrow axis-x axis-xmax"
             :class="{ active: activeOfflineClipFace === 'xmax' }"
-            title="拖动右面裁剪边界"
+            title="右边界 X+：拖动或 ←→ 键调整"
             @pointerdown.stop.prevent="beginOfflineClipFaceDrag('xmax', $event)"
             @pointermove.stop.prevent="dragOfflineClipFace"
             @pointerup.stop.prevent="endOfflineClipFaceDrag"
             @pointercancel.stop.prevent="endOfflineClipFaceDrag"
-          ></span>
-          <span
-            class="clip-axis-arrow axis-ymin"
+            @keydown="handleOfflineClipFaceKeydown('xmax', $event)"
+            @mouseenter="setHoveredOfflineClipFace('xmax')"
+            @mouseleave="setHoveredOfflineClipFace(null)"
+          ></button>
+          <button
+            type="button"
+            class="clip-axis-arrow axis-y axis-ymin"
             :class="{ active: activeOfflineClipFace === 'ymin' }"
-            title="拖动后面裁剪边界"
+            title="后边界 Y−：拖动或 ←→ 键调整"
             @pointerdown.stop.prevent="beginOfflineClipFaceDrag('ymin', $event)"
             @pointermove.stop.prevent="dragOfflineClipFace"
             @pointerup.stop.prevent="endOfflineClipFaceDrag"
             @pointercancel.stop.prevent="endOfflineClipFaceDrag"
-          ></span>
-          <span
-            class="clip-axis-arrow axis-ymax"
+            @keydown="handleOfflineClipFaceKeydown('ymin', $event)"
+            @mouseenter="setHoveredOfflineClipFace('ymin')"
+            @mouseleave="setHoveredOfflineClipFace(null)"
+          ></button>
+          <button
+            type="button"
+            class="clip-axis-arrow axis-y axis-ymax"
             :class="{ active: activeOfflineClipFace === 'ymax' }"
-            title="拖动前面裁剪边界"
+            title="前边界 Y+：拖动或 ←→ 键调整"
             @pointerdown.stop.prevent="beginOfflineClipFaceDrag('ymax', $event)"
             @pointermove.stop.prevent="dragOfflineClipFace"
             @pointerup.stop.prevent="endOfflineClipFaceDrag"
             @pointercancel.stop.prevent="endOfflineClipFaceDrag"
-          ></span>
-          <span
-            class="clip-axis-arrow axis-zmin"
+            @keydown="handleOfflineClipFaceKeydown('ymax', $event)"
+            @mouseenter="setHoveredOfflineClipFace('ymax')"
+            @mouseleave="setHoveredOfflineClipFace(null)"
+          ></button>
+          <button
+            type="button"
+            class="clip-axis-arrow axis-z axis-zmin"
             :class="{ active: activeOfflineClipFace === 'zmin' }"
-            title="拖动底面裁剪边界"
+            title="底面边界 Z−：拖动或 ↑↓ 键调整"
             @pointerdown.stop.prevent="beginOfflineClipFaceDrag('zmin', $event)"
             @pointermove.stop.prevent="dragOfflineClipFace"
             @pointerup.stop.prevent="endOfflineClipFaceDrag"
             @pointercancel.stop.prevent="endOfflineClipFaceDrag"
-          ></span>
-          <span
-            class="clip-axis-arrow axis-zmax"
+            @keydown="handleOfflineClipFaceKeydown('zmin', $event)"
+            @mouseenter="setHoveredOfflineClipFace('zmin')"
+            @mouseleave="setHoveredOfflineClipFace(null)"
+          ></button>
+          <button
+            type="button"
+            class="clip-axis-arrow axis-z axis-zmax"
             :class="{ active: activeOfflineClipFace === 'zmax' }"
-            title="拖动顶面裁剪边界"
+            title="顶面边界 Z+：拖动或 ↑↓ 键调整"
             @pointerdown.stop.prevent="beginOfflineClipFaceDrag('zmax', $event)"
             @pointermove.stop.prevent="dragOfflineClipFace"
             @pointerup.stop.prevent="endOfflineClipFaceDrag"
             @pointercancel.stop.prevent="endOfflineClipFaceDrag"
-          ></span>
+            @keydown="handleOfflineClipFaceKeydown('zmax', $event)"
+            @mouseenter="setHoveredOfflineClipFace('zmax')"
+            @mouseleave="setHoveredOfflineClipFace(null)"
+          ></button>
         </div>
-        <button class="nav-offline-clip-reset" type="button" :disabled="!offlineClipActive" @click="resetOfflineClipBounds">重置裁剪</button>
+        <div v-if="offlineClipBoundsView" class="nav-offline-clip-readout">
+          <div
+            class="clip-axis-readout"
+            :class="{ active: highlightedOfflineClipAxis === 'x' }"
+          >
+            <span class="clip-axis-tag axis-x">X</span>
+            <span class="clip-axis-values"
+              >{{ offlineClipBoundsView.xmin.toFixed(2) }} →
+              {{ offlineClipBoundsView.xmax.toFixed(2) }} m</span
+            >
+          </div>
+          <div
+            class="clip-axis-readout"
+            :class="{ active: highlightedOfflineClipAxis === 'y' }"
+          >
+            <span class="clip-axis-tag axis-y">Y</span>
+            <span class="clip-axis-values"
+              >{{ offlineClipBoundsView.ymin.toFixed(2) }} →
+              {{ offlineClipBoundsView.ymax.toFixed(2) }} m</span
+            >
+          </div>
+          <div
+            class="clip-axis-readout"
+            :class="{ active: highlightedOfflineClipAxis === 'z' }"
+          >
+            <span class="clip-axis-tag axis-z">Z</span>
+            <span class="clip-axis-values"
+              >{{ offlineClipBoundsView.zmin.toFixed(2) }} →
+              {{ offlineClipBoundsView.zmax.toFixed(2) }} m</span
+            >
+          </div>
+        </div>
+        <button
+          class="nav-offline-clip-reset"
+          type="button"
+          :disabled="!offlineClipActive"
+          @click="resetOfflineClipBounds"
+        >
+          ↻ 重置裁剪
+        </button>
       </div>
       <div class="nav-viewer-base-link-hud" :class="`tone-${baseLinkHudTone}`">
         <span class="nav-viewer-base-link-title">机器狗位置</span>
         <span class="nav-viewer-base-link-text">{{ baseLinkHudText }}</span>
       </div>
-      <button class="nav-viewer-focus-button" type="button" aria-label="定位图示" title="定位图示" @click="handleFocusButtonClick">
-        <svg class="nav-viewer-focus-icon" viewBox="0 0 128 128" aria-hidden="true">
-          <defs>
-            <filter id="navFocusGlow" x="-30%" y="-30%" width="160%" height="160%">
-              <feGaussianBlur stdDeviation="2.4" result="blur" />
-              <feMerge>
-                <feMergeNode in="blur" />
-                <feMergeNode in="SourceGraphic" />
-              </feMerge>
-            </filter>
-            <radialGradient id="navFocusCore" cx="50%" cy="50%" r="50%">
-              <stop offset="0%" stop-color="#ebffff" />
-              <stop offset="58%" stop-color="#61ecff" />
-              <stop offset="100%" stop-color="#0aa8d7" />
-            </radialGradient>
-          </defs>
-          <g filter="url(#navFocusGlow)">
-            <circle cx="64" cy="64" r="36" class="nav-focus-ring outer" />
-            <circle cx="64" cy="64" r="29" class="nav-focus-ring inner" />
-            <circle cx="64" cy="64" r="16" fill="url(#navFocusCore)" class="nav-focus-core" />
-            <path class="nav-focus-mark north" d="M64 8 L67 34 L64 49 L61 34 Z" />
-            <path class="nav-focus-mark south" d="M64 120 L67 94 L64 79 L61 94 Z" />
-            <path class="nav-focus-mark west" d="M8 64 L34 61 L49 64 L34 67 Z" />
-            <path class="nav-focus-mark east" d="M120 64 L94 61 L79 64 L94 67 Z" />
-            <path class="nav-focus-arc" d="M24 49 A43 43 0 0 1 49 24" />
-            <path class="nav-focus-arc" d="M79 24 A43 43 0 0 1 104 49" />
-            <path class="nav-focus-arc" d="M24 79 A43 43 0 0 0 49 104" />
-            <path class="nav-focus-arc" d="M79 104 A43 43 0 0 0 104 79" />
-          </g>
-        </svg>
-      </button>
     </div>
 
     <div class="nav-viewer-footer">
       <span class="nav-viewer-status">{{ sceneStatus }}</span>
-      <span v-if="connectionLabel !== '已连接' || hudDisplayCount === 0" class="nav-viewer-status">
+      <span
+        v-if="connectionLabel !== '已连接' || hudDisplayCount === 0"
+        class="nav-viewer-status"
+      >
         {{ emptyStateText }}
       </span>
-      <span v-if="interactionHintText" class="nav-viewer-status accent">{{ interactionHintText }}</span>
+      <span v-if="interactionHintText" class="nav-viewer-status accent">{{
+        interactionHintText
+      }}</span>
     </div>
   </div>
 </template>

@@ -1,3 +1,2 @@
-numpy
-matplotlib
-pyyaml
+# 功能说明：统一安装平台后端运行依赖。
+-r backend/requirements.txt

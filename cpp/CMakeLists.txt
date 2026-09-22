@@ -1,9 +1,16 @@
+# 功能说明：只构建平台四模块依赖的计算程序。
 cmake_minimum_required(VERSION 3.16)
 project(ros_tool_suite_cpp LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# 多配置生成器与后端约定同一可执行文件位置。
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR})
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
 
 set(COMMON_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
@@ -35,20 +42,3 @@ add_executable(nav_pcd_preview_cli
     src/mapping/pcd_reader.cpp
 )
 target_include_directories(nav_pcd_preview_cli PRIVATE ${COMMON_INCLUDE_DIR})
-
-add_executable(network_scan_cli
-    src/network_cli/main.cpp
-    src/network/scanner.cpp
-)
-target_include_directories(network_scan_cli PRIVATE ${COMMON_INCLUDE_DIR})
-
-add_executable(costmap_cli
-    src/costmap_cli/main.cpp
-    src/perception/costmap_player.cpp
-)
-target_include_directories(costmap_cli PRIVATE ${COMMON_INCLUDE_DIR})
-
-add_executable(ros_tool_suite_gui WIN32
-    src/gui/main.cpp
-)
-target_include_directories(ros_tool_suite_gui PRIVATE ${COMMON_INCLUDE_DIR})

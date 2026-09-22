@@ -1,247 +1,40 @@
-# ROS Tool Suite
+# ROS 测试平台
 
-## 功能模块开关
+本分支 ROS_PLATFROM 以 ros-test-platform 的页面和交互为参考，使用 Vue 3、Vite、TypeScript、Three.js，保留 ros_tool 的 FastAPI/C++ 业务实现。首页直接进入三维工作台，菜单仅含 PCD 转 PGM、PCD 切片、全局重定位候选点、ROS 定位导航测试。
 
-当前支持通过配置文件控制哪些功能模块在界面和后端中启用：
+## 运行
 
-- 配置文件：`backend/data/tool_modules.json`
+需要 Windows、Python 3.10+、Node.js 22、CMake 和 Visual Studio C++ 编译工具。
+首次运行 scripts/install_local.cmd；安装后运行 scripts/start_local.cmd，访问 http://127.0.0.1:8100。scripts/stop_local.cmd 停止本工作区托盘与后端。
 
-示例：
-
-```json
-{
-  "enabled_tools": {
-    "pcd_map": true,
-    "pcd_tile": true,
-    "network_scan": false,
-    "costmap": true,
-    "mtslash_export": false
-  }
-}
-```
-
-说明：
-
-- `true`：启用该模块
-- `false`：禁用该模块
-- 禁用后：
-  - 前端 `/api/tools` 不再返回该工具
-  - 首页、侧边栏、快捷入口不再显示该工具
-  - 对应执行接口会返回 `404 Tool not enabled`
-
-建议在打包前修改这个配置，以裁剪发布版功能范围。
-
-当前项目已经整理成一个可继续扩展的个人工具箱，而不是单一脚本。
-
-## 当前结构
-
-- `tool_suite_gui.py`
-  根目录兼容启动入口，继续支持 `python .\tool_suite_gui.py`
-- `src/ros_tool_suite/`
-  Python 主源码
-- `src/ros_tool_suite/tools/`
-  各个功能模块
-- `backend/`
-  FastAPI 服务层，统一对外提供工具 API
-- `frontend/`
-  Vue + Vite 前端，作为后续桌面壳 / Web 壳的主 UI
-- `docs/ARCHITECTURE.md`
-  目录和后续扩展建议
-- `docs/WEB_ARCHITECTURE.md`
-  Web 架构说明
-- `cpp/`
-  C++ 核心与 CLI
-- `web/`
-  早期预留目录，当前主线已切到 `frontend/ + backend/`
-- `scripts/build_onefile.ps1`
-  单文件 EXE 打包脚本
-
-## 当前功能
-
-- `pcd -> pgm`
-  从点云生成 `map.pgm`、`map.yaml`、透明绿道图
-- `pcd slicing`
-  切分点云并生成 metadata
-- `ip check`
-  扫描设备、解析 MAC 和 SSH 状态
-- `bag replay`
-  回放 costmap 并导出 GIF / PNG
-- `MTSlash 导出`
-  支持账号验证码登录、收藏夹列表、浏览器模式读取当前登录态并导出单帖 TXT
-
-## 当前主线
-
-- `frontend/`
-  负责页面、参数、日志、状态和工具切换
-- `backend/`
-  负责 API、任务入口、后续调度 C++ CLI
-- `cpp/`
-  负责核心计算与命令行工具
-
-当前已经打通：
-
-- Vue 前端骨架
-- FastAPI 后端骨架
-- `pcd_map_cli / pcd_tile_cli / global_relocalization_cli / nav_pcd_preview_cli / network_scan_cli / costmap_cli`
-- `frontend -> backend -> pcd_map_cli` 真实执行链路
-- 左侧工具分区、收藏、拖拽归类
-- 分区和收藏通过 `backend/data/tool_preferences.json` 持久化
-- C++ GUI 仅作为实验产物保留，不再作为主方向
-
-## 工具分区与收藏
-
-- 左侧支持默认分区：`Favorites / Mapping / Network / Perception / Other`
-- 支持新增自定义分区
-- 支持将工具拖到目标分区标题上完成归类
-- 支持点击星标加入 `Favorites`
-- 分区和收藏不再只保存在浏览器，后端会写入 `backend/data/tool_preferences.json`
-
-## 启动
+开发启动（两个终端）：
 
 ```powershell
-python .\tool_suite_gui.py
-```
-
-## 启动 Web 版
-
-后端：
-
-```powershell
-python .\backend\run.py
-```
-
-前端：
-
-```powershell
-cd .\frontend
+.\.venv\Scripts\python.exe backend/run.py
+cd frontend
 npm run dev
 ```
 
-也可以直接用：
+开发页面 http://127.0.0.1:5180，代理 API 到 8100；端口与原项目分开。C++ 四个可执行程序位于 cpp/build，文件输出默认位于当前工作区 output*。
+
+## 使用
+
+- 初始为演示场地、机器狗与遥测。设置中连接 ROS 或加载离线点云/体素后，真实数据接管。狗模型由 TF base_link 或位姿驱动；断线显示最后有效姿态，需显式“返回演示”才恢复演示。
+- 话题支持搜索、拖入监控、批量添加、暂停、折叠、排序、双击详情和录制。底部工具栏提供定位导航、显示项和诊断。
+- 候选点支持点击/Shift 多选、框选、点组拖动、人工补点、锁定、删除区域、回收站、撤销/重做和姿态编辑。拖动保持 Z；高度及 roll/pitch/yaw 在编辑面板调整。
+- 演示候选点禁止导出。真实审核通过 C++ 计算描述子，质量过滤沿用原算法；最终数量和拒绝数量见执行输出。
+
+## 验证
 
 ```powershell
-.\scripts\run_backend.cmd
-.\scripts\run_frontend.cmd
+cd frontend
+npm run typecheck
+npm run build
+cd ..
+.\.venv\Scripts\python.exe tests/test_platform.py
 ```
 
-默认地址：
+集成测试启动独立后端，用临时点云验证路由、地图/切片输出、体素/射线与真实描述子。
+tests/mock_rosbridge.py 提供 ws://127.0.0.1:9099，仅模拟本地消息；控制下发只写 output_qa/commands.jsonl，不接入真实机器人。
 
-- backend: `http://127.0.0.1:8000`，局域网访问用 `http://<本机局域网IP>:8000`
-- frontend: `http://127.0.0.1:5173`，局域网访问用 `http://<本机局域网IP>:5173`
-
-## 本地一键安装 / 启动 Web 版
-
-首次部署：
-
-```powershell
-.\scripts\install_local.cmd
-```
-
-启动：
-
-```powershell
-.\scripts\start_local.cmd
-```
-
-启动后访问：
-
-- 本机访问：`http://127.0.0.1:8000`
-- 局域网访问：`http://<本机局域网IP>:8000`
-
-这个模式会：
-
-- 在 `.venv/` 里安装 Python 依赖
-- 构建 `cpp/build/*.exe`
-- 安装并构建 `frontend/dist`
-- 由 FastAPI 后端直接托管前端页面
-
-目标机器需要预先安装：
-
-- Python 3.10+
-- Node.js LTS
-- CMake
-- 可用的 C++ 编译环境，例如 Visual Studio Build Tools；如果安装了 Ninja 会自动使用 Ninja
-
-如果 `cpp/build/` 里已经带有 `pcd_map_cli.exe`、`pcd_tile_cli.exe`、`global_relocalization_cli.exe`、`nav_pcd_preview_cli.exe`、`network_scan_cli.exe`、`costmap_cli.exe`，安装脚本会跳过 C++ 构建，此时目标机器不需要 CMake。
-
-## 构建单目录发行版
-
-先在开发机完成本地安装：
-
-```powershell
-.\scripts\install_local.cmd
-```
-
-然后生成可拷贝的发行目录和 zip：
-
-```powershell
-.\scripts\build_dist.cmd
-```
-
-输出位置：
-
-- `release/MoonToolBox/`
-- `release/MoonToolBox.zip`
-
-把 `release/MoonToolBox/` 拷贝到目标 Windows 机器后，双击：
-
-```powershell
-.\scripts\start_local.cmd
-```
-
-这个发行版会内置 Python 运行时、后端依赖、前端静态文件和 C++ CLI，不要求目标机器安装 Python、Node.js、CMake 或编译器。
-
-不要直接复制开发机上的 `.venv/` 到其他电脑；Windows 虚拟环境会记录创建时的 Python 绝对路径，复制后容易出现 `No Python at ...`。请使用 `release/MoonToolBox/` 或 `release/MoonToolBox.zip`。
-
-## 打包单文件 EXE
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build_onefile.ps1
-```
-
-## 构建 Windows 安装包
-
-先安装 Inno Setup 6，然后执行：
-
-```powershell
-.\scripts\build_installer.cmd
-```
-
-输出位置：
-
-- `release/MoonToolBoxSetup.exe`
-
-安装包会包含内置 Python 运行时、后端依赖、前端静态文件和 C++ CLI。安装后可从开始菜单或桌面快捷方式启动。
-
-## MTSlash 浏览器模式
-
-如果 Python 直连站点不稳定，但浏览器可以正常访问，可以在 MTSlash 导出模块中启用浏览器模式：
-
-1. 在工具页面选择 `浏览器` 为 Edge 或 Chrome。
-2. 点击 `启动浏览器模式`，工具会打开一个独立浏览器窗口。
-3. 在该窗口内登录站点，并打开需要导出的帖子或收藏夹。
-4. 点击 `刷新` 读取站内标签页，点击列表中的 URL 会同步到 `帖子 URL`。
-5. 将 `浏览器模式` 设为 `是` 后执行 `导出 TXT`，导出流程会读取浏览器页面 HTML。
-
-浏览器模式使用 `backend/data/browser_profiles/` 保存本地浏览器状态，该目录属于本机运行数据，不进入版本控制。
-
-## 依赖
-
-```powershell
-pip install -r .\requirements.txt
-```
-
-Web 依赖：
-
-```powershell
-python -m pip install -r .\backend\requirements.txt
-cd .\frontend
-npm install
-```
-
-## 说明
-
-- 当前桌面版仍然是 Python GUI。
-- Web 主线已经起好骨架，后续建议优先沿 `frontend/ + backend/ + cpp/` 演进。
-- 后续建议把性能瓶颈逐步下沉到 `cpp/`。
-- `pcd -> pgm` 已经接通真实执行链路，其他工具仍是骨架态。
+真实机器人、服务版本、现场网络、长时录制、超大地图性能和安装包发布尚未验证。架构与对应接口见 docs/WEB_ARCHITECTURE.md。

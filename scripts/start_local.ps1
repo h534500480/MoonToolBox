@@ -12,7 +12,7 @@ $BackendOutLog = Join-Path $LogDir "backend.out.log"
 $BackendErrLog = Join-Path $LogDir "backend.err.log"
 $TrayOutLog = Join-Path $LogDir "tray.out.log"
 $TrayErrLog = Join-Path $LogDir "tray.err.log"
-$BackendUrl = "http://127.0.0.1:8000"
+$BackendUrl = "http://127.0.0.1:8100"
 $HealthUrl = "$BackendUrl/api/health"
 
 function Invoke-Checked {

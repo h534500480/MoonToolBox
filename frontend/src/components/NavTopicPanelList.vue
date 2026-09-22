@@ -1,10 +1,25 @@
 <!-- 功能说明：导航测试页可折叠诊断小窗列表，按话题类型显示趋势线、状态卡片和关键指标。 -->
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
+import {
+  ChevronDown,
+  ChevronUp,
+  Pause,
+  Play,
+  X,
+  Circle,
+  GripVertical,
+  ChevronsLeft,
+  ChevronsRight,
+} from "@lucide/vue";
 
+import GlassDrawer from "./GlassDrawer.vue";
 import { saveNavRecording } from "../api/client";
 import { isPointCloudMessageType } from "../lib/ros/displayRegistry";
-import { createSharedRosLiveAdapter, type RosLiveConfig } from "../lib/ros/liveAdapter";
+import {
+  createSharedRosLiveAdapter,
+  type RosLiveConfig,
+} from "../lib/ros/liveAdapter";
 
 interface NavPanelItem {
   id: string;
@@ -113,13 +128,27 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  reorder: [from: string, to: string];
   toggle: [panelId: string];
   remove: [panelId: string];
+  addTopic: [topicKey: string];
   updateConfig: [panelId: string, patch: Partial<NavPanelItem>];
   recordingSaved: [];
-  rosLog: [payload: { source: string; level: "info" | "warning" | "error"; message: string }];
+  rosLog: [
+    payload: {
+      source: string;
+      level: "info" | "warning" | "error";
+      message: string;
+    },
+  ];
 }>();
 
+const detailId = ref<string | null>(null);
+const open = ref(true);
+let draggedPanel = "";
+const detailPanel = computed(() =>
+  props.panels.find((p) => p.id === detailId.value),
+);
 const panelStateMap = ref<Record<string, PanelState>>({});
 const adapterState = ref("未连接");
 const isAdapterConnected = ref(false);
@@ -147,6 +176,35 @@ function panelShellName() {
   return props.compact ? "侧边小窗" : "完整小窗";
 }
 
+function draggedTopicKey(event: DragEvent) {
+  return (
+    event.dataTransfer?.getData("text/ros-topic") ||
+    event.dataTransfer?.getData("text/plain") ||
+    ""
+  ).trim();
+}
+
+/** 拖拽话题落到已有卡片时优先按新增话题处理，避免被排序 drop 截断。 */
+function handlePanelDrop(event: DragEvent, panelId: string) {
+  const topicKey = draggedTopicKey(event);
+  if (topicKey) {
+    emit("addTopic", topicKey);
+    draggedPanel = "";
+    return;
+  }
+  if (draggedPanel) {
+    emit("reorder", draggedPanel, panelId);
+  }
+  draggedPanel = "";
+}
+
+function handleListDrop(event: DragEvent) {
+  const topicKey = draggedTopicKey(event);
+  if (topicKey) {
+    emit("addTopic", topicKey);
+  }
+}
+
 function emitRosLog(level: "info" | "warning" | "error", message: string) {
   emit("rosLog", {
     source: panelShellName(),
@@ -170,11 +228,15 @@ function buildSharedRosConfig(): RosLiveConfig {
 }
 
 function activePanelLabels() {
-  const panels = activePanels.value.map((panel) => `${panel.title}(${panel.topic})`);
+  const panels = activePanels.value.map(
+    (panel) => `${panel.title}(${panel.topic})`,
+  );
   return panels.length > 0 ? panels.join("、") : "无活动小窗";
 }
 
-const activePanels = computed(() => props.panels.filter((panel) => !panel.collapsed && !panel.paused));
+const activePanels = computed(() =>
+  props.panels.filter((panel) => !panel.collapsed && !panel.paused),
+);
 
 function formatTimestamp() {
   return new Date().toLocaleTimeString("zh-CN", { hour12: false });
@@ -233,7 +295,9 @@ function ndtStatusLabel(value: number) {
   return "unknown";
 }
 
-function toneForBoolean(value: boolean | null | undefined): "neutral" | "success" | "warning" | "danger" {
+function toneForBoolean(
+  value: boolean | null | undefined,
+): "neutral" | "success" | "warning" | "danger" {
   if (value === true) {
     return "success";
   }
@@ -245,13 +309,25 @@ function toneForBoolean(value: boolean | null | undefined): "neutral" | "success
 
 function toneForStatusText(value: string) {
   const normalized = value.toLowerCase();
-  if (normalized.includes("healthy") || normalized.includes("ready") || normalized.includes("success")) {
+  if (
+    normalized.includes("healthy") ||
+    normalized.includes("ready") ||
+    normalized.includes("success")
+  ) {
     return "success" as const;
   }
-  if (normalized.includes("degraded") || normalized.includes("pause") || normalized.includes("wait")) {
+  if (
+    normalized.includes("degraded") ||
+    normalized.includes("pause") ||
+    normalized.includes("wait")
+  ) {
     return "warning" as const;
   }
-  if (normalized.includes("lost") || normalized.includes("fail") || normalized.includes("error")) {
+  if (
+    normalized.includes("lost") ||
+    normalized.includes("fail") ||
+    normalized.includes("error")
+  ) {
     return "danger" as const;
   }
   return "neutral" as const;
@@ -277,10 +353,18 @@ function appendValue(values: number[], next: number | null) {
     return values;
   }
   const merged = [...values, next];
-  return merged.length > maxHistoryLength ? merged.slice(-maxHistoryLength) : merged;
+  return merged.length > maxHistoryLength
+    ? merged.slice(-maxHistoryLength)
+    : merged;
 }
 
-function createMetricSeries(label: string, unit: string, color: string, next: number | null, previous?: MetricSeries) {
+function createMetricSeries(
+  label: string,
+  unit: string,
+  color: string,
+  next: number | null,
+  previous?: MetricSeries,
+) {
   return {
     label,
     unit,
@@ -308,7 +392,9 @@ function normalizePointCloudBytes(data: unknown): Uint8Array | null {
 }
 
 function resolveFieldOffset(fields: any[], fieldName: string) {
-  const match = fields.find((field) => String(field?.name ?? "").toLowerCase() === fieldName);
+  const match = fields.find(
+    (field) => String(field?.name ?? "").toLowerCase() === fieldName,
+  );
   return typeof match?.offset === "number" ? match.offset : -1;
 }
 
@@ -370,7 +456,7 @@ function buildPointCloudPreview(message: any): PointCloudPreview | null {
 }
 
 function vectorLength3d(x: number, y: number, z: number) {
-  return Math.sqrt((x * x) + (y * y) + (z * z));
+  return Math.sqrt(x * x + y * y + z * z);
 }
 
 function normalizeVector3d(x: number, y: number, z: number) {
@@ -387,26 +473,30 @@ function normalizeVector3d(x: number, y: number, z: number) {
 
 function rotateVectorByQuaternion(
   vector: { x: number; y: number; z: number },
-  quaternion: { x: number; y: number; z: number; w: number }
+  quaternion: { x: number; y: number; z: number; w: number },
 ) {
   const { x, y, z, w } = quaternion;
-  const uvx = (y * vector.z) - (z * vector.y);
-  const uvy = (z * vector.x) - (x * vector.z);
-  const uvz = (x * vector.y) - (y * vector.x);
-  const uuvx = (y * uvz) - (z * uvy);
-  const uuvy = (z * uvx) - (x * uvz);
-  const uuvz = (x * uvy) - (y * uvx);
+  const uvx = y * vector.z - z * vector.y;
+  const uvy = z * vector.x - x * vector.z;
+  const uvz = x * vector.y - y * vector.x;
+  const uuvx = y * uvz - z * uvy;
+  const uuvy = z * uvx - x * uvz;
+  const uuvz = x * uvy - y * uvx;
   return {
-    x: vector.x + (2 * ((uvx * w) + uuvx)),
-    y: vector.y + (2 * ((uvy * w) + uuvy)),
-    z: vector.z + (2 * ((uvz * w) + uuvz)),
+    x: vector.x + 2 * (uvx * w + uuvx),
+    y: vector.y + 2 * (uvy * w + uuvy),
+    z: vector.z + 2 * (uvz * w + uuvz),
   };
 }
 
-function projectPreviewVector3d(x: number, y: number, z: number): ImuPreviewVector {
+function projectPreviewVector3d(
+  x: number,
+  y: number,
+  z: number,
+): ImuPreviewVector {
   return {
-    x: 72 + (x * 34) - (y * 24),
-    y: 72 - (z * 34) + (y * 18),
+    x: 72 + x * 34 - y * 24,
+    y: 72 - z * 34 + y * 18,
   };
 }
 
@@ -414,46 +504,61 @@ function buildPreviewLine(origin: ImuPreviewVector, target: ImuPreviewVector) {
   return `${origin.x.toFixed(2)},${origin.y.toFixed(2)} ${target.x.toFixed(2)},${target.y.toFixed(2)}`;
 }
 
-function buildPreviewArrowHead(origin: ImuPreviewVector, target: ImuPreviewVector) {
+function buildPreviewArrowHead(
+  origin: ImuPreviewVector,
+  target: ImuPreviewVector,
+) {
   const lineDx = target.x - origin.x;
   const lineDy = target.y - origin.y;
-  const lineLength = Math.max(1, Math.sqrt((lineDx * lineDx) + (lineDy * lineDy)));
+  const lineLength = Math.max(1, Math.sqrt(lineDx * lineDx + lineDy * lineDy));
   const unitDx = lineDx / lineLength;
   const unitDy = lineDy / lineLength;
   const headSize = 7;
-  const leftX = target.x - (unitDx * headSize) - (unitDy * 4.5);
-  const leftY = target.y - (unitDy * headSize) + (unitDx * 4.5);
-  const rightX = target.x - (unitDx * headSize) + (unitDy * 4.5);
-  const rightY = target.y - (unitDy * headSize) - (unitDx * 4.5);
+  const leftX = target.x - unitDx * headSize - unitDy * 4.5;
+  const leftY = target.y - unitDy * headSize + unitDx * 4.5;
+  const rightX = target.x - unitDx * headSize + unitDy * 4.5;
+  const rightY = target.y - unitDy * headSize - unitDx * 4.5;
   return `${target.x.toFixed(2)},${target.y.toFixed(2)} ${leftX.toFixed(2)},${leftY.toFixed(2)} ${rightX.toFixed(2)},${rightY.toFixed(2)}`;
 }
 
 function extractMessageStampMs(message: any) {
-  const sec = safeNumber(message?.header?.stamp?.sec ?? message?.header?.stamp?.secs ?? message?.header?.stamp_sec);
-  const nanosec = safeNumber(message?.header?.stamp?.nanosec ?? message?.header?.stamp?.nsecs ?? message?.header?.stamp_nanosec) ?? 0;
+  const sec = safeNumber(
+    message?.header?.stamp?.sec ??
+      message?.header?.stamp?.secs ??
+      message?.header?.stamp_sec,
+  );
+  const nanosec =
+    safeNumber(
+      message?.header?.stamp?.nanosec ??
+        message?.header?.stamp?.nsecs ??
+        message?.header?.stamp_nanosec,
+    ) ?? 0;
   if (sec === null) {
     return Date.now();
   }
-  return (sec * 1000) + (nanosec / 1_000_000);
+  return sec * 1000 + nanosec / 1_000_000;
 }
 
 function quaternionToEuler(x: number, y: number, z: number, w: number) {
-  const sinrCosp = 2 * ((w * x) + (y * z));
-  const cosrCosp = 1 - (2 * ((x * x) + (y * y)));
+  const sinrCosp = 2 * (w * x + y * z);
+  const cosrCosp = 1 - 2 * (x * x + y * y);
   const roll = Math.atan2(sinrCosp, cosrCosp);
 
-  const sinp = 2 * ((w * y) - (z * x));
-  const pitch = Math.abs(sinp) >= 1 ? Math.sign(sinp) * (Math.PI / 2) : Math.asin(sinp);
+  const sinp = 2 * (w * y - z * x);
+  const pitch =
+    Math.abs(sinp) >= 1 ? Math.sign(sinp) * (Math.PI / 2) : Math.asin(sinp);
 
-  const sinyCosp = 2 * ((w * z) + (x * y));
-  const cosyCosp = 1 - (2 * ((y * y) + (z * z)));
+  const sinyCosp = 2 * (w * z + x * y);
+  const cosyCosp = 1 - 2 * (y * y + z * z);
   const yaw = Math.atan2(sinyCosp, cosyCosp);
 
   return { roll, pitch, yaw };
 }
 
 function hasUsableImuOrientation(message: any, quaternionNorm: number) {
-  const covariance = Array.isArray(message?.orientation_covariance) ? message.orientation_covariance : [];
+  const covariance = Array.isArray(message?.orientation_covariance)
+    ? message.orientation_covariance
+    : [];
   const covariance0 = safeNumber(covariance[0]);
   if (covariance0 === -1) {
     return false;
@@ -463,7 +568,7 @@ function hasUsableImuOrientation(message: any, quaternionNorm: number) {
 
 function rotateVectorByEuler(
   vector: { x: number; y: number; z: number },
-  pose: { roll: number; pitch: number; yaw: number }
+  pose: { roll: number; pitch: number; yaw: number },
 ) {
   const cosRoll = Math.cos(pose.roll);
   const sinRoll = Math.sin(pose.roll);
@@ -473,19 +578,19 @@ function rotateVectorByEuler(
   const sinYaw = Math.sin(pose.yaw);
 
   const m00 = cosYaw * cosPitch;
-  const m01 = (cosYaw * sinPitch * sinRoll) - (sinYaw * cosRoll);
-  const m02 = (cosYaw * sinPitch * cosRoll) + (sinYaw * sinRoll);
+  const m01 = cosYaw * sinPitch * sinRoll - sinYaw * cosRoll;
+  const m02 = cosYaw * sinPitch * cosRoll + sinYaw * sinRoll;
   const m10 = sinYaw * cosPitch;
-  const m11 = (sinYaw * sinPitch * sinRoll) + (cosYaw * cosRoll);
-  const m12 = (sinYaw * sinPitch * cosRoll) - (cosYaw * sinRoll);
+  const m11 = sinYaw * sinPitch * sinRoll + cosYaw * cosRoll;
+  const m12 = sinYaw * sinPitch * cosRoll - cosYaw * sinRoll;
   const m20 = -sinPitch;
   const m21 = cosPitch * sinRoll;
   const m22 = cosPitch * cosRoll;
 
   return {
-    x: (m00 * vector.x) + (m01 * vector.y) + (m02 * vector.z),
-    y: (m10 * vector.x) + (m11 * vector.y) + (m12 * vector.z),
-    z: (m20 * vector.x) + (m21 * vector.y) + (m22 * vector.z),
+    x: m00 * vector.x + m01 * vector.y + m02 * vector.z,
+    y: m10 * vector.x + m11 * vector.y + m12 * vector.z,
+    z: m20 * vector.x + m21 * vector.y + m22 * vector.z,
   };
 }
 
@@ -494,7 +599,12 @@ function buildImuPreview(panelId: string, message: any): ImuPreview | null {
   const orientationY = safeNumber(message?.orientation?.y) ?? 0;
   const orientationZ = safeNumber(message?.orientation?.z) ?? 0;
   const orientationW = safeNumber(message?.orientation?.w) ?? 0;
-  const quaternionNorm = Math.sqrt((orientationX * orientationX) + (orientationY * orientationY) + (orientationZ * orientationZ) + (orientationW * orientationW));
+  const quaternionNorm = Math.sqrt(
+    orientationX * orientationX +
+      orientationY * orientationY +
+      orientationZ * orientationZ +
+      orientationW * orientationW,
+  );
 
   const accelX = safeNumber(message?.linear_acceleration?.x) ?? 0;
   const accelY = safeNumber(message?.linear_acceleration?.y) ?? 0;
@@ -505,9 +615,12 @@ function buildImuPreview(panelId: string, message: any): ImuPreview | null {
   const stampMs = extractMessageStampMs(message);
 
   let forwardVector = normalizeVector3d(accelX, accelY, accelZ);
-  let leftVector = forwardVector ? normalizeVector3d(-forwardVector.y, forwardVector.x, 0) : null;
+  let leftVector = forwardVector
+    ? normalizeVector3d(-forwardVector.y, forwardVector.x, 0)
+    : null;
   let upVector = normalizeVector3d(0, 0, 1);
-  let orientationSource: "quaternion" | "integrated_gyro" | "acceleration" = "acceleration";
+  let orientationSource: "quaternion" | "integrated_gyro" | "acceleration" =
+    "acceleration";
 
   if (hasUsableImuOrientation(message, quaternionNorm)) {
     const normalizedQuaternion = {
@@ -516,16 +629,34 @@ function buildImuPreview(panelId: string, message: any): ImuPreview | null {
       z: orientationZ / quaternionNorm,
       w: orientationW / quaternionNorm,
     };
-    const rotatedForward = rotateVectorByQuaternion({ x: 1, y: 0, z: 0 }, normalizedQuaternion);
-    const rotatedLeft = rotateVectorByQuaternion({ x: 0, y: 1, z: 0 }, normalizedQuaternion);
-    const rotatedUp = rotateVectorByQuaternion({ x: 0, y: 0, z: 1 }, normalizedQuaternion);
-    forwardVector = normalizeVector3d(rotatedForward.x, rotatedForward.y, rotatedForward.z);
+    const rotatedForward = rotateVectorByQuaternion(
+      { x: 1, y: 0, z: 0 },
+      normalizedQuaternion,
+    );
+    const rotatedLeft = rotateVectorByQuaternion(
+      { x: 0, y: 1, z: 0 },
+      normalizedQuaternion,
+    );
+    const rotatedUp = rotateVectorByQuaternion(
+      { x: 0, y: 0, z: 1 },
+      normalizedQuaternion,
+    );
+    forwardVector = normalizeVector3d(
+      rotatedForward.x,
+      rotatedForward.y,
+      rotatedForward.z,
+    );
     leftVector = normalizeVector3d(rotatedLeft.x, rotatedLeft.y, rotatedLeft.z);
     upVector = normalizeVector3d(rotatedUp.x, rotatedUp.y, rotatedUp.z);
     imuPoseStateMap.value = {
       ...imuPoseStateMap.value,
       [panelId]: {
-        ...quaternionToEuler(normalizedQuaternion.x, normalizedQuaternion.y, normalizedQuaternion.z, normalizedQuaternion.w),
+        ...quaternionToEuler(
+          normalizedQuaternion.x,
+          normalizedQuaternion.y,
+          normalizedQuaternion.z,
+          normalizedQuaternion.w,
+        ),
         lastStampMs: stampMs,
       },
     };
@@ -537,11 +668,14 @@ function buildImuPreview(panelId: string, message: any): ImuPreview | null {
       yaw: 0,
       lastStampMs: stampMs,
     };
-    const dt = Math.max(0, Math.min(0.2, (stampMs - previousPose.lastStampMs) / 1000));
+    const dt = Math.max(
+      0,
+      Math.min(0.2, (stampMs - previousPose.lastStampMs) / 1000),
+    );
     const nextPose = {
-      roll: previousPose.roll + (gyroX * dt),
-      pitch: previousPose.pitch + (gyroY * dt),
-      yaw: previousPose.yaw + (gyroZ * dt),
+      roll: previousPose.roll + gyroX * dt,
+      pitch: previousPose.pitch + gyroY * dt,
+      yaw: previousPose.yaw + gyroZ * dt,
       lastStampMs: stampMs,
     };
     imuPoseStateMap.value = {
@@ -549,13 +683,29 @@ function buildImuPreview(panelId: string, message: any): ImuPreview | null {
       [panelId]: nextPose,
     };
 
-    if (dt > 0 || Math.abs(gyroX) > 1e-4 || Math.abs(gyroY) > 1e-4 || Math.abs(gyroZ) > 1e-4) {
-      const rotatedForward = rotateVectorByEuler({ x: 1, y: 0, z: 0 }, nextPose);
+    if (
+      dt > 0 ||
+      Math.abs(gyroX) > 1e-4 ||
+      Math.abs(gyroY) > 1e-4 ||
+      Math.abs(gyroZ) > 1e-4
+    ) {
+      const rotatedForward = rotateVectorByEuler(
+        { x: 1, y: 0, z: 0 },
+        nextPose,
+      );
       const rotatedLeft = rotateVectorByEuler({ x: 0, y: 1, z: 0 }, nextPose);
       const rotatedUp = rotateVectorByEuler({ x: 0, y: 0, z: 1 }, nextPose);
-      forwardVector = normalizeVector3d(rotatedForward.x, rotatedForward.y, rotatedForward.z) ?? forwardVector;
-      leftVector = normalizeVector3d(rotatedLeft.x, rotatedLeft.y, rotatedLeft.z) ?? leftVector;
-      upVector = normalizeVector3d(rotatedUp.x, rotatedUp.y, rotatedUp.z) ?? upVector;
+      forwardVector =
+        normalizeVector3d(
+          rotatedForward.x,
+          rotatedForward.y,
+          rotatedForward.z,
+        ) ?? forwardVector;
+      leftVector =
+        normalizeVector3d(rotatedLeft.x, rotatedLeft.y, rotatedLeft.z) ??
+        leftVector;
+      upVector =
+        normalizeVector3d(rotatedUp.x, rotatedUp.y, rotatedUp.z) ?? upVector;
       orientationSource = "integrated_gyro";
     }
   }
@@ -572,37 +722,40 @@ function buildImuPreview(panelId: string, message: any): ImuPreview | null {
 
   const accelMagnitude = vectorLength3d(accelX, accelY, accelZ);
   const gyroMagnitude = vectorLength3d(gyroX, gyroY, gyroZ);
-  const planarAccelMagnitude = Math.sqrt((accelX * accelX) + (accelY * accelY));
+  const planarAccelMagnitude = Math.sqrt(accelX * accelX + accelY * accelY);
   const verticalAccelDelta = Math.abs(Math.abs(accelZ) - 9.81);
-  const motionLevel = Math.min(1, Math.max(
-    planarAccelMagnitude / 2.2,
-    verticalAccelDelta / 4,
-    Math.abs(accelMagnitude - 9.81) / 5,
-    gyroMagnitude / 2.5
-  ));
+  const motionLevel = Math.min(
+    1,
+    Math.max(
+      planarAccelMagnitude / 2.2,
+      verticalAccelDelta / 4,
+      Math.abs(accelMagnitude - 9.81) / 5,
+      gyroMagnitude / 2.5,
+    ),
+  );
   const axisLength = 24;
-  const forwardLength = axisLength + (motionLevel * 12);
+  const forwardLength = axisLength + motionLevel * 12;
 
   const origin = { x: 72, y: 72 };
   const forwardTip = projectPreviewVector3d(
     forwardVector.x * (forwardLength / 34),
     forwardVector.y * (forwardLength / 34),
-    forwardVector.z * (forwardLength / 34)
+    forwardVector.z * (forwardLength / 34),
   );
   const leftTip = projectPreviewVector3d(
     leftVector.x * (axisLength / 34),
     leftVector.y * (axisLength / 34),
-    leftVector.z * (axisLength / 34)
+    leftVector.z * (axisLength / 34),
   );
   const upTip = projectPreviewVector3d(
     upVector.x * (axisLength / 34),
     upVector.y * (axisLength / 34),
-    upVector.z * (axisLength / 34)
+    upVector.z * (axisLength / 34),
   );
   const frontLabel = projectPreviewVector3d(
     forwardVector.x * 1.08,
     forwardVector.y * 1.08,
-    forwardVector.z * 1.08
+    forwardVector.z * 1.08,
   );
 
   return {
@@ -621,10 +774,14 @@ function sanitizePreviewValue(value: unknown, depth = 0): unknown {
     return "[深层内容已折叠]";
   }
   if (typeof value === "string") {
-    return value.length > maxPreviewStringLength ? `${value.slice(0, maxPreviewStringLength)}... [字符串已截断]` : value;
+    return value.length > maxPreviewStringLength
+      ? `${value.slice(0, maxPreviewStringLength)}... [字符串已截断]`
+      : value;
   }
   if (Array.isArray(value)) {
-    const preview = value.slice(0, maxPreviewArrayItems).map((item) => sanitizePreviewValue(item, depth + 1));
+    const preview = value
+      .slice(0, maxPreviewArrayItems)
+      .map((item) => sanitizePreviewValue(item, depth + 1));
     if (value.length > maxPreviewArrayItems) {
       preview.push(`[其余 ${value.length - maxPreviewArrayItems} 项已折叠]`);
     }
@@ -634,7 +791,9 @@ function sanitizePreviewValue(value: unknown, depth = 0): unknown {
     return value;
   }
   const entries = Object.entries(value as Record<string, unknown>);
-  const previewEntries = entries.slice(0, maxPreviewObjectKeys).map(([key, item]) => [key, sanitizePreviewValue(item, depth + 1)]);
+  const previewEntries = entries
+    .slice(0, maxPreviewObjectKeys)
+    .map(([key, item]) => [key, sanitizePreviewValue(item, depth + 1)]);
   const nextObject = Object.fromEntries(previewEntries);
   if (entries.length > maxPreviewObjectKeys) {
     nextObject.__truncated_keys__ = `其余 ${entries.length - maxPreviewObjectKeys} 个字段已折叠`;
@@ -656,7 +815,10 @@ function truncatePrettyPreviewText(text: string) {
   return `${previewText}\n\n[预览已截断：界面仅展示前 ${maxPrettyPreviewLines} 行 / ${maxPrettyPreviewChars} 字符。]`;
 }
 
-function buildPrettyMessageText(message: any, mode: "preview" | "full" = "preview") {
+function buildPrettyMessageText(
+  message: any,
+  mode: "preview" | "full" = "preview",
+) {
   if (Array.isArray(message?.fields) && message?.data) {
     return JSON.stringify(
       {
@@ -669,16 +831,24 @@ function buildPrettyMessageText(message: any, mode: "preview" | "full" = "previe
         fields: message.fields,
       },
       null,
-      2
+      2,
     );
   }
   if (typeof message?.data === "string") {
     const parsed = tryParseJsonString(message.data);
     if (parsed) {
-      return JSON.stringify(mode === "preview" ? sanitizePreviewValue(parsed) : parsed, null, 2);
+      return JSON.stringify(
+        mode === "preview" ? sanitizePreviewValue(parsed) : parsed,
+        null,
+        2,
+      );
     }
   }
-  return JSON.stringify(mode === "preview" ? sanitizePreviewValue(message) : message, null, 2);
+  return JSON.stringify(
+    mode === "preview" ? sanitizePreviewValue(message) : message,
+    null,
+    2,
+  );
 }
 
 function prettyMessagePreview(message: any) {
@@ -717,11 +887,16 @@ function summarizeMessage(panel: NavPanelItem, message: any) {
     const statusValue = Number(message?.data ?? 0);
     return `NDT 状态: ${ndtStatusLabel(statusValue)} (${statusValue})`;
   }
-  if (topic === "/iteration_num" || topic === "/exe_time_ms" || topic === "/ndt_score") {
+  if (
+    topic === "/iteration_num" ||
+    topic === "/exe_time_ms" ||
+    topic === "/ndt_score"
+  ) {
     return `${topic}: ${message?.data ?? "-"}`;
   }
   if (isPointCloudPanel(panel)) {
-    const totalPoints = Number(message?.width ?? 0) * Math.max(1, Number(message?.height ?? 1));
+    const totalPoints =
+      Number(message?.width ?? 0) * Math.max(1, Number(message?.height ?? 1));
     return `${topic}: 点云 ${totalPoints || 0} 点`;
   }
   if (isImuPanel(panel)) {
@@ -747,7 +922,11 @@ function summarizeMessage(panel: NavPanelItem, message: any) {
   return `${topic} 已收到消息`;
 }
 
-function buildPanelVisualization(panel: NavPanelItem, message: any, previous?: PanelState): Omit<PanelState, "summary" | "pretty" | "updatedAt"> {
+function buildPanelVisualization(
+  panel: NavPanelItem,
+  message: any,
+  previous?: PanelState,
+): Omit<PanelState, "summary" | "pretty" | "updatedAt"> {
   const topic = panel.topic;
 
   if (topic === "/ndt_status") {
@@ -756,11 +935,15 @@ function buildPanelVisualization(panel: NavPanelItem, message: any, previous?: P
     return {
       chartTitle: "状态趋势",
       metricSeries: [
-        createMetricSeries("status", "", "#31d28a", current, previous?.metricSeries.find((item) => item.label === "status")),
+        createMetricSeries(
+          "status",
+          "",
+          "#31d28a",
+          current,
+          previous?.metricSeries.find((item) => item.label === "status"),
+        ),
       ],
-      badges: [
-        { label: "NDT", value: label, tone: toneForStatusText(label) },
-      ],
+      badges: [{ label: "NDT", value: label, tone: toneForStatusText(label) }],
       keyValues: [
         { key: "当前值", value: current === null ? "-" : `${current}` },
       ],
@@ -769,15 +952,40 @@ function buildPanelVisualization(panel: NavPanelItem, message: any, previous?: P
     };
   }
 
-  if (topic === "/iteration_num" || topic === "/exe_time_ms" || topic === "/ndt_score") {
+  if (
+    topic === "/iteration_num" ||
+    topic === "/exe_time_ms" ||
+    topic === "/ndt_score"
+  ) {
     const current = safeNumber(message?.data);
-    const unit = topic === "/iteration_num" ? "count" : topic === "/exe_time_ms" ? "ms" : "score";
-    const color = topic === "/iteration_num" ? "#2f8cff" : topic === "/exe_time_ms" ? "#f6a237" : "#31d28a";
-    const label = topic === "/iteration_num" ? "iter" : topic === "/exe_time_ms" ? "delay" : "score";
+    const unit =
+      topic === "/iteration_num"
+        ? "count"
+        : topic === "/exe_time_ms"
+          ? "ms"
+          : "score";
+    const color =
+      topic === "/iteration_num"
+        ? "#2f8cff"
+        : topic === "/exe_time_ms"
+          ? "#f6a237"
+          : "#31d28a";
+    const label =
+      topic === "/iteration_num"
+        ? "iter"
+        : topic === "/exe_time_ms"
+          ? "delay"
+          : "score";
     return {
       chartTitle: "单指标趋势",
       metricSeries: [
-        createMetricSeries(label, unit, color, current, previous?.metricSeries[0]),
+        createMetricSeries(
+          label,
+          unit,
+          color,
+          current,
+          previous?.metricSeries[0],
+        ),
       ],
       badges: [],
       keyValues: [
@@ -789,7 +997,10 @@ function buildPanelVisualization(panel: NavPanelItem, message: any, previous?: P
     };
   }
 
-  if (topic === "/fastlio_ndt_observation_debug" && typeof message?.data === "string") {
+  if (
+    topic === "/fastlio_ndt_observation_debug" &&
+    typeof message?.data === "string"
+  ) {
     const parsed = tryParseJsonString(message.data) ?? {};
     const sigmaXy = safeNumber(parsed.sigma_xy_m);
     const sigmaYaw = safeNumber(parsed.sigma_yaw_deg);
@@ -799,16 +1010,60 @@ function buildPanelVisualization(panel: NavPanelItem, message: any, previous?: P
     return {
       chartTitle: "观测质量趋势",
       metricSeries: [
-        createMetricSeries("sigma_xy", "m", "#31d28a", sigmaXy, previous?.metricSeries.find((item) => item.label === "sigma_xy")),
-        createMetricSeries("sigma_yaw", "deg", "#f6a237", sigmaYaw, previous?.metricSeries.find((item) => item.label === "sigma_yaw")),
-        createMetricSeries("planar_dist", "m", "#f15d78", planarDist, previous?.metricSeries.find((item) => item.label === "planar_dist")),
-        createMetricSeries("z_err_before", "m", "#8a63ff", zErrBefore, previous?.metricSeries.find((item) => item.label === "z_err_before")),
+        createMetricSeries(
+          "sigma_xy",
+          "m",
+          "#31d28a",
+          sigmaXy,
+          previous?.metricSeries.find((item) => item.label === "sigma_xy"),
+        ),
+        createMetricSeries(
+          "sigma_yaw",
+          "deg",
+          "#f6a237",
+          sigmaYaw,
+          previous?.metricSeries.find((item) => item.label === "sigma_yaw"),
+        ),
+        createMetricSeries(
+          "planar_dist",
+          "m",
+          "#f15d78",
+          planarDist,
+          previous?.metricSeries.find((item) => item.label === "planar_dist"),
+        ),
+        createMetricSeries(
+          "z_err_before",
+          "m",
+          "#8a63ff",
+          zErrBefore,
+          previous?.metricSeries.find((item) => item.label === "z_err_before"),
+        ),
       ],
       badges: [
-        { label: "sigma_xy", value: formatNumber(sigmaXy), tone: sigmaXy !== null && sigmaXy < 0.25 ? "success" : "warning" },
-        { label: "sigma_yaw", value: formatNumber(sigmaYaw, 2), tone: sigmaYaw !== null && sigmaYaw < 8 ? "success" : "warning" },
-        { label: "planar", value: formatNumber(planarDist, 2), tone: planarDist !== null && planarDist < 0.35 ? "success" : "warning" },
-        { label: "z_err", value: formatNumber(zErrBefore, 2), tone: zErrBefore !== null && Math.abs(zErrBefore) < 0.2 ? "success" : "warning" },
+        {
+          label: "sigma_xy",
+          value: formatNumber(sigmaXy),
+          tone: sigmaXy !== null && sigmaXy < 0.25 ? "success" : "warning",
+        },
+        {
+          label: "sigma_yaw",
+          value: formatNumber(sigmaYaw, 2),
+          tone: sigmaYaw !== null && sigmaYaw < 8 ? "success" : "warning",
+        },
+        {
+          label: "planar",
+          value: formatNumber(planarDist, 2),
+          tone:
+            planarDist !== null && planarDist < 0.35 ? "success" : "warning",
+        },
+        {
+          label: "z_err",
+          value: formatNumber(zErrBefore, 2),
+          tone:
+            zErrBefore !== null && Math.abs(zErrBefore) < 0.2
+              ? "success"
+              : "warning",
+        },
       ],
       keyValues: [
         { key: "z_err_before_m", value: formatNumber(zErrBefore, 3) },
@@ -827,18 +1082,55 @@ function buildPanelVisualization(panel: NavPanelItem, message: any, previous?: P
     return {
       chartTitle: "导航运行趋势",
       metricSeries: [
-        createMetricSeries("speed", "mps", "#2f8cff", speed, previous?.metricSeries.find((item) => item.label === "speed")),
-        createMetricSeries("cmd_norm", "", "#31d28a", cmdVelNorm, previous?.metricSeries.find((item) => item.label === "cmd_norm")),
-        createMetricSeries("distance", "m", "#f6a237", distanceRemaining, previous?.metricSeries.find((item) => item.label === "distance")),
+        createMetricSeries(
+          "speed",
+          "mps",
+          "#2f8cff",
+          speed,
+          previous?.metricSeries.find((item) => item.label === "speed"),
+        ),
+        createMetricSeries(
+          "cmd_norm",
+          "",
+          "#31d28a",
+          cmdVelNorm,
+          previous?.metricSeries.find((item) => item.label === "cmd_norm"),
+        ),
+        createMetricSeries(
+          "distance",
+          "m",
+          "#f6a237",
+          distanceRemaining,
+          previous?.metricSeries.find((item) => item.label === "distance"),
+        ),
       ],
       badges: [
-        { label: "state", value: String(parsed.state ?? "-"), tone: toneForStatusText(String(parsed.state ?? "")) },
-        { label: "ready", value: String(parsed.ready_for_next_goal ?? "-"), tone: toneForBoolean(parsed.ready_for_next_goal) },
-        { label: "loc", value: String(parsed.localization_status ?? "-"), tone: toneForStatusText(String(parsed.localization_status ?? "")) },
-        { label: "obstacle", value: String(parsed.obstacle_state_text ?? "-"), tone: toneForStatusText(String(parsed.obstacle_state_text ?? "")) },
+        {
+          label: "state",
+          value: String(parsed.state ?? "-"),
+          tone: toneForStatusText(String(parsed.state ?? "")),
+        },
+        {
+          label: "ready",
+          value: String(parsed.ready_for_next_goal ?? "-"),
+          tone: toneForBoolean(parsed.ready_for_next_goal),
+        },
+        {
+          label: "loc",
+          value: String(parsed.localization_status ?? "-"),
+          tone: toneForStatusText(String(parsed.localization_status ?? "")),
+        },
+        {
+          label: "obstacle",
+          value: String(parsed.obstacle_state_text ?? "-"),
+          tone: toneForStatusText(String(parsed.obstacle_state_text ?? "")),
+        },
       ],
       keyValues: [
-        { key: "recoveries", value: String(parsed.number_of_recoveries ?? "-") },
+        {
+          key: "recoveries",
+          value: String(parsed.number_of_recoveries ?? "-"),
+        },
         { key: "plan_fresh", value: String(parsed.plan_fresh ?? "-") },
         { key: "scan_fresh", value: String(parsed.scan_fresh ?? "-") },
         { key: "odom_fresh", value: String(parsed.odom_fresh ?? "-") },
@@ -854,14 +1146,37 @@ function buildPanelVisualization(panel: NavPanelItem, message: any, previous?: P
       chartTitle: "任务状态",
       metricSeries: [],
       badges: [
-        { label: "active", value: String(parsed.active ?? "-"), tone: toneForBoolean(parsed.active) },
-        { label: "accepted", value: String(parsed.accepted ?? "-"), tone: toneForBoolean(parsed.accepted) },
-        { label: "paused", value: String(parsed.paused_by_user ?? parsed.paused_by_localization ?? "-"), tone: toneForBoolean(Boolean(parsed.paused_by_user || parsed.paused_by_localization || parsed.paused_by_obstacle)) },
+        {
+          label: "active",
+          value: String(parsed.active ?? "-"),
+          tone: toneForBoolean(parsed.active),
+        },
+        {
+          label: "accepted",
+          value: String(parsed.accepted ?? "-"),
+          tone: toneForBoolean(parsed.accepted),
+        },
+        {
+          label: "paused",
+          value: String(
+            parsed.paused_by_user ?? parsed.paused_by_localization ?? "-",
+          ),
+          tone: toneForBoolean(
+            Boolean(
+              parsed.paused_by_user ||
+              parsed.paused_by_localization ||
+              parsed.paused_by_obstacle,
+            ),
+          ),
+        },
       ],
       keyValues: [
         { key: "request_planid", value: String(parsed.request_planid ?? "-") },
         { key: "result", value: String(parsed.result ?? "-") },
-        { key: "pose", value: `${parsed.pose?.x ?? "-"}, ${parsed.pose?.y ?? "-"}, ${parsed.pose?.yaw ?? "-"}` },
+        {
+          key: "pose",
+          value: `${parsed.pose?.x ?? "-"}, ${parsed.pose?.y ?? "-"}, ${parsed.pose?.yaw ?? "-"}`,
+        },
       ],
       pointCloudPreview: null,
       imuPreview: null,
@@ -874,8 +1189,20 @@ function buildPanelVisualization(panel: NavPanelItem, message: any, previous?: P
     return {
       chartTitle: "控制输出趋势",
       metricSeries: [
-        createMetricSeries("linear_x", "mps", "#2f8cff", linearX, previous?.metricSeries.find((item) => item.label === "linear_x")),
-        createMetricSeries("angular_z", "rad", "#f15d78", angularZ, previous?.metricSeries.find((item) => item.label === "angular_z")),
+        createMetricSeries(
+          "linear_x",
+          "mps",
+          "#2f8cff",
+          linearX,
+          previous?.metricSeries.find((item) => item.label === "linear_x"),
+        ),
+        createMetricSeries(
+          "angular_z",
+          "rad",
+          "#f15d78",
+          angularZ,
+          previous?.metricSeries.find((item) => item.label === "angular_z"),
+        ),
       ],
       badges: [],
       keyValues: [
@@ -894,30 +1221,59 @@ function buildPanelVisualization(panel: NavPanelItem, message: any, previous?: P
     const gyroX = safeNumber(message?.angular_velocity?.x);
     const gyroY = safeNumber(message?.angular_velocity?.y);
     const gyroZ = safeNumber(message?.angular_velocity?.z);
-    const accelMagnitude = accelX === null || accelY === null || accelZ === null
-      ? null
-      : vectorLength3d(accelX, accelY, accelZ);
-    const gyroMagnitude = gyroX === null || gyroY === null || gyroZ === null
-      ? null
-      : vectorLength3d(gyroX, gyroY, gyroZ);
+    const accelMagnitude =
+      accelX === null || accelY === null || accelZ === null
+        ? null
+        : vectorLength3d(accelX, accelY, accelZ);
+    const gyroMagnitude =
+      gyroX === null || gyroY === null || gyroZ === null
+        ? null
+        : vectorLength3d(gyroX, gyroY, gyroZ);
     const imuPreview = buildImuPreview(panel.id, message);
     return {
       chartTitle: "IMU 运动趋势",
       metricSeries: [
-        createMetricSeries("accel_mag", "m/s²", "#2f8cff", accelMagnitude, previous?.metricSeries.find((item) => item.label === "accel_mag")),
-        createMetricSeries("gyro_mag", "rad/s", "#f6a237", gyroMagnitude, previous?.metricSeries.find((item) => item.label === "gyro_mag")),
+        createMetricSeries(
+          "accel_mag",
+          "m/s²",
+          "#2f8cff",
+          accelMagnitude,
+          previous?.metricSeries.find((item) => item.label === "accel_mag"),
+        ),
+        createMetricSeries(
+          "gyro_mag",
+          "rad/s",
+          "#f6a237",
+          gyroMagnitude,
+          previous?.metricSeries.find((item) => item.label === "gyro_mag"),
+        ),
       ],
       badges: [
         {
           label: "source",
-          value: imuPreview?.orientationSource === "quaternion" ? "quat" : imuPreview?.orientationSource === "integrated_gyro" ? "gyro" : "accel",
+          value:
+            imuPreview?.orientationSource === "quaternion"
+              ? "quat"
+              : imuPreview?.orientationSource === "integrated_gyro"
+                ? "gyro"
+                : "accel",
           tone: "neutral",
         },
-        { label: "motion", value: `${Math.round((imuPreview?.motionLevel ?? 0) * 100)}%`, tone: (imuPreview?.motionLevel ?? 0) > 0.68 ? "warning" : "neutral" },
+        {
+          label: "motion",
+          value: `${Math.round((imuPreview?.motionLevel ?? 0) * 100)}%`,
+          tone: (imuPreview?.motionLevel ?? 0) > 0.68 ? "warning" : "neutral",
+        },
       ],
       keyValues: [
-        { key: "ax ay az", value: `${formatNumber(accelX, 2)}, ${formatNumber(accelY, 2)}, ${formatNumber(accelZ, 2)}` },
-        { key: "gx gy gz", value: `${formatNumber(gyroX, 2)}, ${formatNumber(gyroY, 2)}, ${formatNumber(gyroZ, 2)}` },
+        {
+          key: "ax ay az",
+          value: `${formatNumber(accelX, 2)}, ${formatNumber(accelY, 2)}, ${formatNumber(accelZ, 2)}`,
+        },
+        {
+          key: "gx gy gz",
+          value: `${formatNumber(gyroX, 2)}, ${formatNumber(gyroY, 2)}, ${formatNumber(gyroZ, 2)}`,
+        },
       ],
       pointCloudPreview: null,
       imuPreview,
@@ -925,7 +1281,8 @@ function buildPanelVisualization(panel: NavPanelItem, message: any, previous?: P
   }
 
   if (isPointCloudPanel(panel)) {
-    const totalPoints = Number(message?.width ?? 0) * Math.max(1, Number(message?.height ?? 1));
+    const totalPoints =
+      Number(message?.width ?? 0) * Math.max(1, Number(message?.height ?? 1));
     const preview = buildPointCloudPreview(message);
     const hzLimit = safeHzLimit(panel);
     return {
@@ -936,12 +1293,20 @@ function buildPanelVisualization(panel: NavPanelItem, message: any, previous?: P
           "count",
           "#2f8cff",
           totalPoints > 0 ? totalPoints : null,
-          previous?.metricSeries.find((item) => item.label === "points")
+          previous?.metricSeries.find((item) => item.label === "points"),
         ),
       ],
       badges: [
-        { label: "size", value: `${normalizePointSize(panel).toFixed(1)}`, tone: "neutral" },
-        { label: "hz", value: hzLimit > 0 ? `${hzLimit}` : "无限制", tone: "neutral" },
+        {
+          label: "size",
+          value: `${normalizePointSize(panel).toFixed(1)}`,
+          tone: "neutral",
+        },
+        {
+          label: "hz",
+          value: hzLimit > 0 ? `${hzLimit}` : "无限制",
+          tone: "neutral",
+        },
       ],
       keyValues: [
         { key: "总点数", value: `${totalPoints || 0}` },
@@ -954,6 +1319,46 @@ function buildPanelVisualization(panel: NavPanelItem, message: any, previous?: P
     };
   }
 
+  // 通用位姿和标量也提供趋势，兼容 ROS 1/ROS 2 类型名及自定义话题名。
+  const pose = message?.pose?.pose ?? message?.pose;
+  const generic: Array<[string, string, number]> = [];
+  if (pose?.position && pose?.orientation) {
+    for (const axis of ["x", "y", "z"] as const) {
+      if (Number.isFinite(pose.position[axis]))
+        generic.push([axis, "m", pose.position[axis]]);
+    }
+    const q = pose.orientation;
+    const yaw = Math.atan2(
+      2 * (q.w * q.z + q.x * q.y),
+      1 - 2 * (q.y * q.y + q.z * q.z),
+    );
+    if (Number.isFinite(yaw)) generic.push(["yaw", "rad", yaw]);
+  } else if (
+    typeof message?.data === "number" &&
+    Number.isFinite(message.data)
+  ) {
+    generic.push(["value", "", message.data]);
+  }
+  if (generic.length)
+    return {
+      chartTitle: pose ? "位姿趋势" : "数值趋势",
+      metricSeries: generic.map(([label, unit, value], i) =>
+        createMetricSeries(
+          label,
+          unit,
+          ["#d98e4a", "#7e9271", "#8a9da8", "#b19f84"][i % 4],
+          value,
+          previous?.metricSeries.find((item) => item.label === label),
+        ),
+      ),
+      badges: [],
+      keyValues: generic.map(([key, unit, value]) => ({
+        key,
+        value: value.toFixed(3) + " " + unit,
+      })),
+      pointCloudPreview: null,
+      imuPreview: null,
+    };
   return {
     chartTitle: "原始消息",
     metricSeries: previous?.metricSeries ?? [],
@@ -964,7 +1369,12 @@ function buildPanelVisualization(panel: NavPanelItem, message: any, previous?: P
   };
 }
 
-function setPanelState(panel: NavPanelItem, summary: string, prettyPreview: string, visualization: Omit<PanelState, "summary" | "pretty" | "updatedAt">) {
+function setPanelState(
+  panel: NavPanelItem,
+  summary: string,
+  prettyPreview: string,
+  visualization: Omit<PanelState, "summary" | "pretty" | "updatedAt">,
+) {
   panelStateMap.value = {
     ...panelStateMap.value,
     [panel.id]: {
@@ -981,7 +1391,11 @@ function setPanelState(panel: NavPanelItem, summary: string, prettyPreview: stri
   };
 }
 
-function buildPanelStateSnapshot(summary: string, prettyText: string, visualization: Omit<PanelState, "summary" | "pretty" | "updatedAt">): PanelState {
+function buildPanelStateSnapshot(
+  summary: string,
+  prettyText: string,
+  visualization: Omit<PanelState, "summary" | "pretty" | "updatedAt">,
+): PanelState {
   return {
     summary,
     pretty: prettyText,
@@ -995,8 +1409,14 @@ function buildPanelStateSnapshot(summary: string, prettyText: string, visualizat
   };
 }
 
-function setPanelVisualization(panel: NavPanelItem, message: any, summary: string, prettyPreview: string) {
-  const previous = panelStateMap.value[panel.id] ?? buildDefaultState(panel.topic);
+function setPanelVisualization(
+  panel: NavPanelItem,
+  message: any,
+  summary: string,
+  prettyPreview: string,
+) {
+  const previous =
+    panelStateMap.value[panel.id] ?? buildDefaultState(panel.topic);
   const visualization = buildPanelVisualization(panel, message, previous);
   setPanelState(panel, summary, prettyPreview, visualization);
   return visualization;
@@ -1022,7 +1442,9 @@ function sparklinePoints(values: number[]) {
 }
 
 function metricLatest(metric: MetricSeries) {
-  return metric.values.length > 0 ? metric.values[metric.values.length - 1] : null;
+  return metric.values.length > 0
+    ? metric.values[metric.values.length - 1]
+    : null;
 }
 
 function metricMin(metric: MetricSeries) {
@@ -1043,7 +1465,10 @@ function panelRecording(panelId: string) {
 
 function compactMetricLabel(panelId: string, metrics: MetricSeries[]) {
   const selectedLabel = compactMetricSelectionMap.value[panelId];
-  if (selectedLabel && metrics.some((metric) => metric.label === selectedLabel)) {
+  if (
+    selectedLabel &&
+    metrics.some((metric) => metric.label === selectedLabel)
+  ) {
     return selectedLabel;
   }
   return metrics[0]?.label ?? "";
@@ -1071,11 +1496,19 @@ function metricValueText(metric: MetricSeries) {
 }
 
 function recordingDurationText(recording: PanelRecordingState) {
-  const durationMs = recording.durationMs || (recording.isRecording ? Math.max(0, Date.now() - recording.startedAtMs) : 0);
+  const durationMs =
+    recording.durationMs ||
+    (recording.isRecording
+      ? Math.max(0, Date.now() - recording.startedAtMs)
+      : 0);
   return `${(durationMs / 1000).toFixed(2)} s`;
 }
 
-function appendRecordedEntry(recording: PanelRecordingState, timestampText: string, content: string) {
+function appendRecordedEntry(
+  recording: PanelRecordingState,
+  timestampText: string,
+  content: string,
+) {
   return [`[${timestampText}] ${content}`, ...recording.entries];
 }
 
@@ -1083,8 +1516,14 @@ function recordingEntriesForDisplay(recording: PanelRecordingState) {
   return recording.entries.slice(0, maxRecordedEntriesForDisplay);
 }
 
-function mergeRecordedMetricSeries(recording: PanelRecordingState, state: PanelState, offsetMs: number) {
-  const previousSeries = new Map(recording.metricSeries.map((item) => [item.label, item]));
+function mergeRecordedMetricSeries(
+  recording: PanelRecordingState,
+  state: PanelState,
+  offsetMs: number,
+) {
+  const previousSeries = new Map(
+    recording.metricSeries.map((item) => [item.label, item]),
+  );
   return state.metricSeries.map((metric) => {
     const previousMetric = previousSeries.get(metric.label);
     const latest = metricLatest(metric);
@@ -1092,9 +1531,10 @@ function mergeRecordedMetricSeries(recording: PanelRecordingState, state: PanelS
       label: metric.label,
       unit: metric.unit,
       color: metric.color,
-      samples: latest === null
-        ? previousMetric?.samples ?? []
-        : [...(previousMetric?.samples ?? []), { offsetMs, value: latest }],
+      samples:
+        latest === null
+          ? (previousMetric?.samples ?? [])
+          : [...(previousMetric?.samples ?? []), { offsetMs, value: latest }],
     };
   });
 }
@@ -1156,7 +1596,11 @@ async function toggleRecording(panel: NavPanelItem) {
   }
 }
 
-function updateRecordingState(panel: NavPanelItem, prettyText: string, state: PanelState) {
+function updateRecordingState(
+  panel: NavPanelItem,
+  prettyText: string,
+  state: PanelState,
+) {
   const recording = panelRecording(panel.id);
   if (!recording.isRecording) {
     return;
@@ -1235,9 +1679,10 @@ function handlePanelMessage(panelId: string, message: any) {
   if (previousArrivalTime > 0) {
     const instantHz = 1000 / Math.max(1, arrivalTime - previousArrivalTime);
     const previousHz = panelRealtimeHzMap.value[frequencyKey];
-    const nextHz = Number.isFinite(previousHz) && previousHz > 0
-      ? previousHz * 0.6 + instantHz * 0.4
-      : instantHz;
+    const nextHz =
+      Number.isFinite(previousHz) && previousHz > 0
+        ? previousHz * 0.6 + instantHz * 0.4
+        : instantHz;
     panelRealtimeHzMap.value = {
       ...panelRealtimeHzMap.value,
       [frequencyKey]: nextHz,
@@ -1247,9 +1692,10 @@ function handlePanelMessage(panelId: string, message: any) {
   const recording = panelRecording(panel.id);
   const previousUiUpdateTime = panelUiUpdateTimeMap.get(panelId) ?? 0;
   const hasExistingState = panelStateMap.value[panel.id] !== undefined;
-  const shouldUpdateUi = recording.isRecording
-    || !hasExistingState
-    || arrivalTime - previousUiUpdateTime >= panelUiUpdateMinIntervalMs;
+  const shouldUpdateUi =
+    recording.isRecording ||
+    !hasExistingState ||
+    arrivalTime - previousUiUpdateTime >= panelUiUpdateMinIntervalMs;
 
   if (isPointCloudPanel(panel)) {
     const hzLimit = safeHzLimit(panel);
@@ -1269,7 +1715,12 @@ function handlePanelMessage(panelId: string, message: any) {
 
   const summary = summarizeMessage(panel, message);
   const prettyPreview = prettyMessagePreview(message);
-  const visualization = setPanelVisualization(panel, message, summary, prettyPreview);
+  const visualization = setPanelVisualization(
+    panel,
+    message,
+    summary,
+    prettyPreview,
+  );
   panelUiUpdateTimeMap.set(panelId, arrivalTime);
   if (recording.isRecording) {
     updateRecordingState(
@@ -1305,9 +1756,14 @@ function subscribeActivePanels() {
     if (unsubscribeMap.has(panel.id)) {
       return;
     }
-    const unsubscribe = adapter?.subscribe(panel.topic, panel.messageType, (message) => {
-      handlePanelMessage(panel.id, message);
-    }, subscriptionOptionsForPanel(panel));
+    const unsubscribe = adapter?.subscribe(
+      panel.topic,
+      panel.messageType,
+      (message) => {
+        handlePanelMessage(panel.id, message);
+      },
+      subscriptionOptionsForPanel(panel),
+    );
     if (unsubscribe) {
       unsubscribeMap.set(panel.id, unsubscribe);
     }
@@ -1338,14 +1794,17 @@ async function reconnect() {
     onError: (event) => {
       emitRosLog(
         event.recoverable ? "warning" : "error",
-        `${panelShellName()}连接异常，影响窗口: ${activePanelLabels()}。原因: ${event.message}${event.detail ? ` (${event.detail})` : ""}`
+        `${panelShellName()}连接异常，影响窗口: ${activePanelLabels()}。原因: ${event.message}${event.detail ? ` (${event.detail})` : ""}`,
       );
     },
   });
 
   if (!props.url && props.provider !== "mock") {
     adapterState.value = "未配置地址";
-    emitRosLog("warning", `${panelShellName()}未配置 rosbridge 地址，未启动连接。`);
+    emitRosLog(
+      "warning",
+      `${panelShellName()}未配置 rosbridge 地址，未启动连接。`,
+    );
     return;
   }
 
@@ -1355,11 +1814,17 @@ async function reconnect() {
     isAdapterConnected.value = snapshot.connected;
     adapterState.value = snapshot.message;
     subscribeActivePanels();
-    emitRosLog("info", `${panelShellName()}连接成功，当前活动窗口: ${activePanelLabels()}`);
+    emitRosLog(
+      "info",
+      `${panelShellName()}连接成功，当前活动窗口: ${activePanelLabels()}`,
+    );
   } catch (error) {
     isAdapterConnected.value = false;
     adapterState.value = (error as Error).message;
-    emitRosLog("error", `${panelShellName()}连接失败，影响窗口: ${activePanelLabels()}。原因: ${(error as Error).message}`);
+    emitRosLog(
+      "error",
+      `${panelShellName()}连接失败，影响窗口: ${activePanelLabels()}。原因: ${(error as Error).message}`,
+    );
   }
 }
 
@@ -1375,18 +1840,22 @@ function scheduleReconnect() {
 watch(
   () => [props.provider, props.url, props.timeoutMs],
   () => scheduleReconnect(),
-  { immediate: true }
+  { immediate: true },
 );
 
 watch(
   () => props.reconnectToken,
-  () => scheduleReconnect()
+  () => scheduleReconnect(),
 );
 
 watch(
   () => props.panels,
   (panels) => {
-    const activeIds = new Set(panels.filter((panel) => !panel.collapsed && !panel.paused).map((panel) => panel.id));
+    const activeIds = new Set(
+      panels
+        .filter((panel) => !panel.collapsed && !panel.paused)
+        .map((panel) => panel.id),
+    );
     const panelById = new Map(panels.map((panel) => [panel.id, panel]));
     const existingIds = new Set(panels.map((panel) => panel.id));
     [...unsubscribeMap.keys()].forEach((panelId) => {
@@ -1406,27 +1875,47 @@ watch(
       }
     });
     const nextImuPoseStateMap = Object.fromEntries(
-      Object.entries(imuPoseStateMap.value).filter(([panelId]) => existingIds.has(panelId))
+      Object.entries(imuPoseStateMap.value).filter(([panelId]) =>
+        existingIds.has(panelId),
+      ),
     );
-    if (Object.keys(nextImuPoseStateMap).length !== Object.keys(imuPoseStateMap.value).length) {
+    if (
+      Object.keys(nextImuPoseStateMap).length !==
+      Object.keys(imuPoseStateMap.value).length
+    ) {
       imuPoseStateMap.value = nextImuPoseStateMap;
     }
     const nextCompactMetricSelectionMap = Object.fromEntries(
-      Object.entries(compactMetricSelectionMap.value).filter(([panelId]) => existingIds.has(panelId))
+      Object.entries(compactMetricSelectionMap.value).filter(([panelId]) =>
+        existingIds.has(panelId),
+      ),
     );
-    if (Object.keys(nextCompactMetricSelectionMap).length !== Object.keys(compactMetricSelectionMap.value).length) {
+    if (
+      Object.keys(nextCompactMetricSelectionMap).length !==
+      Object.keys(compactMetricSelectionMap.value).length
+    ) {
       compactMetricSelectionMap.value = nextCompactMetricSelectionMap;
     }
     const nextPanelStateMap = Object.fromEntries(
-      Object.entries(panelStateMap.value).filter(([panelId]) => existingIds.has(panelId))
+      Object.entries(panelStateMap.value).filter(([panelId]) =>
+        existingIds.has(panelId),
+      ),
     );
-    if (Object.keys(nextPanelStateMap).length !== Object.keys(panelStateMap.value).length) {
+    if (
+      Object.keys(nextPanelStateMap).length !==
+      Object.keys(panelStateMap.value).length
+    ) {
       panelStateMap.value = nextPanelStateMap;
     }
     const nextPanelRecordingMap = Object.fromEntries(
-      Object.entries(panelRecordingMap.value).filter(([panelId]) => existingIds.has(panelId))
+      Object.entries(panelRecordingMap.value).filter(([panelId]) =>
+        existingIds.has(panelId),
+      ),
     );
-    if (Object.keys(nextPanelRecordingMap).length !== Object.keys(panelRecordingMap.value).length) {
+    if (
+      Object.keys(nextPanelRecordingMap).length !==
+      Object.keys(panelRecordingMap.value).length
+    ) {
       panelRecordingMap.value = nextPanelRecordingMap;
     }
 
@@ -1434,19 +1923,26 @@ watch(
       return;
     }
 
-    panels.filter((panel) => !panel.collapsed && !panel.paused).forEach((panel) => {
-      if (unsubscribeMap.has(panel.id)) {
-        return;
-      }
-      const unsubscribe = adapter?.subscribe(panel.topic, panel.messageType, (message) => {
-        handlePanelMessage(panel.id, message);
-      }, subscriptionOptionsForPanel(panel));
-      if (unsubscribe) {
-        unsubscribeMap.set(panel.id, unsubscribe);
-      }
-    });
+    panels
+      .filter((panel) => !panel.collapsed && !panel.paused)
+      .forEach((panel) => {
+        if (unsubscribeMap.has(panel.id)) {
+          return;
+        }
+        const unsubscribe = adapter?.subscribe(
+          panel.topic,
+          panel.messageType,
+          (message) => {
+            handlePanelMessage(panel.id, message);
+          },
+          subscriptionOptionsForPanel(panel),
+        );
+        if (unsubscribe) {
+          unsubscribeMap.set(panel.id, unsubscribe);
+        }
+      });
   },
-  { deep: true }
+  { deep: true },
 );
 
 onBeforeUnmount(() => {
@@ -1466,39 +1962,159 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="nav-topic-panels-shell" :class="{ compact: props.compact }">
-    <div class="nav-topic-panels-status">{{ adapterState }}</div>
-    <div class="nav-topic-panels-grid" :class="{ compact: props.compact }">
-      <article v-for="panel in panels" :key="panel.id" class="nav-mini-panel" :class="{ collapsed: panel.collapsed, compact: props.compact }">
+  <div
+    class="nav-topic-panels-shell"
+    :class="{ compact: props.compact, collapsed: props.compact && !open }"
+  >
+    <header v-if="props.compact" class="nav-topic-panels-dock-header">
+      <strong>话题监控</strong><span class="glass-chip">{{ panels.length }}</span
+      ><button
+        class="icon-button"
+        :aria-label="open ? '收起监控' : '展开监控'"
+        @click="open = !open"
+      >
+        <component :is="open ? ChevronsLeft : ChevronsRight" :size="14" />
+      </button>
+    </header>
+    <div v-else class="nav-topic-panels-status">{{ adapterState }}</div>
+    <div
+      v-if="!props.compact || open"
+      class="nav-topic-panels-grid"
+      :class="{ compact: props.compact }"
+      @dragover.prevent
+      @drop.prevent.stop="handleListDrop"
+    >
+      <article
+        v-for="panel in panels"
+        :key="panel.id"
+        class="nav-mini-panel"
+        draggable="true"
+        @dragstart="draggedPanel = panel.id"
+        @dragover.prevent
+        @drop.prevent.stop="handlePanelDrop($event, panel.id)"
+        @dblclick="detailId = panel.id"
+        :class="{ collapsed: panel.collapsed, compact: props.compact }"
+      >
         <div class="nav-mini-panel-head">
-          <button class="nav-mini-panel-toggle" type="button" @click="emit('toggle', panel.id)">
-            <span class="collapse-trigger-label">
-              <span class="collapse-caret" :class="{ expanded: !panel.collapsed }">▸</span>
-              <span>{{ panel.title }}</span>
+          <template v-if="props.compact">
+            <GripVertical class="nav-mini-panel-grip" :size="12" />
+            <strong class="nav-mini-panel-topic-title" :title="panel.topic">{{
+              panel.topic
+            }}</strong>
+            <i
+              class="dot"
+              :class="{ 'dot-ok': isAdapterConnected && !panel.paused }"
+            ></i>
+            <span class="card-hover-actions">
+              <button
+                class="icon-button"
+                :class="{ recording: panelRecording(panel.id).isRecording }"
+                :aria-label="
+                  panelRecording(panel.id).isRecording ? '停止录制' : '录制'
+                "
+                @click.stop="toggleRecording(panel)"
+              >
+                <Circle :size="11" />
+              </button>
+              <button
+                class="icon-button"
+                :aria-label="panel.paused ? '继续' : '暂停'"
+                @click.stop="
+                  emit('updateConfig', panel.id, { paused: !panel.paused })
+                "
+              >
+                <component :is="panel.paused ? Play : Pause" :size="11" />
+              </button>
+              <button
+                class="icon-button"
+                aria-label="折叠话题"
+                @click.stop="emit('toggle', panel.id)"
+              >
+                <component
+                  :is="panel.collapsed ? ChevronDown : ChevronUp"
+                  :size="12"
+                />
+              </button>
+              <button
+                class="icon-button"
+                aria-label="移除话题"
+                @click.stop="emit('remove', panel.id)"
+              >
+                <X :size="11" />
+              </button>
             </span>
-            <span class="nav-mini-panel-head-side">
-              <span v-if="panelRecording(panel.id).isRecording || panelRecording(panel.id).entries.length" class="nav-recording-inline">
-                <span class="nav-recording-pill" :class="{ active: panelRecording(panel.id).isRecording }">
-                  {{ panelRecording(panel.id).isRecording ? "录制中" : "已录制" }}
-                </span>
-                <span class="nav-recording-meta">{{ recordingDurationText(panelRecording(panel.id)) }}</span>
+          </template>
+          <template v-else>
+            <button
+              class="secondary-btn small"
+              :aria-label="panel.paused ? '继续话题' : '暂停话题'"
+              @click.stop="
+                emit('updateConfig', panel.id, { paused: !panel.paused })
+              "
+            >
+              {{ panel.paused ? "继续" : "暂停" }}
+            </button>
+            <button
+              class="nav-mini-panel-toggle"
+              type="button"
+              @click="emit('toggle', panel.id)"
+            >
+              <span class="collapse-trigger-label">
+                <span
+                  class="collapse-caret"
+                  :class="{ expanded: !panel.collapsed }"
+                  >▸</span
+                >
+                <span>{{ panel.title }}</span>
               </span>
-              <span class="nav-mini-panel-state">{{ panelConnectionText(panel) }}</span>
-            </span>
-          </button>
-          <button
-            class="secondary-btn small"
-            :class="{ recording: panelRecording(panel.id).isRecording }"
-            type="button"
-            @click="toggleRecording(panel)"
-          >
-            {{ panelRecording(panel.id).isRecording ? "停止录制" : "录制" }}
-          </button>
-          <button class="section-card-action danger" type="button" @click="emit('remove', panel.id)">移除</button>
+              <span class="nav-mini-panel-head-side">
+                <span
+                  v-if="
+                    panelRecording(panel.id).isRecording ||
+                    panelRecording(panel.id).entries.length
+                  "
+                  class="nav-recording-inline"
+                >
+                  <span
+                    class="nav-recording-pill"
+                    :class="{ active: panelRecording(panel.id).isRecording }"
+                  >
+                    {{
+                      panelRecording(panel.id).isRecording ? "录制中" : "已录制"
+                    }}
+                  </span>
+                  <span class="nav-recording-meta">{{
+                    recordingDurationText(panelRecording(panel.id))
+                  }}</span>
+                </span>
+                <span class="nav-mini-panel-state">{{
+                  panelConnectionText(panel)
+                }}</span>
+              </span>
+            </button>
+            <button
+              class="secondary-btn small"
+              :class="{ recording: panelRecording(panel.id).isRecording }"
+              type="button"
+              @click="toggleRecording(panel)"
+            >
+              {{ panelRecording(panel.id).isRecording ? "停止录制" : "录制" }}
+            </button>
+            <button
+              class="section-card-action danger"
+              type="button"
+              @click="emit('remove', panel.id)"
+            >
+              移除
+            </button>
+          </template>
         </div>
 
         <div v-if="!panel.collapsed" class="nav-mini-panel-body">
-          <div v-if="isPointCloudPanel(panel) && !props.compact" class="nav-pointcloud-config-row">
+          <div
+            v-if="isPointCloudPanel(panel) && !props.compact"
+            class="nav-pointcloud-config-row"
+          >
             <label class="nav-pointcloud-config-item">
               <span class="kv-key">点大小</span>
               <input
@@ -1508,7 +2124,12 @@ onBeforeUnmount(() => {
                 max="8"
                 step="0.2"
                 :value="normalizePointSize(panel)"
-                @input="updatePointCloudPointSize(panel.id, ($event.target as HTMLInputElement).value)"
+                @input="
+                  updatePointCloudPointSize(
+                    panel.id,
+                    ($event.target as HTMLInputElement).value,
+                  )
+                "
               />
             </label>
             <label class="nav-pointcloud-config-item">
@@ -1520,7 +2141,12 @@ onBeforeUnmount(() => {
                 max="60"
                 step="1"
                 :value="safeHzLimit(panel)"
-                @input="updatePointCloudHzLimit(panel.id, ($event.target as HTMLInputElement).value)"
+                @input="
+                  updatePointCloudHzLimit(
+                    panel.id,
+                    ($event.target as HTMLInputElement).value,
+                  )
+                "
               />
             </label>
           </div>
@@ -1535,56 +2161,133 @@ onBeforeUnmount(() => {
           </div>
           <div v-if="!props.compact" class="nav-mini-panel-meta">
             <span class="kv-key">频率</span>
-            <span class="kv-value nav-hz-value" :class="`tone-${panelRealtimeHzTone(panel)}`">{{ panelRealtimeHzText(panel) }}</span>
+            <span
+              class="kv-value nav-hz-value"
+              :class="`tone-${panelRealtimeHzTone(panel)}`"
+              >{{ panelRealtimeHzText(panel) }}</span
+            >
           </div>
           <div v-if="!props.compact" class="nav-mini-panel-meta">
             <span class="kv-key">摘要</span>
-            <span class="kv-value">{{ panelState(panel.id, panel.topic).summary }}</span>
+            <span class="kv-value">{{
+              panelState(panel.id, panel.topic).summary
+            }}</span>
           </div>
           <div v-if="!props.compact" class="nav-mini-panel-meta">
             <span class="kv-key">更新时间</span>
-            <span class="kv-value">{{ panelState(panel.id, panel.topic).updatedAt }}</span>
+            <span class="kv-value">{{
+              panelState(panel.id, panel.topic).updatedAt
+            }}</span>
           </div>
 
           <div v-if="props.compact" class="nav-mini-panel-meta compact-inline">
             <span class="kv-key">频率</span>
-            <span class="kv-value nav-hz-value" :class="`tone-${panelRealtimeHzTone(panel)}`">{{ panelRealtimeHzText(panel) }}</span>
+            <span
+              class="kv-value nav-hz-value"
+              :class="`tone-${panelRealtimeHzTone(panel)}`"
+              >{{ panelRealtimeHzText(panel) }}</span
+            >
           </div>
 
-          <div v-if="props.compact && !panelState(panel.id, panel.topic).metricSeries.length" class="nav-mini-panel-compact-summary">
-            {{ panelState(panel.id, panel.topic).metricSeries.length ? panel.topic : panelState(panel.id, panel.topic).summary }}
+          <div
+            v-if="
+              props.compact &&
+              !panelState(panel.id, panel.topic).metricSeries.length
+            "
+            class="nav-mini-panel-compact-summary"
+          >
+            {{
+              panelState(panel.id, panel.topic).metricSeries.length
+                ? panel.topic
+                : panelState(panel.id, panel.topic).summary
+            }}
           </div>
 
-          <div v-if="panelState(panel.id, panel.topic).imuPreview" class="nav-imu-preview-card" :class="{ compact: props.compact }">
+          <div
+            v-if="panelState(panel.id, panel.topic).imuPreview"
+            class="nav-imu-preview-card"
+            :class="{ compact: props.compact }"
+          >
             <div class="nav-imu-preview-head">
               <span>IMU 方向</span>
               <span>
                 {{
-                  panelState(panel.id, panel.topic).imuPreview?.orientationSource === 'quaternion'
-                    ? '姿态'
-                    : panelState(panel.id, panel.topic).imuPreview?.orientationSource === 'integrated_gyro'
-                      ? '角速度积分'
-                      : '加速度'
+                  panelState(panel.id, panel.topic).imuPreview
+                    ?.orientationSource === "quaternion"
+                    ? "姿态"
+                    : panelState(panel.id, panel.topic).imuPreview
+                          ?.orientationSource === "integrated_gyro"
+                      ? "角速度积分"
+                      : "加速度"
                 }}
               </span>
             </div>
-            <svg class="nav-imu-preview" viewBox="0 0 144 144" preserveAspectRatio="xMidYMid meet">
+            <svg
+              class="nav-imu-preview"
+              viewBox="0 0 144 144"
+              preserveAspectRatio="xMidYMid meet"
+            >
               <circle cx="72" cy="72" r="56" class="nav-imu-preview-ring" />
-              <line x1="72" y1="72" x2="108" y2="72" class="nav-imu-world-axis axis-front" />
-              <line x1="72" y1="72" x2="48" y2="90" class="nav-imu-world-axis axis-left" />
-              <line x1="72" y1="72" x2="72" y2="36" class="nav-imu-world-axis axis-up" />
-              <polyline :points="panelState(panel.id, panel.topic).imuPreview?.leftLine" class="nav-imu-body-axis axis-left" />
-              <polyline :points="panelState(panel.id, panel.topic).imuPreview?.upLine" class="nav-imu-body-axis axis-up" />
-              <polyline :points="panelState(panel.id, panel.topic).imuPreview?.forwardLine" class="nav-imu-vector-line" />
-              <polygon :points="panelState(panel.id, panel.topic).imuPreview?.forwardHead" class="nav-imu-vector-head" />
-              <text :x="panelState(panel.id, panel.topic).imuPreview?.frontLabel.x" :y="panelState(panel.id, panel.topic).imuPreview?.frontLabel.y" class="nav-imu-label front">FRONT</text>
+              <line
+                x1="72"
+                y1="72"
+                x2="108"
+                y2="72"
+                class="nav-imu-world-axis axis-front"
+              />
+              <line
+                x1="72"
+                y1="72"
+                x2="48"
+                y2="90"
+                class="nav-imu-world-axis axis-left"
+              />
+              <line
+                x1="72"
+                y1="72"
+                x2="72"
+                y2="36"
+                class="nav-imu-world-axis axis-up"
+              />
+              <polyline
+                :points="panelState(panel.id, panel.topic).imuPreview?.leftLine"
+                class="nav-imu-body-axis axis-left"
+              />
+              <polyline
+                :points="panelState(panel.id, panel.topic).imuPreview?.upLine"
+                class="nav-imu-body-axis axis-up"
+              />
+              <polyline
+                :points="
+                  panelState(panel.id, panel.topic).imuPreview?.forwardLine
+                "
+                class="nav-imu-vector-line"
+              />
+              <polygon
+                :points="
+                  panelState(panel.id, panel.topic).imuPreview?.forwardHead
+                "
+                class="nav-imu-vector-head"
+              />
+              <text
+                :x="panelState(panel.id, panel.topic).imuPreview?.frontLabel.x"
+                :y="panelState(panel.id, panel.topic).imuPreview?.frontLabel.y"
+                class="nav-imu-label front"
+              >
+                FRONT
+              </text>
               <text x="109" y="69" class="nav-imu-world-label front">W+X</text>
               <text x="34" y="98" class="nav-imu-world-label side">W+Y</text>
               <text x="77" y="31" class="nav-imu-world-label side">W+Z</text>
             </svg>
           </div>
 
-          <div v-if="!props.compact && panelState(panel.id, panel.topic).badges.length" class="nav-panel-badges">
+          <div
+            v-if="
+              !props.compact && panelState(panel.id, panel.topic).badges.length
+            "
+            class="nav-panel-badges"
+          >
             <span
               v-for="badge in panelState(panel.id, panel.topic).badges"
               :key="`${panel.id}-${badge.label}`"
@@ -1595,12 +2298,24 @@ onBeforeUnmount(() => {
             </span>
           </div>
 
-          <div v-if="props.compact && panelState(panel.id, panel.topic).metricSeries.length > 1" class="nav-compact-metric-selector">
+          <div
+            v-if="
+              props.compact &&
+              panelState(panel.id, panel.topic).metricSeries.length > 1
+            "
+            class="nav-compact-metric-selector"
+          >
             <button
               v-for="metric in panelState(panel.id, panel.topic).metricSeries"
               :key="`${panel.id}-selector-${metric.label}`"
               class="nav-compact-metric-chip"
-              :class="{ active: compactMetricLabel(panel.id, panelState(panel.id, panel.topic).metricSeries) === metric.label }"
+              :class="{
+                active:
+                  compactMetricLabel(
+                    panel.id,
+                    panelState(panel.id, panel.topic).metricSeries,
+                  ) === metric.label,
+              }"
               type="button"
               @click="selectCompactMetric(panel.id, metric.label)"
             >
@@ -1608,9 +2323,17 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
-          <div v-if="panelState(panel.id, panel.topic).metricSeries.length && !(props.compact && panelState(panel.id, panel.topic).imuPreview)" class="nav-panel-metric-grid">
+          <div
+            v-if="
+              panelState(panel.id, panel.topic).metricSeries.length &&
+              !(props.compact && panelState(panel.id, panel.topic).imuPreview)
+            "
+            class="nav-panel-metric-grid"
+          >
             <section
-              v-for="metric in (props.compact ? compactMetricsForPanel(panel.id, panel.topic) : panelState(panel.id, panel.topic).metricSeries)"
+              v-for="metric in props.compact
+                ? compactMetricsForPanel(panel.id, panel.topic)
+                : panelState(panel.id, panel.topic).metricSeries"
               :key="`${panel.id}-${metric.label}`"
               class="nav-panel-metric-card"
             >
@@ -1621,7 +2344,11 @@ onBeforeUnmount(() => {
               <div class="nav-panel-metric-value">
                 {{ metricValueText(metric) }}
               </div>
-              <svg class="nav-panel-sparkline" viewBox="0 0 100 48" preserveAspectRatio="none">
+              <svg
+                class="nav-panel-sparkline"
+                viewBox="0 0 100 48"
+                preserveAspectRatio="none"
+              >
                 <polyline
                   :points="sparklinePoints(metric.values)"
                   :stroke="metric.color"
@@ -1639,7 +2366,13 @@ onBeforeUnmount(() => {
             </section>
           </div>
 
-          <div v-if="!props.compact && panelState(panel.id, panel.topic).keyValues.length" class="nav-panel-kv-grid">
+          <div
+            v-if="
+              !props.compact &&
+              panelState(panel.id, panel.topic).keyValues.length
+            "
+            class="nav-panel-kv-grid"
+          >
             <div
               v-for="item in panelState(panel.id, panel.topic).keyValues"
               :key="`${panel.id}-${item.key}`"
@@ -1650,20 +2383,89 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <pre v-if="!panelState(panel.id, panel.topic).metricSeries.length" class="logs nav-panel-pretty" :class="{ compact: props.compact }">{{ panelState(panel.id, panel.topic).pretty }}</pre>
-          <pre v-else-if="!props.compact" class="logs nav-panel-pretty">{{ panelState(panel.id, panel.topic).pretty }}</pre>
-          <div v-if="!props.compact && panelRecording(panel.id).entries.length" class="nav-recording-log-block">
+          <pre
+            v-if="!panelState(panel.id, panel.topic).metricSeries.length"
+            class="logs nav-panel-pretty"
+            :class="{ compact: props.compact }"
+            >{{ panelState(panel.id, panel.topic).pretty }}</pre>
+          <pre v-else-if="!props.compact" class="logs nav-panel-pretty">{{
+            panelState(panel.id, panel.topic).pretty
+          }}</pre>
+          <div
+            v-if="!props.compact && panelRecording(panel.id).entries.length"
+            class="nav-recording-log-block"
+          >
             <div class="nav-panel-recorded-title">
               录制内容
-              <span>{{ panelRecording(panel.id).startedAtText }} -> {{ panelRecording(panel.id).stoppedAtText === '-' && panelRecording(panel.id).isRecording ? '进行中' : panelRecording(panel.id).stoppedAtText }}</span>
+              <span
+                >{{ panelRecording(panel.id).startedAtText }} ->
+                {{
+                  panelRecording(panel.id).stoppedAtText === "-" &&
+                  panelRecording(panel.id).isRecording
+                    ? "进行中"
+                    : panelRecording(panel.id).stoppedAtText
+                }}</span
+              >
             </div>
-            <pre class="logs nav-panel-pretty nav-recording-log">{{ recordingEntriesForDisplay(panelRecording(panel.id)).join('\n\n') }}</pre>
-            <div v-if="panelRecording(panel.id).entries.length > maxRecordedEntriesForDisplay" class="section-subtitle">
-              当前界面仅展示最新 {{ maxRecordedEntriesForDisplay }} 条，停止录制后保存文件仍包含全部消息。
+            <pre class="logs nav-panel-pretty nav-recording-log">{{
+              recordingEntriesForDisplay(panelRecording(panel.id)).join("\n\n")
+            }}</pre>
+            <div
+              v-if="
+                panelRecording(panel.id).entries.length >
+                maxRecordedEntriesForDisplay
+              "
+              class="section-subtitle"
+            >
+              当前界面仅展示最新
+              {{ maxRecordedEntriesForDisplay }}
+              条，停止录制后保存文件仍包含全部消息。
             </div>
           </div>
         </div>
       </article>
     </div>
   </div>
+  <GlassDrawer
+    :open="!!detailPanel"
+    :title="detailPanel?.topic || '话题详情'"
+    @close="detailId = null"
+    ><template v-if="detailPanel"
+      ><p class="feedback">
+        {{ detailPanel.messageType }} · {{ panelConnectionText(detailPanel) }}
+      </p>
+      <div class="button-row">
+        <button
+          @click="
+            emit('updateConfig', detailPanel.id, {
+              paused: !detailPanel.paused,
+            })
+          "
+        >
+          {{ detailPanel.paused ? "继续" : "暂停" }}</button
+        ><button @click="toggleRecording(detailPanel)">
+          {{ panelRecording(detailPanel.id).isRecording ? "停止录制" : "录制" }}
+        </button>
+      </div>
+      <pre class="logs">{{
+        panelState(detailPanel.id, detailPanel.topic).pretty
+      }}</pre>
+      <section
+        v-for="metric in panelState(detailPanel.id, detailPanel.topic)
+          .metricSeries"
+        :key="metric.label"
+        class="nav-panel-metric-card"
+      >
+        <strong
+          >{{ metric.label }} {{ metricValueText(metric) }}
+          {{ metric.unit }}</strong
+        ><svg viewBox="0 0 100 48" width="100%">
+          <polyline
+            :points="sparklinePoints(metric.values)"
+            :stroke="metric.color"
+            fill="none"
+            stroke-width="1"
+          />
+        </svg></section></template
+  ></GlassDrawer>
 </template>

@@ -1,308 +1,264 @@
+<!-- 功能说明：四模块平台入口，默认直接进入 ROS 三维工作台。 -->
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
-
-import { fetchPreferences, fetchSystemInfo, fetchTools, runTool, savePreferences } from "./api/client";
-import HomePage from "./components/HomePage.vue";
-import Sidebar from "./components/Sidebar.vue";
-import ToolForm from "./components/ToolForm.vue";
-import type { ToolDefinition, ToolSection } from "./types";
-
-const defaultSections: ToolSection[] = [
-  { key: "all", label: "全部工具" },
-  { key: "favorites", label: "收藏夹" },
-  { key: "mapping", label: "地图处理" },
-  { key: "network", label: "网络工具" },
-  { key: "perception", label: "感知工具" },
-  { key: "entertainment", label: "娱乐分区" },
-  { key: "other", label: "其他工具" }
-];
-
-const tools = ref<ToolDefinition[]>([]);
-const selectedKey = ref("home");
-const loading = ref(false);
-const logs = ref<string[]>(["[INFO] 前端界面已就绪"]);
-const summary = ref("正在加载工具...");
-const sections = ref<ToolSection[]>(defaultSections);
-const sectionAssignments = ref<Record<string, string>>({});
-const favoriteKeys = ref<string[]>([]);
-const expandedSections = ref<string[]>(["all", "favorites", "mapping", "network", "perception", "entertainment", "other"]);
-const preferencesLoaded = ref(false);
-const themeKey = ref("blue");
-const localIp = ref("127.0.0.1");
-const resultData = ref<Record<string, any>>({});
-let saveTimer: number | undefined;
-
-const selectedTool = computed(() => tools.value.find((tool) => tool.key === selectedKey.value) ?? null);
-
-function normalizeSectionKey(label: string) {
-  return (
-    label
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-")
-      .replace(/^-+|-+$/g, "") || `section-${Date.now()}`
-  );
-}
-
-function defaultSectionForTool(tool: ToolDefinition) {
-  if (tool.key.includes("network")) {
-    return "network";
-  }
-  if (tool.key.includes("costmap")) {
-    return "perception";
-  }
-  if (tool.key.includes("nav")) {
-    return "perception";
-  }
-  if (tool.key.includes("pcd")) {
-    return "mapping";
-  }
-  if (tool.key.includes("relocalization") || tool.key.includes("candidate")) {
-    return "mapping";
-  }
-  if (tool.key.includes("mtslash")) {
-    return "entertainment";
-  }
-  return "other";
-}
-
-async function loadPreferences() {
-  try {
-    const payload = await fetchPreferences();
-    sections.value = payload.sections.length > 0 ? payload.sections : defaultSections;
-    sectionAssignments.value = payload.section_assignments;
-    favoriteKeys.value = payload.favorite_keys;
-    expandedSections.value = payload.sections.map((section) => section.key);
-  } catch {
-    sections.value = defaultSections;
-    sectionAssignments.value = {};
-    favoriteKeys.value = [];
-    expandedSections.value = defaultSections.map((section) => section.key);
-  } finally {
-    preferencesLoaded.value = true;
-  }
-}
-
-async function loadTools() {
-  tools.value = await fetchTools();
-  const mergedAssignments = { ...sectionAssignments.value };
-  tools.value.forEach((tool) => {
-    if (tool.key === "network_scan" && localIp.value) {
-      const field = tool.fields.find((item) => item.key === "prefix");
-      if (field) {
-        field.value = localIp.value.split(".").slice(0, 3).join(".");
-      }
+import { computed, defineAsyncComponent, onMounted, ref } from "vue";
+import { useRoute } from "vue-router";
+import { fetchTools, runTool } from "./api/client";
+import type { ToolDefinition } from "./types";
+const NavigationWorkspace = defineAsyncComponent(
+  () => import("./pages/NavigationWorkspace.vue"),
+);
+const MappingPage = defineAsyncComponent(
+  () => import("./pages/MappingPage.vue"),
+);
+const RelocalizationWorkspace = defineAsyncComponent(
+  () => import("./pages/RelocalizationWorkspace.vue"),
+);
+const ImuCalibrationPage = defineAsyncComponent(
+  () => import("./pages/ImuCalibrationPage.vue"),
+);
+const route = useRoute();
+const fallbackRosNavTool: ToolDefinition = {
+  key: "ros_nav_test",
+  title: "ROS测试平台",
+  subtitle: "手机直连机器狗 rosbridge",
+  description: "无需电脑后端时，直接在前端连接机器狗 IP 并解析 ROS 话题。",
+  primary_action: "连接",
+  secondary_action: "刷新",
+  fields: [
+    {
+      key: "ros_provider",
+      label: "接入方式",
+      value: "rosbridge",
+      placeholder: "rosbridge",
+    },
+    {
+      key: "ros_bridge_url",
+      label: "Bridge 地址",
+      value: "",
+      placeholder: "ws://192.168.1.100:9090",
+    },
+    {
+      key: "ros_api_service",
+      label: "rosapi 服务",
+      value: "/rosapi/topics_and_raw_types",
+      placeholder: "/rosapi/topics_and_raw_types",
+    },
+    {
+      key: "timeout_ms",
+      label: "超时 ms",
+      value: "8000",
+      placeholder: "8000",
+    },
+    {
+      key: "fixed_frame",
+      label: "固定坐标系",
+      value: "map",
+      placeholder: "map",
+    },
+    {
+      key: "robot_tf_frame",
+      label: "机器人 TF 坐标系",
+      value: "body",
+      placeholder: "body",
+    },
+    {
+      key: "map_topic",
+      label: "地图 Topic",
+      value: "/map",
+      placeholder: "/map",
+    },
+    {
+      key: "pose_topic",
+      label: "定位 Topic",
+      value: "/ndt_pose",
+      placeholder: "/ndt_pose",
+    },
+    {
+      key: "path_topic",
+      label: "路径 Topic",
+      value: "/plan",
+      placeholder: "/plan",
+    },
+    {
+      key: "offline_map_pcd",
+      label: "离线地图 PCD",
+      value: "",
+      placeholder: "选择本机 PCD",
+    },
+    {
+      key: "offline_map_yaml",
+      label: "map.yaml",
+      value: "",
+      placeholder: "选择 map.yaml",
+    },
+    {
+      key: "offline_map_pgm",
+      label: "map.pgm",
+      value: "",
+      placeholder: "选择 map.pgm",
+    },
+    {
+      key: "offline_map_voxel_leaf_m",
+      label: "离线点云下采样 m",
+      value: "0.20",
+      placeholder: "0.20",
+    },
+    {
+      key: "offline_map_occupancy_voxel_m",
+      label: "占据 voxel m",
+      value: "0.30",
+      placeholder: "0.30",
+    },
+    {
+      key: "offline_map_max_points",
+      label: "离线点云最大点数",
+      value: "60000",
+      placeholder: "60000",
+    },
+    {
+      key: "offline_map_max_voxels",
+      label: "占据最大 voxel",
+      value: "60000",
+      placeholder: "60000",
+    },
+    {
+      key: "offline_map_display_mode",
+      label: "离线地图显示方式",
+      value: "voxel",
+      placeholder: "voxel",
+    },
+    {
+      key: "offline_map_point_size",
+      label: "离线点云大小",
+      value: "0.06",
+      placeholder: "0.06",
+    },
+    {
+      key: "offline_map_point_color",
+      label: "离线点云颜色",
+      value: "#d7dee8",
+      placeholder: "#d7dee8",
+    },
+    {
+      key: "offline_map_voxel_color",
+      label: "占据网格颜色",
+      value: "#a79d86",
+      placeholder: "#a79d86",
+    },
+    {
+      key: "initial_pose_base_height_offset_m",
+      label: "初始化 base 高度偏移 m",
+      value: "0.35",
+      placeholder: "0.35",
+    },
+    {
+      key: "initial_pose_ground_normal_radius_m",
+      label: "初始化地面法线半径 m",
+      value: "0.80",
+      placeholder: "0.80",
+    },
+    {
+      key: "initial_pose_ground_max_slope_deg",
+      label: "初始化最大地面坡度 °",
+      value: "30",
+      placeholder: "30",
+    },
+  ],
+};
+const tools = ref<ToolDefinition[]>([]),
+  error = ref("");
+const jobs = ref<
+  Record<
+    string,
+    {
+      loading: boolean;
+      summary: string;
+      logs: string[];
+      resultData: Record<string, any>;
     }
-    if (!mergedAssignments[tool.key]) {
-      mergedAssignments[tool.key] = defaultSectionForTool(tool);
-    }
-  });
-  sectionAssignments.value = mergedAssignments;
-  summary.value = "可在首页选择分区，或从左侧导航打开具体功能。";
-}
-
-async function handleRun(values: Record<string, string>) {
-  if (!selectedTool.value) {
-    return;
-  }
-  loading.value = true;
+  >
+>({});
+const key = computed(() =>
+  route.path === "/tools/pcd-map"
+    ? "pcd_map"
+    : route.path === "/tools/pcd-tile"
+      ? "pcd_tile"
+      : route.path === "/tools/global-relocalization"
+        ? "global_relocalization_candidates"
+        : route.path === "/tools/imu-calibration"
+          ? "imu_calibration"
+          : "ros_nav_test",
+);
+const tool = computed(() => tools.value.find((t) => t.key === key.value));
+const job = computed(
+  () =>
+    jobs.value[key.value] || {
+      loading: false,
+      summary: "",
+      logs: [],
+      resultData: {},
+    },
+);
+async function load() {
+  error.value = "";
   try {
-    const result = await runTool(selectedTool.value.key, values);
-    summary.value = result.summary;
-    logs.value = result.logs;
-    resultData.value = result.data ?? {};
-  } catch (error) {
-    summary.value = "后端调用失败。";
-    logs.value = [`[ERROR] ${(error as Error).message}`];
-    resultData.value = {};
-  } finally {
-    loading.value = false;
+    tools.value = await fetchTools();
+  } catch (e) {
+    tools.value = [fallbackRosNavTool];
+    if (key.value !== "ros_nav_test") {
+      error.value = `后端连接失败：${(e as Error).message}`;
+    }
   }
 }
-
-function handleAssignSection(payload: { toolKey: string; sectionKey: string }) {
-  sectionAssignments.value = {
-    ...sectionAssignments.value,
-    [payload.toolKey]: payload.sectionKey
+/** 按启动时的模块保存结果，切页不会把异步结果写入另一模块。 */
+async function execute(values: Record<string, string>) {
+  const id = key.value;
+  if (jobs.value[id]?.loading) return;
+  jobs.value[id] = {
+    loading: true,
+    summary: "正在执行…",
+    logs: [],
+    resultData: {},
   };
-}
-
-function handleToggleFavorite(toolKey: string) {
-  if (favoriteKeys.value.includes(toolKey)) {
-    favoriteKeys.value = favoriteKeys.value.filter((key) => key !== toolKey);
-    return;
-  }
-  favoriteKeys.value = [...favoriteKeys.value, toolKey];
-}
-
-function handleCreateSection(label: string) {
-  const trimmed = label.trim();
-  const sectionKey = normalizeSectionKey(trimmed);
-  if (!trimmed || sections.value.some((section) => section.key === sectionKey)) {
-    return;
-  }
-  sections.value = [...sections.value, { key: sectionKey, label: trimmed }];
-  expandedSections.value = [...expandedSections.value, sectionKey];
-}
-
-function handleRenameSection(payload: { sectionKey: string; label: string }) {
-  const trimmed = payload.label.trim();
-  if (!trimmed) {
-    return;
-  }
-  sections.value = sections.value.map((section) =>
-    section.key === payload.sectionKey ? { ...section, label: trimmed } : section
-  );
-}
-
-function handleDeleteSection(sectionKey: string) {
-  if (sectionKey === "all" || sectionKey === "favorites") {
-    return;
-  }
-  sections.value = sections.value.filter((section) => section.key !== sectionKey);
-  expandedSections.value = expandedSections.value.filter((key) => key !== sectionKey);
-
-  const reassigned = { ...sectionAssignments.value };
-  Object.keys(reassigned).forEach((toolKey) => {
-    if (reassigned[toolKey] === sectionKey) {
-      reassigned[toolKey] = "other";
-    }
-  });
-  sectionAssignments.value = reassigned;
-}
-
-function handleToggleSection(sectionKey: string) {
-  if (expandedSections.value.includes(sectionKey)) {
-    expandedSections.value = expandedSections.value.filter((key) => key !== sectionKey);
-    return;
-  }
-  expandedSections.value = [...expandedSections.value, sectionKey];
-}
-
-function handleSelectTool(toolKey: string) {
-  selectedKey.value = toolKey;
-  const tool = tools.value.find((item) => item.key === toolKey);
-  if (tool) {
-    summary.value = tool.description;
-  }
-  resultData.value = {};
-}
-
-function handleClearLogs() {
-  logs.value = [];
-}
-
-watch(
-  themeKey,
-  (value) => {
-    document.documentElement.setAttribute("data-theme", value);
-  },
-  { immediate: true }
-);
-
-watch(
-  [sections, sectionAssignments, favoriteKeys],
-  () => {
-    if (!preferencesLoaded.value) {
-      return;
-    }
-    if (saveTimer) {
-      window.clearTimeout(saveTimer);
-    }
-    saveTimer = window.setTimeout(async () => {
-      try {
-        await savePreferences({
-          sections: sections.value,
-          section_assignments: sectionAssignments.value,
-          favorite_keys: favoriteKeys.value
-        });
-      } catch (error) {
-        logs.value = [...logs.value, `[WARN] failed to save preferences: ${(error as Error).message}`];
-      }
-    }, 250);
-  },
-  { deep: true }
-);
-
-onMounted(async () => {
-  await loadPreferences();
+  const state = jobs.value[id];
   try {
-    const systemInfo = await fetchSystemInfo();
-    localIp.value = systemInfo.local_ip || localIp.value;
-    if (systemInfo.app_root) {
-      localStorage.setItem("moontoolbox.appRoot", systemInfo.app_root);
-    }
-    await loadTools();
-  } catch (error) {
-    summary.value = "加载后端工具失败。";
-    logs.value = [`[ERROR] ${(error as Error).message}`];
+    const result = await runTool(id, values);
+    Object.assign(state, {
+      summary: result.summary,
+      logs: result.logs,
+      resultData: result.data || {},
+    });
+  } catch (e) {
+    state.summary = (e as Error).message;
+    state.logs = [state.summary];
+  } finally {
+    state.loading = false;
   }
-});
+}
+onMounted(load);
 </script>
-
 <template>
-  <div class="app-shell">
-    <Sidebar
-      :tools="tools"
-      :selected-key="selectedKey"
-      :sections="sections"
-      :section-assignments="sectionAssignments"
-      :favorite-keys="favoriteKeys"
-      :expanded-sections="expandedSections"
-      @select="handleSelectTool"
-      @select-home="selectedKey = 'home'"
-      @assign-section="handleAssignSection"
-      @toggle-favorite="handleToggleFavorite"
-      @toggle-section="handleToggleSection"
-    />
-
-    <main class="workspace">
-      <div class="topbar">
-        <div class="topbar-path">{{ selectedTool ? `/tools/${selectedTool.key}` : "/home" }}</div>
-        <div class="topbar-actions">
-          <div class="topbar-ip">本机 IP: {{ localIp }}</div>
-          <label class="theme-switcher">
-            <span>主题</span>
-            <select v-model="themeKey" class="theme-select">
-              <option value="blue">深蓝黑</option>
-              <option value="emerald">墨绿白</option>
-              <option value="platinum">白金</option>
-            </select>
-          </label>
-          <div class="topbar-status">{{ selectedTool ? "功能页" : "总览页" }}</div>
-        </div>
-      </div>
-
-      <HomePage
-        v-if="!selectedTool"
-        :tools="tools"
-        :sections="sections"
-        :section-assignments="sectionAssignments"
-        :favorite-keys="favoriteKeys"
-        :expanded-sections="expandedSections"
-        :logs="logs"
-        :summary="summary"
-        :local-ip="localIp"
-        @select-tool="handleSelectTool"
-        @assign-section="handleAssignSection"
-        @create-section="handleCreateSection"
-        @rename-section="handleRenameSection"
-        @delete-section="handleDeleteSection"
-        @toggle-section="handleToggleSection"
-        @toggle-favorite="handleToggleFavorite"
-      />
-
-      <template v-else>
-        <ToolForm
-          :tool="selectedTool"
-          :loading="loading"
-          :summary="summary"
-          :logs="logs"
-          :result-data="resultData"
-          @run="handleRun"
-          @clear-logs="handleClearLogs"
-        />
-      </template>
-    </main>
+  <div v-if="error" class="startup-error glass-strong">
+    <h1>ROS 测试平台</h1>
+    <p>{{ error }}</p>
+    <button class="primary-btn" @click="load">重新连接后端</button>
   </div>
+  <component
+    v-else-if="tool"
+    :is="
+      key === 'ros_nav_test'
+        ? NavigationWorkspace
+        : key === 'global_relocalization_candidates'
+          ? RelocalizationWorkspace
+          : key === 'imu_calibration'
+            ? ImuCalibrationPage
+            : MappingPage
+    "
+    :key="key"
+    :tool="tool"
+    v-bind="job"
+    @run="execute"
+    @clear-logs="job.logs.splice(0)"
+  />
+  <div v-else class="startup-error">正在载入平台…</div>
 </template>

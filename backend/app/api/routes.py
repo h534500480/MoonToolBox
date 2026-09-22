@@ -1,3 +1,4 @@
+"""功能说明：四模块 API 与公共文件、ROS 诊断入口。"""
 import mimetypes
 from io import BytesIO
 from pathlib import Path
@@ -13,18 +14,14 @@ from app.models import (
     NavRecordingFileListResponse,
     NavRecordingSaveRequest,
     OpenPathRequest,
-    PreferencesPayload,
     RosDataSourceConfig,
     RosInspectionResponse,
     RosRuntimeParamsResponse,
     RosTopicListResponse,
-    SystemInfoResponse,
     TilePreviewResponse,
     ToolRunRequest,
     ToolRunResponse,
 )
-from app.services.costmap_playback import run_costmap
-from app.services.browser_bridge import list_tabs, start_browser
 from app.services.cpp_runner import run_global_relocalization_candidates, run_pcd_map, run_pcd_tile
 from app.services.dialogs import browse_local_path
 from app.services.global_relocalization import (
@@ -32,14 +29,6 @@ from app.services.global_relocalization import (
     load_candidates,
     preview_pcd_points,
 )
-from app.services.mtslash_exporter import (
-    fetch_mtslash_browser_favorites,
-    fetch_mtslash_favorites,
-    run_mtslash_export,
-    start_mtslash_login_session,
-    submit_mtslash_login,
-)
-from app.services.network_scan import run_network_scan
 from app.services.nav_recordings import (
     delete_nav_recording_file,
     list_nav_recording_files,
@@ -48,7 +37,6 @@ from app.services.nav_recordings import (
 )
 from app.services.nav_offline_map import preview_nav_offline_map, raycast_nav_offline_map
 from app.services.pcd_preview import preview_pcd_tile
-from app.services.preferences import load_preferences, save_preferences
 from app.services.ros_data_source import (
     inspect_ros_data_source,
     list_ros_topics,
@@ -56,8 +44,8 @@ from app.services.ros_data_source import (
     save_ros_data_source_config,
 )
 from app.services.ros_runtime_params import list_ros_runtime_params
-from app.services.system_info import get_system_info
 from app.services.system_actions import open_path_in_system
+from app.services.imu_calibration import analyze_imu_bag, inspect_imu_bag, run_imu_calibration
 
 
 router = APIRouter()
@@ -68,24 +56,9 @@ def health():
     return {"status": "ok"}
 
 
-@router.get("/system/info", response_model=SystemInfoResponse)
-def system_info():
-    return get_system_info()
-
-
 @router.get("/tools")
 def list_tools():
     return get_tool_definitions()
-
-
-@router.get("/preferences", response_model=PreferencesPayload)
-def get_preferences():
-    return load_preferences()
-
-
-@router.put("/preferences", response_model=PreferencesPayload)
-def put_preferences(payload: PreferencesPayload):
-    return save_preferences(payload)
 
 
 @router.get("/ros/data-source", response_model=RosDataSourceConfig)
@@ -289,68 +262,28 @@ def post_global_relocalization_final_export(payload: dict):
     raise HTTPException(status_code=400, detail="final-export 已停用；请使用“确认候选点”，该入口会调用 C++ 基于 PCD 生成真实 descriptors.npy/ring_keys.npy。")
 
 
-@router.post("/tools/mtslash_export/login-captcha")
-def post_mtslash_login_captcha():
-    if not is_tool_enabled("mtslash_export"):
+@router.get("/tools/imu_calibration/inspect")
+def get_imu_calibration_inspect(path: str):
+    if not is_tool_enabled("imu_calibration"):
         raise HTTPException(status_code=404, detail="Tool not enabled")
     try:
-        return start_mtslash_login_session()
+        return inspect_imu_bag(path)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"IMU 包检查异常: {type(exc).__name__}: {exc}") from exc
 
 
-@router.post("/tools/mtslash_export/login")
-def post_mtslash_login(payload: dict):
-    if not is_tool_enabled("mtslash_export"):
-        raise HTTPException(status_code=404, detail="Tool not enabled")
-    values = {key: str(value) for key, value in payload.items()}
-    try:
-        return submit_mtslash_login(values)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.get("/tools/mtslash_export/favorites")
-def get_mtslash_favorites(session_id: str, max_pages: int = 200):
-    if not is_tool_enabled("mtslash_export"):
+@router.post("/tools/imu_calibration/analyze")
+def post_imu_calibration_analyze(payload: dict):
+    if not is_tool_enabled("imu_calibration"):
         raise HTTPException(status_code=404, detail="Tool not enabled")
     try:
-        max_pages = max(1, min(max_pages, 200))
-        return fetch_mtslash_favorites(session_id=session_id, max_pages=max_pages)
+        return analyze_imu_bag(payload)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.get("/tools/mtslash_export/browser/favorites")
-def get_mtslash_browser_favorites(browser: str = "edge", max_pages: int = 200):
-    if not is_tool_enabled("mtslash_export"):
-        raise HTTPException(status_code=404, detail="Tool not enabled")
-    try:
-        max_pages = max(1, min(max_pages, 200))
-        return fetch_mtslash_browser_favorites(browser=browser, max_pages=max_pages)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.post("/tools/mtslash_export/browser/start")
-def post_mtslash_browser_start(payload: dict):
-    if not is_tool_enabled("mtslash_export"):
-        raise HTTPException(status_code=404, detail="Tool not enabled")
-    browser = str(payload.get("browser", "edge"))
-    try:
-        return start_browser(browser)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.get("/tools/mtslash_export/browser/tabs")
-def get_mtslash_browser_tabs(browser: str = "edge"):
-    if not is_tool_enabled("mtslash_export"):
-        raise HTTPException(status_code=404, detail="Tool not enabled")
-    try:
-        return {"status": "success", "items": list_tabs(browser)}
-    except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"IMU 标定异常: {type(exc).__name__}: {exc}") from exc
 
 
 @router.post("/tools/{tool_key}/run", response_model=ToolRunResponse)
@@ -363,6 +296,12 @@ def run_tool(tool_key: str, request: ToolRunRequest):
         raise HTTPException(status_code=404, detail="Tool not found")
 
     values = {key: str(value) for key, value in request.values.items()}
+    # 所有 CLI 与本地文件服务使用同一工作区基准，避免启动目录改变输出位置。
+    workspace = Path(__file__).resolve().parents[3]
+    for key in ["input_pcd", "output_dir", "config_path", "candidate_file", "manual_file"]:
+        if values.get(key, "").strip():
+            path = Path(values[key]).expanduser()
+            values[key] = str(path if path.is_absolute() else workspace / path)
     try:
         if tool_key == "pcd_map":
             return run_pcd_map(values)
@@ -370,29 +309,15 @@ def run_tool(tool_key: str, request: ToolRunRequest):
             return run_pcd_tile(values)
         if tool_key == "global_relocalization_candidates":
             return run_global_relocalization_candidates(values)
-        if tool_key == "network_scan":
-            return run_network_scan(values)
-        if tool_key == "costmap":
-            return run_costmap(values)
         if tool_key == "ros_nav_test":
-            logs = [
-                "[INFO] ROS 定位导航测试布局已启动",
-                f"[INFO] bridge: {values.get('ros_bridge_url', '')}",
-                f"[INFO] fixed frame: {values.get('fixed_frame', 'map')}",
-                "[NEXT] 后续在这里接入 ROS topic 订阅、3D 渲染和小窗数据生命周期控制",
-            ]
-            return ToolRunResponse(
-                tool=tool_key,
-                status="ready",
-                summary="导航测试工作台布局已就绪，当前版本用于确认三维主视图、话题选择和可折叠小窗区结构。",
-                logs=logs,
-                data={
-                    "bridge_url": values.get("ros_bridge_url", ""),
-                    "fixed_frame": values.get("fixed_frame", "map"),
-                },
-            )
-        if tool_key == "mtslash_export":
-            return run_mtslash_export(values)
+            inspection = inspect_ros_data_source(RosDataSourceConfig(
+                provider=values.get("ros_provider") or "rosbridge",
+                options={"url": values.get("ros_bridge_url", ""), "rosapi_service": values.get("ros_api_service") or "/rosapi/topics_and_raw_types", "timeout_ms": values.get("timeout_ms") or "8000"},
+            ))
+            return ToolRunResponse(tool=tool_key, status=inspection.status, summary=inspection.message,
+                logs=[inspection.message, *inspection.detected_hints], data=inspection.model_dump())
+        if tool_key == "imu_calibration":
+            return run_imu_calibration(values)
     except RuntimeError as exc:
         return ToolRunResponse(
             tool=tool_key,
@@ -402,11 +327,4 @@ def run_tool(tool_key: str, request: ToolRunRequest):
             data={},
         )
 
-    logs = [
-        f"[INFO] selected tool: {tool.title}",
-        f"[INFO] received {len(values)} input fields",
-        "[INFO] backend workflow shell is ready",
-        "[NEXT] wire this route to the real C++ CLI or Python task service",
-    ]
-    summary = f"{tool.title} request accepted. Current backend is a scaffold and echoes form values."
-    return ToolRunResponse(tool=tool.key, status="ready", summary=summary, logs=logs)
+    raise HTTPException(status_code=404, detail="未知工具")

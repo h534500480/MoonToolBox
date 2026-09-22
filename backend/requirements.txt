@@ -6,4 +6,3 @@ pillow
 websockets
 pystray
 numpy
-zeroconf

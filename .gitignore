@@ -12,14 +12,12 @@ venv/
 # Frontend
 frontend/node_modules/
 frontend/dist/
-frontend/android/.gradle/
 .pnpm-store/
 npm-debug.log*
 
 # Backend local data
 backend/data/*.json
 !backend/data/.gitkeep
-backend/data/browser_profiles/
 
 # Build and packaging outputs
 build/

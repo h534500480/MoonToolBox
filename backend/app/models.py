@@ -32,17 +32,6 @@ class ToolRunResponse(BaseModel):
     data: Dict[str, Any] = Field(default_factory=dict)
 
 
-class ToolSection(BaseModel):
-    key: str
-    label: str
-
-
-class PreferencesPayload(BaseModel):
-    sections: List[ToolSection] = Field(default_factory=list)
-    section_assignments: Dict[str, str] = Field(default_factory=dict)
-    favorite_keys: List[str] = Field(default_factory=list)
-
-
 class BrowseDialogRequest(BaseModel):
     mode: str = "open_file"
     title: str = "Select Path"
@@ -66,12 +55,6 @@ class TilePreviewResponse(BaseModel):
 
 class OpenPathRequest(BaseModel):
     path: str
-
-
-class SystemInfoResponse(BaseModel):
-    local_ip: str = ""
-    subnet_prefix: str = ""
-    app_root: str = ""
 
 
 class RosDataSourceConfig(BaseModel):

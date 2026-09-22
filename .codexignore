@@ -12,7 +12,6 @@ frontend/dist/
 
 backend/data/*.json
 backend/data/_debug/
-backend/data/browser_profiles/
 
 build/
 dist/

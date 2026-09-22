@@ -10,4 +10,4 @@ if __name__ == "__main__":
     sys.path.insert(0, str(backend_dir))
     reload_enabled = os.environ.get("ROS_TOOL_RELOAD", "0").lower() in {"1", "true", "yes", "on"}
     host = os.environ.get("ROS_TOOL_HOST", "0.0.0.0")
-    uvicorn.run("app.main:app", host=host, port=8000, reload=reload_enabled)
+    uvicorn.run("app.main:app", host=host, port=8100, reload=reload_enabled)

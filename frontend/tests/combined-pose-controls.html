@@ -1,0 +1,98 @@
+<!doctype html>
+<!-- 功能说明：组合位姿控件的独立浏览器回归场景，验证真实指针拖动及相机互斥。 -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>组合位姿控件回归</title>
+    <style>
+      body {
+        margin: 0;
+        background: #e9e4da;
+      }
+      canvas {
+        display: block;
+      }
+      button {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        padding: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <button id="yaw">切换任务点模式</button>
+    <script type="module">
+      import * as THREE from "three";
+      import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+      import { CombinedPoseControls } from "../src/lib/scene/combinedPoseControls.ts";
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(
+        45,
+        innerWidth / innerHeight,
+        0.01,
+        100,
+      );
+      camera.up.set(0, 0, 1);
+      camera.position.set(5, -7, 6);
+      camera.lookAt(0, 0, 0);
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(innerWidth, innerHeight);
+      document.body.append(renderer.domElement);
+      const orbit = new OrbitControls(camera, renderer.domElement);
+      orbit.enableDamping = false;
+      const object = new THREE.Mesh(
+        new THREE.BoxGeometry(0.35, 0.6, 0.2),
+        new THREE.MeshNormalMaterial(),
+      );
+      scene.add(object);
+      let changes = 0;
+      let pointPriority = false;
+      const controls = new CombinedPoseControls(
+        camera,
+        renderer.domElement,
+        (dragging) => {
+          orbit.enabled = !dragging;
+        },
+        () => {
+          changes++;
+        },
+        () => pointPriority,
+      );
+      scene.add(controls.getHelper());
+      controls.attach(object);
+      let worldSpace = false;
+      document.querySelector("#yaw").onclick = () => {
+        worldSpace = !worldSpace;
+        object.position.set(0, 0, 0);
+        object.quaternion.identity();
+        controls.attach(object, worldSpace);
+      };
+      renderer.setAnimationLoop(() => {
+        orbit.update();
+        controls.updateScale();
+        renderer.render(scene, camera);
+      });
+      // 仅测试页面暴露对象，生产界面不增加调试入口。
+      window.poseTest = {
+        setPointPriority: (value) => {
+          pointPriority = value;
+        },
+        controls,
+        object,
+        camera,
+        orbit,
+        renderer,
+        snapshot: () => ({
+          position: object.position.toArray(),
+          rotation: object.quaternion.toArray(),
+          camera: camera.position.toArray(),
+          target: orbit.target.toArray(),
+          enabled: orbit.enabled,
+          dragging: controls.dragging,
+          changes,
+        }),
+      };
+    </script>
+  </body>
+</html>

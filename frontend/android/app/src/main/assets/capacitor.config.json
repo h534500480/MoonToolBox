@@ -1,6 +1,6 @@
 {
-	"appId": "com.moontoolbox.rosnav",
-	"appName": "MoonToolBox ROS Nav",
+	"appId": "com.moontoolbox.rosplatform",
+	"appName": "ROS Platform Dev",
 	"webDir": "dist",
 	"bundledWebRuntime": false,
 	"server": {

@@ -1,1236 +1,374 @@
 # 任务日志
 
-## 2026-08-21
-
-- 任务目标：修复 `pcd_map` 导出的 PGM/YAML 语义，使其能输出未知区、可通行区和障碍区，并更接近 `nav2` 地图逻辑。
-- 修改文件：
-  - `cpp/include/ros_tool_suite/mapping/types.hpp`
-  - `cpp/src/mapping/exporters.cpp`
-  - `src/ros_tool_suite/tools/pcd_slam_map_tool.py`
-  - `backend/app/services/cpp_runner.py`
-  - `frontend/src/components/ToolForm.vue`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 为地图导出参数补充 `unknown_gray=205`，沿用 `free_gray=254`、`obstacle_gray=0` 的三态灰度方案。
-  - 修复 C++ `write_pgm()`：原先把 `Unknown` 和 `Walkable` 一起写成 free；现在改为 `Obstacle -> 0`、`Walkable -> 254`、`Unknown -> 205`。
-  - 修复旧 Python 兼容实现的 `write_pgm()`，保持与 C++ 主线一致。
-  - 在导出的 YAML 中显式写入 `mode: trinary`，避免依赖加载侧默认行为。
-  - 后端摘要和前端结果卡片增加“未知格”统计，便于直接判断地图是否保留 unknown。
-- 已确认：
-  - `cd frontend && npm run build` 构建通过。
-  - `src/ros_tool_suite/tools/pcd_slam_map_tool.py` 已通过 `py_compile`。
-- 风险、限制或尚未验证项：
-  - 尚未使用真实 PCD 重新生成并在 `nav2 map_server` 中在线验证效果。
-  - 在修复 C++ 环境前，本机重新编译 `pcd_map_cli` 曾失败，错误是 MSVC 无法找到标准头文件如 `<filesystem>`、`<functional>`、`<exception>`。
-
-- 任务目标：修复仓库内 C++ CLI 的 PowerShell 编译环境，使普通终端中也能正确调用 MSVC 标准库与 Windows SDK。
-- 修改文件：
-  - `scripts/import_vsdev_env.ps1`
-  - `scripts/install_local.ps1`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 新增 `scripts/import_vsdev_env.ps1`，通过 `vswhere + VsDevCmd.bat` 把 VS Build Tools 的 `INCLUDE`、`LIB`、`LIBPATH` 和相关 PATH 导入当前 PowerShell 会话。
-  - `scripts/install_local.ps1` 在调用 `cmake` 编译 C++ CLI 前自动导入 VS C++ 编译环境，避免普通 PowerShell 中 `cl.exe` 缺失标准头路径。
-- 已确认：
-  - 当前机器已识别到 `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools`。
-  - 在导入环境后，`cmake --build cpp/build --target pcd_map_cli --config Release` 已编译通过。
-- 风险、限制或尚未验证项：
-  - 本次只实测了 `pcd_map_cli` 目标，尚未在同一会话里把其余 C++ CLI 全量重编一遍。
-
-## 2026-08-12
-
-- 任务目标：接入 SCAN-Planner 推荐测试话题到 `ros_nav_test`，让新的消息类型可以直接添加到三维主视图进行可视化调试。
-- 修改文件：
-  - `frontend/src/lib/ros/displayRegistry.ts`
-  - `frontend/src/components/ToolForm.vue`
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 扩展主视图显示类型识别，新增 `visualization_msgs/msg/Marker`、`scan_planner_msgs/msg/Bspline`、`geometry_msgs/msg/Twist`；同时把 `nav_msgs/msg/Odometry` 归入现有位姿显示通道。
-  - 在导航测试页默认可选话题清单中加入 SCAN-Planner 推荐的关键话题，包括 `/lio/cloud_local_base_exact`、`/grid_map/occupancy_inflate`、`/self_inflation`、`/planning/bspline`、`/initial_path`、`/cmd_vel_scanplanner_raw`、`/global_list`、`/a_star_list`、`/init_list`、`/optimal_list`、`/grid_map/sliding_map_bbox` 和 `/planning/data_display`。
-  - 三维主视图新增 SCAN 相关渲染能力：
-    - `Marker` 支持 `ARROW / SPHERE / CYLINDER / LINE_STRIP / LINE_LIST / SPHERE_LIST`
-    - `Bspline` 按控制点、阶数和 knots 前端近似采样为折线
-    - `Twist` 基于当前主位姿绘制速度箭头
-  - 显示项配置面板同步支持为 `Marker / Bspline / Twist` 调整颜色，便于区分局部点云、膨胀占据图、机体包络和轨迹。
-- 风险、限制或尚未验证项：
-  - 已运行 `cd frontend && npm run build` 并通过；构建仍有 Vite 对 Three/OrbitControls chunk 体积的常规警告。
-  - `scan_planner_msgs/msg/Bspline` 当前采用前端近似采样，仅用于调试轨迹形态；若后续需要和 SCAN 内部轨迹求值逐点严格一致，建议再补一个后端或桥接侧精确转换通道。
-  - `planning/data_display` 已加入可选话题列表，但当前三维主视图未对 `scan_planner_msgs/msg/DataDisp` 做专门可视化，建议先作为小窗文本/原始消息观察。
-  - 2026-08-12 继续修复 `/self_inflation`：确认该话题会在同一 topic 下连续发布多个 `visualization_msgs/msg/Marker`，依赖 `ns + id` 区分前后双圆柱；前端已改为按 `ns + id` 管理同 topic 的多个 Marker，避免第二个圆柱覆盖第一个，同时修正 `CYLINDER` 几何轴向与 ROS `z` 轴对齐。
-
-## 2026-08-05
-
-- 任务目标：排查当前电脑网络条件下 ROS 定位导航测试页是否能拿到 rosbridge 数据。
-- 修改文件：
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 记录本次仅做网络与 rosbridge 协议连通性排查，未修改前后端业务代码。
-  - 当前页面保存的 ROS 数据源为 `ws://10.10.15.40:9090`，本机可 ping 通 `10.10.15.40` 且 TCP 9090 端口可连接。
-  - 本机无法 ping 通 `192.168.123.98`，且没有到 `192.168.123.0/24` 的直连路由；因此页面不能直接访问布在 `192.168.123.98` 的 bridge，除非 `10.10.15.40` 做端口转发或代理。
-  - 对 `ws://10.10.15.40:9090` 进行 WebSocket 握手和 rosapi 调用测试，30 秒内未收到握手响应；当前入口不像健康可用的 rosbridge。
-  - 用户补充确认：`10.10.15.40` 本机没有 rosbridge websocket，但 `10.10.15.40` 可以访问 `192.168.123.98` 上的 bridge；因此前端需要通过 SSH 隧道、端口转发或路由方式间接访问 `98:9090`。
-  - 进一步确认测试需求包含 Android 端，临时 SSH 本地隧道不适合；更合适的是在 `10.10.15.40` 上用 TCP 代理或 DNAT+SNAT 长期暴露 `192.168.123.98:9090`。
-- 风险、限制或尚未验证项：
-  - 未登录 `10.10.15.40` 或 `192.168.123.98` 查看 rosbridge 进程、端口监听、转发规则和 ROS graph。
-  - 尚未在浏览器页面内点击“检测数据源”做 UI 级复测；结论基于本机网络命令和 WebSocket 协议探测。
-
-## 2026-07-21
-
-- 任务目标：修复初始化定位 `/initialpose` 时发时不发的问题。
-- 修改文件：
-  - `frontend/src/components/ToolForm.vue`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 导航控制下发改为复用 `ros_nav_test` 页面共享 rosbridge 连接，不再每次单独新建 WebSocket 后立即关闭。
-  - 连接配置变化或组件卸载时释放导航控制共享连接，避免继续使用旧 rosbridge 地址。
-  - `/initialpose` 消息补充 ROS2 `header.stamp.sec/nanosec`，让消息更接近 RViz 下发格式。
-- 已确认：
-  - `cd frontend && npm run build` 构建通过。
-- 风险、限制或尚未验证项：
-  - 尚未连接真实 rosbridge / Nav2 / AMCL 环境验证初始化定位接收成功率。
-  - 若机器人端 `/initialpose` 订阅者自身未启动、QoS 不兼容或 rosbridge 网络严重阻塞，仍可能出现机器人端不处理的情况。
-
-- 任务目标：修复 main 分支 ROS 导航测试页在弱网或 rosbridge 不可达时持续重连、可能拖垮机器人侧网络连接的问题。
-- 修改文件：
-  - `frontend/src/lib/ros/liveAdapter.ts`
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `frontend/src/components/NavTopicPanelList.vue`
-  - `frontend/src/components/ToolForm.vue`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - `RosbridgeLiveAdapter` 增加连接序号校验，忽略已关闭或被替换的旧 WebSocket 回调。
-  - 连接超时和首次连接失败时立即关闭当前 socket，减少半关闭连接和重复重连对 rosbridge 的压力。
-  - 增加 `reconnectMaxAttempts`，自动重连达到上限后暂停；用户手动重连会重置计数。
-  - 为导航测试页的三维主视图、话题小窗和链路延迟窗口设置 3 秒起步、30 秒封顶、最多 4 次的共享连接重试策略。
-  - rosapi 服务调用增加超时保护，避免服务无响应时 Promise 长时间悬挂。
-- 已确认：
-  - `cd frontend && npm run build` 构建通过。
-- 风险、限制或尚未验证项：
-  - 尚未在真实机器人弱网环境下验证 SSH 断连问题是否消失。
-  - 当前仍保留用户手动重连能力；如果机器人端 rosbridge 本身不可用，页面会在有限重试后暂停而不是持续重试。
-
-## 2026-07-20
-
-- 任务目标：在 ROS 定位导航测试三维主视图右下角显示机器狗当前位置（`base_link` 的 `x/y/z/yaw`）。
-- 修改文件：
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `frontend/src/styles.css`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 主视图新增“机器狗位置”HUD 卡片，默认显示在三维画布右下角，窄屏下自动改为画布下方整行显示。
-  - 优先读取 `TF` 中 `base_link -> fixed_frame` 的变换结果，显示 `x/y/z/yaw(rad)`；若当前没有 `base_link` TF，则回退显示当前主位姿显示项的 pose 缓存，并标记来源为 `pose`。
-  - 在 TF 更新、位姿更新、连接状态变化和清空场景时同步刷新 HUD 文案，避免断连后仍显示旧位置。
-- 风险、限制或尚未验证项：
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有既有的 Vite chunk 体积警告。
-  - 本轮未连接真实 rosbridge/TF 流做在线验证；当前 `yaw` 按弧度显示。
-
-- 任务目标：修复导航测试小窗在连接成功时重复注册订阅 handler 的问题。
-- 修改文件：
-  - `frontend/src/components/NavTopicPanelList.vue`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 新增 `subscribeActivePanels()`，把小窗活动面板的订阅补齐逻辑收敛到单一入口。
-  - `reconnect()` 中的 `onStatusChange(connected)` 回调和 `await adapter.connect()` 成功后的流程都改为复用同一订阅入口，并保留 `unsubscribeMap.has(panel.id)` 去重判断。
-  - 修复后，同一轮连接里每个 panel 只会注册一份 handler，不再因为“连接成功回调订一次 + connect 成功后再订一次”导致前端重复消费同一条消息。
-- 风险、限制或尚未验证项：
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有既有的 Vite chunk 体积警告。
-  - 本轮未连接真实 rosbridge 复测，只完成了静态修复和前端构建验证。
-
-- 任务目标：排查 ROS 定位导航测试页在 rosbridge + 弱网场景下的订阅链路风险，分析是否存在导致数据延迟累积、机器狗端变卡和 SSH 断连的前端问题。
-- 修改文件：
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 仅做代码阅读和风险定位，未改动前后端业务逻辑。
-  - 确认主视图、侧边/完整小窗和链路延迟窗口都会通过共享 rosbridge 连接订阅 ROS 话题，但底层 `ROSLIB.Topic` 订阅统一使用 `throttle_rate: 0`、`queue_size: 1`，不会在传输层降低高频点云/位姿话题的进站速率。
-  - 确认主视图默认会加载 `/debug/loaded_pointcloud_map`、`/points_aligned`、`/cloud_registered_bl` 三路 `PointCloud2`，链路延迟窗口默认还会额外订阅 `/cloud_registered_body`、`/cloud_registered_bl`、`/points_aligned` 等 7 个高频话题；页面级 Hz 限制只在浏览器收到消息后本地丢弃，不能减少 rosbridge、网络和机器人侧的实际发送压力。
-  - 确认 `NavTopicPanelList.vue` 在连接成功回调和 `await connect()` 之后都会执行一轮 `subscribe`，同一 panel 会重复注册 handler；虽然共享连接会合并同 topic 的底层 rosbridge 订阅，但前端同页消息处理会重复执行，增加浏览器和页面状态更新负担。
-- 风险、限制或尚未验证项：
-  - 本轮未连接真实机器狗或 rosbridge，只基于源码静态分析；“弱网下 SSH 断开”与机器人端 CPU/带宽被 rosbridge 放大占满的关联属于高置信推断，尚未做在线抓包或 rosbridge 日志验证。
-  - 尚未在真实环境统计 topic 带宽、消息频率和浏览器内存曲线；后续若要定责，建议补充 rosbridge 端带宽、机器人 CPU、WebSocket backlog 和前端 Performance 录制。
-
-## 2026-07-17
-
-- 任务目标：避免空 reviewed CSV 后手工加点时输出 `placeholder_zero_descriptors` 占位库。
-- 修改文件：
-  - `backend/app/services/global_relocalization.py`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - `export_reviewed_database` 不再写 `metadata.yaml/candidates.npy/descriptors.npy/ring_keys.npy/sector_keys.npy/candidates.csv` 占位文件，只写给 C++ 消费的 `reviewed_candidates.csv`。
-  - 真实 v2 离线库仍必须由 C++ `global_relocalization_cli` 基于 PCD 重新计算 descriptor/ring/sector key 后输出，避免 C++ 中断或未执行时留下全 0 descriptor 假库。
-- 风险、限制或尚未验证项：
-  - 已运行 `python -m compileall backend\app`。
-  - 已用临时目录直接调用 `export_reviewed_database` 验证：现在只生成 `reviewed_candidates.csv`。
-  - 已存在的 placeholder DB 不会自动修复，需要重新点击“确认候选点”触发 C++ 生成真实库。
-
-## 2026-07-16
-
-- 任务目标：修复全局重定位离线生成未按页面参数写入 descriptor/metadata 的问题。
-- 修改文件：
-  - `cpp/src/mapping/global_relocalization.cpp`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 修复 C++ runtime YAML 简易解析器的 `trim()`，现在会同时去掉单引号和双引号。
-  - 根因是前端参数经后端 PyYAML 写入 `_runtime_global_relocalization_config.yaml` 后，多数数值是 `'0.05'` 这种单引号字符串；旧解析器无法把它解析为数字，导致 `occupancy_resolution_m`、`occupancy_inflate_radius_m` 等标量参数回退 C++ 默认值。
-- 风险、限制或尚未验证项：
-  - 已重新编译 `global_relocalization_cli.exe`，并通过 `python -m compileall backend\app`。
-  - 已用 `global_relocalization_db_3/_runtime_global_relocalization_config.yaml` 复测：metadata 正确写出 `occupancy_resolution_m=0.05`、`occupancy_inflate_radius_m=0.05`、`min_range_m=0.2`、`ray_count=5580`。
-  - 已有旧 DB 不会自动更新，需要重新确认候选点/重新生成 DB。
-
-- 任务目标：修正手动数值初始化定位的 yaw 单位，使其与三维界面一致。
-- 修改文件：
-  - `frontend/src/components/ToolForm.vue`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 手动初始化输入的 yaw 从角度解释改为弧度解释，和 `Nav3DViewer` 交互返回值、原 `/initialpose` 发布链路保持一致。
-  - 输入占位文案从 `yaw°` 改为 `yaw(rad)`，状态反馈不再显示角度符号。
-- 风险、限制或尚未验证项：
-  - 已运行 `npm run build`；未连接真实 ROS 环境实发验证。
-
-- 任务目标：在 ROS 定位导航测试模块中增加手动数值初始化定位入口。
-- 修改文件：
-  - `frontend/src/components/ToolForm.vue`
-  - `frontend/src/styles.css`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 在“定位与导航控制”卡片中新增 `x/y/z/yaw°` 输入和“确认初始化”按钮。
-  - 手动确认后复用既有 `/initialpose` 发布链路，消息类型仍为 `geometry_msgs/msg/PoseWithCovarianceStamped`。
-  - `publishInitialPose` 支持传入 z；三维主视图点击初始化仍默认使用 z=0。
-  - yaw 输入按角度处理，发布前转换为弧度并生成四元数。
-- 风险、限制或尚未验证项：
-  - 已运行 `npm run build` 和 `python -m compileall backend\app`；Vite 仍有 Three/OrbitControls chunk 体积警告。
-  - 未连接真实 rosbridge/ROS 环境实发 `/initialpose` 验证。
-
-## 2026-07-15
-
-- 任务目标：将当前项目离线默认参数改为匹配机器人日志中的在线 query 参数。
-- 修改文件：
-  - `cpp/include/ros_tool_suite/mapping/global_relocalization.hpp`
-  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 当前项目离线默认 `virtual_lidar.min_range_m` 从 `0.60` 改为 `0.30`。
-  - 当前项目离线默认 `virtual_lidar.occupancy_inflate_radius_m` 从 `0.40` 改为 `0.15`。
-  - `virtual_lidar.lidar_to_base_rpy_deg` 默认保持 `[0,0,0]`，与日志中的在线 query 一致。
-- 风险、限制或尚未验证项：
-  - 已重新编译 `global_relocalization_cli.exe`，并通过 `python -m compileall backend\app`、`npm run build`；Vite 仍有 Three/OrbitControls chunk 体积警告。
-  - 已用默认参数小样本生成验证 metadata：`min_range_m=0.3`、`occupancy_inflate_radius_m=0.15`、`lidar_to_base_rpy_deg=[0,0,0]`、`ray_count=5580`。
-  - 已有输出目录中的 `_runtime_global_relocalization_config.yaml` 或旧 DB metadata 不会自动更新，需要重新确认候选点/重新生成 DB。
-
-- 任务目标：同步全局重定位离线 Scan Context 默认参数。
-- 修改文件：
-  - `cpp/include/ros_tool_suite/mapping/global_relocalization.hpp`
-  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 将 C++ 内置默认和前端页面默认的 `virtual_lidar.min_range_m` 从 `0.30` 改为 `0.60`。
-  - 核对用户给出的其余默认参数：`occupancy_resolution_m=0.25`、FOV/step、LiDAR 外参、descriptor 维度/半径/高度裁剪当前已一致，无需改算法代码。
-- 风险、限制或尚未验证项：
-  - 已重新编译 `global_relocalization_cli.exe`，并通过 `python -m compileall backend\app`、`npm run build`；Vite 仍有 Three/OrbitControls chunk 体积警告。
-  - 已用无显式配置的小样本生成验证 metadata：`min_range_m=0.6`、`occupancy_resolution_m=0.25`、`horizontal_step_deg=2`、`vertical_step_deg=2`、`ray_count=5580`。
-  - 已存在输出目录中的 `_runtime_global_relocalization_config.yaml` 若仍写着旧值，会覆盖 C++ 默认值；需要通过前端重新确认/生成或手动更新运行配置。
-
-## 2026-07-14
-
-- 任务目标：撤销基于异常候选点非零 cell 统计的 sector 级稀疏化，只保留每条射线 first-return 约束。
-- 修改文件：
-  - `cpp/src/mapping/global_relocalization.cpp`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 删除 `nearest_first_return_per_sector` 逻辑，恢复为每条射线取第一个命中点后写入对应 `ring/sector`，同一 descriptor cell 内按高度最大值聚合。
-  - 移除 metadata 中的 `descriptor_occlusion_policy: nearest_first_return_per_sector`，避免误导在线/离线一致性检查。
-  - 保留 ray casting 本身的 first-return 行为：命中第一个占据体素后立即返回，不继续沿同一射线写入后方结构。
-- 风险、限制或尚未验证项：
-  - 已按用户说明不再参考此前候选 77 的 `query_nonzero_cells/database_nonzero_cells` 异常统计。
-  - 后续仍需要重新编译并重新生成 DB 后，机器人端才能使用这版离线 descriptor。
-
-- 任务目标：让离线 Scan Context descriptor 只保留 first-return，并降低离线库相对在线 query 的过稠密问题。（已被上一条撤销 sector 级稀疏化，仅保留每射线 first-return）
-- 修改文件：
-  - `cpp/src/mapping/global_relocalization.cpp`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 保持 ray casting 每条射线命中第一个占据体素后立即返回，不继续写入射线后方墙、柱子或边界。
-  - descriptor 写入新增 sector 级遮挡压缩：每个 Scan Context sector 只保留最近的 first-return cell，避免同一方位内多条 2 度射线和多条垂直射线把后方结构一起填进离线 descriptor。
-  - metadata 的 `scan_context` 新增 `descriptor_occlusion_policy: nearest_first_return_per_sector`，用于标记离线 descriptor 的稀疏化策略。
-- 风险、限制或尚未验证项：
-  - 已重新编译 `global_relocalization_cli.exe`，并通过 `python -m compileall backend\app`。
-  - 已用当前 `global_relocalization_db_3/reviewed_candidates.csv` 临时生成验证：`ray_count=5580`，`ring_keys.npy == descriptors.max(axis=2)`，`sector_keys.npy == descriptors.max(axis=1)`。
-  - 正确候选 `manual_77/original_candidate_id=77` 的离线非零 cell 为 `11`，已接近用户日志中的在线 `query_nonzero_cells=12`；当前 reviewed 文件共有 79 行，其中 64 个 `manual_added`、15 个 `auto`。
-
-- 任务目标：按在线调试要求调整全局重定位离线 Scan Context 采样密度和 key 聚合方式。
-- 修改文件：
-  - `cpp/include/ros_tool_suite/mapping/global_relocalization.hpp`
-  - `cpp/src/mapping/global_relocalization.cpp`
-  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 前端默认配置和 C++ 内置默认值均将 `virtual_lidar.horizontal_step_deg`、`virtual_lidar.vertical_step_deg` 从 `8.0` 改为 `2.0`。
-  - 离线 `ring_keys.npy` 改为每个 ring 对所有 sector 取最大值，`sector_keys.npy` 改为每个 sector 对所有 ring 取最大值。
-  - `metadata.yaml` 的 `scan_context` 字段同步改为 `ring_key: ring_max`、`sector_key: sector_max`。
-  - 保持人工点 z 语义：前端新打点导出 `z_frame=ground` 与地面 z，C++ 生成库时按 `base_link_height_offset_m` 转换为 base_link z。
-- 风险、限制或尚未验证项：
-  - 已重新编译 `global_relocalization_cli.exe`，并通过 `python -m compileall backend\app`、`npm run build`；Vite 仍有 Three/OrbitControls chunk 体积警告。
-  - 已用 `qidi_f15/map.pcd` 小规模生成验证：metadata 中 `horizontal_step_deg=2`、`vertical_step_deg=2`、`ray_count=5580`、`ring_key=ring_max`、`sector_key=sector_max`；`ring_keys.npy == descriptors.max(axis=2)` 且 `sector_keys.npy == descriptors.max(axis=1)`。
-  - 已存在输出目录中的 `_runtime_global_relocalization_config.yaml` 若仍写着 8 度，会覆盖 C++ 默认值；需要通过前端重新确认/生成或手动改运行配置后再生成。
-
-- 任务目标：让人工打点的 ground z 按机器人 base_link 高度转换后再生成全局重定位 v2 npy。
-- 修改文件：
-  - `cpp/src/mapping/global_relocalization.cpp`
-  - `backend/app/services/global_relocalization.py`
-  - `frontend/src/api/client.ts`
-  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 前端候选点新增 `z_frame` 语义，新打的人工点导出为 `ground`，从已有候选库加载的点默认视为 `base_link`。
-  - `reviewed_candidates.csv` 导出新增 `z_frame` 列，C++ 读取到 `z_frame=ground` 时使用 `candidate_sampling.base_link_height_offset_m` 将地面 z 转换到 map 下 base_link z。
-  - 兼容旧 reviewed CSV：没有 `z_frame` 且 `source=manual_added`、质量指标仍为 0 的旧人工点，会按 ground z 处理。
-  - 直接使用 `manual_candidates.yaml` 时，显式 z 也按地面 z 加 `base_link_height_offset_m`；`z:null` 仍先估计 ground z 再加偏移。
-  - 前端参数说明和手动 z 输入占位文案改为强调 `base_link_height_offset_m` 是机器人 base_link 离地高度，手动输入 z 为 ground z。
-- 风险、限制或尚未验证项：
-  - 已重新编译 `global_relocalization_cli.exe`，并通过 `python -m compileall backend\app`、`npm run build`；Vite 仍有 Three/OrbitControls chunk 体积警告。
-  - 已用 `global_relocalization_db_3/reviewed_candidates.csv` 生成到临时目录 `output_db3_ground_z_offset_check` 验证：304 个候选全部保留，manual 点 z 统一转换为 `0.35`，`ring_keys/sector_keys` 与 descriptor 均值一致。
-  - 转换后这批 manual 点仍有 210 个 `descriptor_nonzero_ratio < 0.03`，说明低分还与点周围可观测结构或 ray casting 参数有关，不只是 z 语义问题。
-
-- 任务目标：修复人工添加并锁定的全局重定位候选点未完整写入 v2 npy 的问题。
-- 修改文件：
-  - `cpp/src/mapping/global_relocalization.cpp`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 排查 `global_relocalization_db_3`，确认 `reviewed_candidates.csv` 有 304 行，其中 290 行为 `manual_added`，但旧输出 `candidates.npy/candidates.csv` 只有 99 行。
-  - 根因是写 npy 前仍按 `observability.min_*` 阈值过滤低观测质量点，且当前配置 `manual_edit.allow_force_add_low_observability=false`，导致 205 个人工点被拒绝。
-  - 调整 C++ 过滤逻辑：`locked=true` 的候选点代表人工审核强制保留，即使观测质量低也进入最终 `candidates.npy/descriptors.npy/ring_keys.npy/sector_keys.npy`；质量指标仍按实际 descriptor 写入。
-- 风险、限制或尚未验证项：
-  - 已重新编译 `global_relocalization_cli.exe`。
-  - 已用 `global_relocalization_db_3/reviewed_candidates.csv` 生成到临时目录 `output_db3_locked_keep_check` 验证：最终 `candidates.npy=(304,16)`、`descriptors.npy=(304,20,60)`、`ring_keys.npy=(304,20)`、`sector_keys.npy=(304,60)`，`rejected_candidates=0`，ring/sector key 均与 descriptor 均值一致。
-  - 未直接覆盖用户的 `global_relocalization_db_3`，需要重新点击确认候选点或重新运行 C++ 生成来刷新该目录。
-
-- 任务目标：根据新版 `GlobalRelocalization_ScanContext_Offline_Update.md` 补齐离线 Scan Context v2 数据库合约。
-- 修改文件：
-  - `cpp/include/ros_tool_suite/mapping/global_relocalization.hpp`
-  - `cpp/src/mapping/global_relocalization.cpp`
-  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 新增并解析 `virtual_lidar.occupancy_inflate_radius_m`，默认值为 `0.40`，前端参数草案同步暴露该项。
-  - synthetic LiDAR first-return ray casting 按占据体素膨胀半径做命中判断，用于贴近在线 query 的占据膨胀语义。
-  - `metadata.yaml` 按新版文档补齐 `format: v2_scan_context_places`、`num_places`、`candidate_pose_frame`、`synthetic_lidar`、`scan_context` 等合约字段，并保留兼容用的 `virtual_lidar` 字段。
-  - 确认候选点和自动生成路径都保持输出 `candidates.npy/descriptors.npy/ring_keys.npy/sector_keys.npy`，其中 `sector_keys.npy` 作为在线检索必需文件记录到项目地图。
-- 风险、限制或尚未验证项：
-  - 已重新编译 `global_relocalization_cli.exe`。
-  - 已运行 `python -m compileall backend\app`、`npm run build`；Vite 仍有 Three/OrbitControls chunk 体积警告。
-  - 已用 `qidi_f15/map.pcd` 小规模生成验证：`candidates.npy=(2,16)`、`descriptors.npy=(2,20,60)`、`ring_keys.npy=(2,20)`、`sector_keys.npy=(2,60)`；`ring_keys/sector_keys` 均与 descriptor 均值一致，metadata 包含 `synthetic_lidar.occupancy_inflate_radius_m=0.4`。
-
-- 任务目标：根据更新后的 `GlobalRelocalization_ScanContext_Offline_Update.md` 再次对齐离线 Scan Context 输出语义。
-- 修改文件：
-  - `cpp/include/ros_tool_suite/mapping/global_relocalization.hpp`
-  - `cpp/src/mapping/global_relocalization.cpp`
-  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 保持离线 virtual LiDAR 外参为 `[0,0,0]`，与在线 `/fallback_global_cloud_bl_exact` 的 base_link 语义一致。
-  - 将 `base_link_height_offset_m` 默认值改为 `0.35`，自动候选的 `candidates.npy` z 列不再默认等于地面点高度，而是 `ground_z + offset`。
-  - clearance 检查改为使用 `base_link z - offset` 作为地面附近检查高度，避免候选 z 抬到 base_link 后漏检低处障碍。
-  - 前端参数草案同步更新 `base_link_height_offset_m=0.35` 并明确该参数不是 LiDAR 外参。
-- 风险、限制或尚未验证项：
-  - 已重新编译 `global_relocalization_cli.exe`。
-  - 已运行 `python -m compileall backend\app`、`npm run build`；Vite 仍有 Three/OrbitControls chunk 体积警告。
-  - 已用 `qidi_f15/map.pcd` 小规模生成验证：`candidates.npy=(3,16)`、`descriptors.npy=(3,20,60)`、`ring_keys.npy=(3,20)`、`sector_keys.npy=(3,60)`；`ring_keys/sector_keys` 均与 descriptor 均值一致，metadata 显示 `lidar_to_base_translation_xyz=[0,0,0]` 与 `base_link_height_offset_m=0.35`。
-
-## 2026-07-10
-
-- 任务目标：按 `GlobalRelocalization_ScanContext_Offline_Update.md` 对齐离线 Scan Context 数据库生成逻辑。
-- 修改文件：
-  - `cpp/include/ros_tool_suite/mapping/global_relocalization.hpp`
-  - `cpp/src/mapping/global_relocalization.cpp`
-  - `cpp/src/global_relocalization_cli/main.cpp`
-  - `backend/app/services/cpp_runner.py`
-  - `backend/app/services/global_relocalization.py`
-  - `frontend/src/api/client.ts`
-  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 离线 virtual LiDAR 默认参数改为与当前在线 `fallback_global_localizer.yaml` query 一致：`min_range_m=0.30`、`vertical_fov_deg=59.0`、`lidar_to_base_translation_xyz=[0,0,0]`、`lidar_to_base_rpy_deg=[0,0,0]`。
-  - 新增 `candidate_sampling.base_link_height_offset_m`，自动候选和 `z:null` 人工候选会输出 `ground_z + offset` 作为候选 `base_link` z，避免把地面高度和 base/radar 中心高度混用。
-  - C++ 额外导出 `sector_keys.npy [P,num_sectors]`，生成方式为 `mean(descriptor[all_rings, sector])`；CLI、后端返回和 Python 兜底导出同步新增该路径。
-  - `metadata.yaml` 继续记录 virtual LiDAR 参数，并新增 `sector_key_shape` 与 `base_link_height_offset_m`，便于检查离线库与在线查询配置是否一致。
-  - 前端离线参数草案同步改为在线默认值，`lidar_to_base_translation_xyz` 从 `0,0,0.35` 改为 `0,0,0`。
-- 风险、限制或尚未验证项：
-  - 已重新编译 `global_relocalization_cli.exe`。
-  - 已运行 `python -m compileall backend\app`、`npm run build`；Vite 仍有 Three/OrbitControls chunk 体积警告。
-  - 已用 `qidi_f15/map.pcd` 小规模生成验证：`candidates.npy=(3,16)`、`descriptors.npy=(3,20,60)`、`ring_keys.npy=(3,20)`、`sector_keys.npy=(3,60)`；`ring_keys == descriptors.mean(axis=2)`，`sector_keys == descriptors.mean(axis=1)`。
-
-- 任务目标：统一全局重定位离线 virtual LiDAR 默认参数与在线 query 配置。
-- 修改文件：
-  - `cpp/include/ros_tool_suite/mapping/global_relocalization.hpp`
-  - `cpp/src/mapping/global_relocalization.cpp`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - C++ 默认离线 virtual LiDAR 参数改为 `min_range_m=0.50`、`vertical_fov_deg=60.0`、`lidar_to_base_translation_xyz=[0.0,0.0,0.35]`、`lidar_to_base_rpy_deg=[0.0,0.0,0.0]`，与当前建议的在线 query 参数一致。
-  - `metadata.yaml` 新增 `virtual_lidar` 参数块，方便后续检查离线库与在线查询配置是否一致。
-- 风险、限制或尚未验证项：
-  - 已重新编译 `global_relocalization_cli.exe`。
-  - 已小规模运行默认配置生成，metadata 显示 `min_range_m: 0.5`、`vertical_fov_deg: 60`、`lidar_to_base_translation_xyz: [0, 0, 0.35]`。
-
-- 任务目标：修复全局重定位“创建候选点”误用空 reviewed CSV 导致 npy 只有空 shape 的问题。
-- 修改文件：
-  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
-  - `backend/app/services/cpp_runner.py`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 前端在当前界面没有已加载候选点时，不再导出空 `reviewed_candidates.csv`，也不再把候选文件路径传给自动生成流程。
-  - 后端收到 `reviewed_candidates.csv` 时会先检查候选数量；若文件为空，则忽略该文件并回落到从 PCD 自动采样，避免生成空 `candidates.npy/descriptors.npy/ring_keys.npy`。
-- 风险、限制或尚未验证项：
-  - 已运行 `python -m compileall backend\app`、`npm run build`；Vite 仍有 Three/OrbitControls chunk 体积警告。
-  - 已模拟空 `reviewed_candidates.csv` 调用后端入口，命令未再携带 `--candidates`，输出 `accepted_places=3`，三份 npy 分别为 `(3,16)`、`(3,20,60)`、`(3,20)` 且非零。
-
-- 任务目标：修复全局重定位 manual additions 的 `z:null`、姿态字段解析和 ground z 估计问题。
-- 修改文件：
-  - `cpp/src/mapping/global_relocalization.cpp`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - manual additions 中 `z: null` 不再保留默认 0，而是按人工点 XY 查邻近 ground cell 并估计 ground z。
-  - manual YAML 解析补充 `roll_deg/pitch_deg/yaw_deg/yaw_expand_deg` 字段；v2 输出仍会把 yaw 统一 canonical 到 0。
-  - 修复 `yaw_expand_deg` 多行列表项被误识别为新增 addition 的问题。
-  - 自动候选和邻域 ground 支撑判断的 ground z 从 `sum_z/count` 改为 15% z 分位，降低墙点或高点抬高 base 的风险。
-- 风险、限制或尚未验证项：
-  - 已重新编译 `global_relocalization_cli.exe`。
-  - 已运行 `python -m compileall backend\app`、`npm run build`；Vite 仍有 Three/OrbitControls chunk 体积警告。
-  - 已用 `z: null` 的 manual YAML 验证：`manual_additions=1`，输出 z 为 `-0.802625` 而不是 0，`candidates.npy` 第 6 列仍为 0，descriptor/ring key 非零。
-  - 已用 `qidi_f15/map.pcd` 小规模自动采样验证：`accepted_places=3`，v2 输出未按 yaw 展开。
-
-- 任务目标：将全局重定位离线数据库输出改为 v2 place-level 格式，不再按 yaw 展开候选行。
-- 修改文件：
-  - `cpp/src/mapping/global_relocalization.cpp`
-  - `cpp/src/global_relocalization_cli/main.cpp`
-  - `backend/app/services/global_relocalization.py`
-  - `frontend/src/api/client.ts`
-  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - C++ 自动采样和 reviewed CSV 输入统一按 xyz 归并为 place，每个可站立位置只生成一条记录。
-  - `candidates.npy` 改为 v2 列定义：第 0 列 `place_id`，第 6 列 `canonical_yaw_deg`，当前固定为 `0.0`；descriptor/ring key 均在 canonical yaw=0 下计算。
-  - C++ 输出 `metadata.yaml` 标记 `format_version: 2`、`candidate_row_model: place_canonical_yaw`，并额外打印 `accepted_places`。
-  - 后端 CSV/npy 读取导出兼容 `place_id/canonical_yaw_deg` 与旧 `candidate_id/yaw_deg` 字段；前端候选点审核页可加载 v2 文件并显示 v2 CSV 预览。
-- 风险、限制或尚未验证项：
-  - 已重新编译 `global_relocalization_cli.exe`。
-  - 已运行 `python -m compileall backend\app`、`npm run build`；Vite 仍有 Three/OrbitControls chunk 体积警告。
-  - 已用 `qidi_f15/map.pcd` 小规模生成验证：`candidates.npy` 为 `(3,16)`，第 6 列全为 `0.0`；`descriptors.npy` 为 `(3,20,60)` 且非零数 215，`ring_keys.npy` 为 `(3,20)` 且非零数 23。
-  - 已用现有 `reviewed_candidates.csv` 验证 `--candidates` 模式：旧多 yaw 审核行被压成 `(78,16)` place-level 输出，第 6 列唯一值为 `0.0`，descriptor/ring key 均非零。
-
-- 任务目标：在导航测试主视图中支持 `geometry_msgs/msg/PoseArray` 话题可视化。
-- 修改文件：
-  - `frontend/src/lib/ros/displayRegistry.ts`
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `frontend/src/components/ToolForm.vue`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - ROS 显示注册表新增 `pose_array` 类型识别，兼容 `geometry_msgs/msg/PoseArray` 与 `geometry_msgs/PoseArray`。
-  - 主 3D 视图新增 PoseArray 渲染逻辑，将 `message.poses` 批量显示为小型位姿箭头，并复用现有 TF/frame transform 管线。
-  - 默认话题列表新增 `/initialpose_candidates` 示例 PoseArray 话题，方便直接添加到主视图观察重定位候选姿态。
-- 风险、限制或尚未验证项：
-  - 已运行 `npm run build` 并通过；仍有 Vite 对 Three/OrbitControls chunk 体积的常规警告。
-  - 未连接真实 rosbridge/PoseArray 话题做端到端显示验证。
-
-- 任务目标：在 ROS 定位导航测试模块的“定位与导航控制”中接入自动定位按钮。
-- 修改文件：
-  - `frontend/src/lib/ros/liveAdapter.ts`
-  - `frontend/src/components/ToolForm.vue`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 为前端 ROS live adapter 增加 `callService` 能力，rosbridge provider 通过 `ROSLIB.Service.callService` 调用服务。
-  - 在定位与导航控制按钮组新增“自动定位”按钮。
-  - 按钮点击后调用 `/fallback_global_localization_trigger`，服务类型为 `std_srvs/srv/Trigger`，请求体为 `{}`，并把返回的 `success/message` 显示到控制反馈区。
-- 风险、限制或尚未验证项：
-  - 已运行 `npm run build` 并通过；仍有 Vite 对 Three/OrbitControls chunk 体积的常规警告。
-  - 未连接真实 rosbridge/ROS2 环境做端到端服务调用验证。
-
-## 2026-07-09
-
-- 任务目标：补齐全局重定位离线库的 virtual LiDAR ray casting、Scan Context descriptor 和 ring key 生成。
-- 修改文件：
-  - `cpp/include/ros_tool_suite/mapping/global_relocalization.hpp`
-  - `cpp/src/mapping/global_relocalization.cpp`
-  - `cpp/src/global_relocalization_cli/main.cpp`
-  - `backend/app/services/cpp_runner.py`
-  - `backend/app/api/routes.py`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - C++ 配置补齐 MD 中的 `virtual_lidar`、`observability` 和 `descriptor` 参数。
-  - C++ 自动 PCD 生成路径新增 virtual LiDAR ray casting、单通道高度版 Scan Context descriptor、ring key 和观测质量指标计算，不再写空 shape 占位。
-  - C++ CLI 新增 `--candidates/--reviewed-candidates`，可直接使用 reviewed/current 候选点列表，基于输入 PCD 重新计算 `candidates.npy/descriptors.npy/ring_keys.npy`。
-  - 后端“确认候选点”在当前界面有候选点时，会写临时 reviewed CSV 并调用 C++ `--candidates` 模式，而不是 Python 写零 descriptor。
-  - 停用旧 `/final-export` Python 占位接口，避免误生成全 0 `descriptors.npy/ring_keys.npy`。
-- 风险、限制或尚未验证项：
-  - 已使用 VS Build Tools 重新编译 `cpp/build/global_relocalization_cli.exe`。
-  - 已用真实 `qidi_f15/map.pcd` + 当前 `reviewed_candidates.csv` 在临时目录验证：`descriptors.npy` shape 为 `(761, 20, 60)` 且非零数 59450，`ring_keys.npy` 非零数 5981。
-  - 已用真实 PCD 小规模自动采样验证：`candidates.npy/descriptors.npy/ring_keys.npy` 均更新且非零。
-  - 已运行 `python -m compileall backend\app` 和 `npm run build`；Vite 仍有 Three/OrbitControls chunk 体积警告。
-  - 当前 C++ descriptor 计算是单线程基础版，后续大规模精细库需要继续做并行优化；observability 过滤会丢弃低质量候选，数量可能少于 reviewed CSV 行数。
-
-- 任务目标：收敛“确认候选点”执行入口，避免最终候选库先保存后又被 C++ 自动生成覆盖。
-- 修改文件：
-  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
-  - `backend/app/services/cpp_runner.py`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 前端点击“确认候选点”时，如果界面已有候选点，会通过统一 `/run` 入口提交 `final_candidates_json`，不再单独调用 `/final-export` 后静默返回。
-  - 后端 `/run` 优先识别 `final_candidates_json`，直接按当前界面候选点写出最终候选库，并返回执行日志 `mode=current_view_final_export`。
-  - 只有没有当前候选点列表、也没有 reviewed CSV 兜底时，才继续调用 C++ CLI 从 PCD 自动采样。
-- 风险、限制或尚未验证项：
-  - 已运行 `python -m compileall backend\app`、`npm run build`。
-  - 已用当前 reviewed CSV 模拟 `/run` 验证，输出日志为 `mode=current_view_final_export`，生成的 `candidates.npy` 与传入候选数量一致。
-  - 需要重启后端并刷新前端页面后生效。
-
-- 任务目标：修复使用 `reviewed_candidates.csv` 点击确认候选点时仍走 C++ 自动采样、导致 `candidates.npy` 不变化的问题。
-- 修改文件：
-  - `backend/app/services/cpp_runner.py`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 在旧的 `/tools/global_relocalization_candidates/run` 路径增加兜底判断：当 `candidate_file` 指向 `reviewed_candidates.csv` 时，直接按该 CSV 写出最终候选库，不再调用 C++ 自动采样。
-  - 该兜底会输出 `candidates.csv`、`reviewed_candidates.csv`、`candidates.npy`、`descriptors.npy`、`ring_keys.npy` 和 `metadata.yaml`，用于兼容未刷新到最新前端逻辑的运行路径。
-- 风险、限制或尚未验证项：
-  - 已运行 `python -m compileall backend\app`。
-  - 已用当前 `output_global_relocalization/reviewed_candidates.csv` 在临时目录验证，导出的 `candidates.npy` 为 `(643, 16)`，`descriptors.npy` 为 `(643, 20, 60)`。
-  - 需要重启正在运行的后端进程后才会生效。
-
-- 任务目标：将“确认候选点”改为按当前审核后的候选列表直接写出最终候选库。
-- 修改文件：
-  - `backend/app/services/global_relocalization.py`
-  - `backend/app/api/routes.py`
-  - `frontend/src/api/client.ts`
-  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 新增 `/api/tools/global_relocalization_candidates/final-export`，按前端当前候选点列表写出 `candidates.csv`、`reviewed_candidates.csv`、`candidates.npy`、`descriptors.npy`、`ring_keys.npy` 和 `metadata.yaml`。
-  - `candidates.npy` 按最终审核列表重排为连续 `candidate_id`，保持 `[N,16]` 格式。
-  - `descriptors.npy/ring_keys.npy` 暂按最终候选点数量生成匹配 shape 的零占位数组，避免数量与候选点不一致。
-  - 前端“确认候选点”在已有候选点时直接调用最终导出接口；只有没有加载候选点时才回退到 C++ 从 PCD 自动生成。
-  - 修复 CSV 加载时丢失 `source/label/locked/original_candidate_id` 的问题，支持重新加载 `reviewed_candidates.csv` 后继续保存最终库。
-- 风险、限制或尚未验证项：
-  - 已运行 `python -m compileall backend\app`、`npm run build`，并用临时目录验证 `.npy` 输出 shape。
-  - `descriptors.npy/ring_keys.npy` 仍是零占位，不是真实 Scan Context 描述子。
-  - 未启动浏览器做完整交互复测。
-
-- 任务目标：修复全局重定位候选点运行时 `--manual` 已传入但人工编辑计数仍为 0 的问题。
-- 修改文件：
-  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
-  - `cpp/src/mapping/global_relocalization.cpp`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - “确认候选点”运行前自动导出当前人工编辑文件，并回填 `manual_file`，避免使用旧的空 `manual_candidates.yaml`。
-  - 前端人工加点导出按同一 xyz 分组合并，避免同一位置多个 yaw 被导出成重复 base 点。
-  - C++ 手工 YAML 解析支持 PyYAML 输出的多行 `candidate_ids`、人工 addition 条目和删除区域 `regions`。
-  - C++ 候选生成时应用删除区域过滤，并将删除 id 与删除区域一起计入 `manual_deletions`。
-- 风险、限制或尚未验证项：
-  - 已运行 `npm run build` 并通过；仍有 Vite 对 Three/OrbitControls chunk 体积的常规警告。
-  - 已使用 VS Build Tools 重新编译 `cpp/build/global_relocalization_cli.exe`。
-  - 未用真实浏览器完成端到端点击删除/加点复测；当前发现的旧 `manual_candidates.yaml` 内容为空，需重新在界面编辑后再运行。
-
-- 任务目标：补全全局重定位候选点页面的人工编辑文件输入，避免 C++ 离线生成漏带 `--manual`。
-- 修改文件：
-  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
-  - `frontend/src/styles.css`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 在路径区新增“人工编辑文件”输入框，可手动选择 `manual_candidates.yaml`。
-  - “导出人工编辑文件”成功后自动把返回的 `manual_path` 写入 `formValues.manual_file`，后续点击“确认候选点”会把该路径传给 C++ runner。
-  - 路径区网格改为自适应列宽，四个路径输入在不同窗口宽度下更稳定。
-- 风险、限制或尚未验证项：
-  - 已运行 `npm run build` 并通过；仍有 Vite 对 Three/OrbitControls chunk 体积的常规警告。
-  - 未启动浏览器做交互截图验证。
-
-- 任务目标：修复同位置多方向候选点箭头/中心球拾取错位和前后遮挡导致无法点击的问题。
-- 修改文件：
-  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 候选点选择从 Three.js 物体 raycaster 命中改为屏幕空间命中测试。
-  - 箭头按鼠标到方向线段/箭头端点的像素距离命中，中心球按鼠标到投影中心的像素距离命中。
-  - 箭头命中优先于中心球，避免相邻候选组或前景中心球抢占点击。
-- 风险、限制或尚未验证项：
-  - 已运行 `npm run build`；未做真实浏览器手动点击回归。
-  - 当前命中阈值为箭头 14px、中心球 22px；后续可按实际屏幕缩放继续微调。
-
-- 任务目标：解决同一 xyz 多 yaw 候选在三维中互相遮挡、无法选择指定方向的问题。
-- 修改文件：
-  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 新增候选点位置分组结构，按毫米级 xyz 将多个 yaw 候选合并为一个中心球和多个方向箭头。
-  - 点击中心球选择同一位置的全部方向候选；点击箭头只选择该 yaw 对应的单个候选。
-  - 手动加点默认生成 8 个 yaw 方向候选，而不是单个方向。
-  - 支持拖动中心球，按当前相机视角平面移动整组同位置候选点。
-  - 鼠标离开画布时会结束框选/拖动，避免相机控制被锁住。
-- 风险、限制或尚未验证项：
-  - 已运行 `npm run build`；未做真实浏览器截图验证。
-  - 当前 xyz 分组使用 0.001m 量化容差；如果数据噪声更大，后续可做成可配置容差。
-
-- 任务目标：调整全局重定位候选点编辑按钮布局和参数说明。
-- 修改文件：
-  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
-  - `frontend/src/styles.css`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 将选择、框选、手动加点、删除选中点、锁定保留、设为禁用区域移到三维视图左侧竖状按钮栏，并通过悬浮 title 显示说明。
-  - 将容易混淆的按钮文案语义改为“删除选中点 / 锁定保留 / 设为禁用区域”。
-  - 为所有离线参数名增加圆圈感叹号帮助图标，悬浮显示中文注释。
-- 风险、限制或尚未验证项：
-  - 已运行 `npm run build`；未做截图级浏览器验证。
-
-- 任务目标：补全候选点人工编辑的撤销/重做、最终排序重编号，以及三维视图右上角轴向视图控件。
-- 修改文件：
-  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
-  - `frontend/src/styles.css`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 新增编辑快照历史栈，支持 Ctrl+Z / Ctrl+Y 和右上角小按钮撤销重做。
-  - 增删、恢复、清空回收站、锁定/解锁、人工加点、删除区域和候选字段编辑均纳入历史记录。
-  - 导出和 CSV 预览前统一按 `x/y/z/roll/pitch/yaw/original_candidate_id` 排序，并重新编号 `candidate_id`，让同一 xyz 不同 yaw 尽量连续展示。
-  - 在三维画布右上角新增类 Blender Navigation Gizmo 的 X/Y/Z/Home 视图按钮。
-- 风险、限制或尚未验证项：
-  - 已运行 `npm run build` 和后端 compileall；未做真实浏览器截图验证。
-  - 当前排序用 0.001m 坐标量化归组；如果后续需要更严格的“同一点”判定，可以把容差做成界面参数。
-
-- 任务目标：将全局重定位候选点生成下沉到 C++，避免继续依赖慢速 Python 生成候选点。
-- 修改文件：
-  - `cpp/include/ros_tool_suite/mapping/global_relocalization.hpp`
-  - `cpp/src/mapping/global_relocalization.cpp`
-  - `cpp/src/global_relocalization_cli/main.cpp`
-  - `cpp/CMakeLists.txt`
-  - `backend/app/services/cpp_runner.py`
-  - `backend/app/api/routes.py`
-  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
-  - `scripts/install_local.ps1`
-  - `scripts/build_dist.ps1`
-  - `README.md`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 新增 `global_relocalization_cli` C++ 目标，复用现有 PCDReader 读取 ASCII/binary PCD。
-  - C++ 生成器实现体素降采样、3D occupancy、ground 支撑检查、clearance 检查、候选 base 采样、manual additions/deletions、候选姿态展开和输出。
-  - 输出 `candidates.csv`、`candidates.npy [N,16]`、`metadata.yaml`、`debug/preview_candidates.pcd`，并生成空 shape 的 `descriptors.npy/ring_keys.npy` 占位文件。
-  - 后端工具执行改为调用 `cpp/build/global_relocalization_cli.exe`，安装/发行脚本将该 exe 纳入必需产物。
-- 风险、限制或尚未验证项：
-  - 已用 VS Build Tools 环境编译 `global_relocalization_cli.exe`，并用临时 PCD/YAML 跑通候选输出。
-  - 当前还没有实现 virtual LiDAR ray casting 和 Scan Context descriptor，因此生成结果不能直接作为在线 fallback_global_localizer 的最终数据库使用。
-  - 普通 PowerShell 直接跑 `cmake --build` 可能缺 MSVC 标准库 include，需要先进入 VS Developer shell 或执行 `VsDevCmd.bat`。
-
-- 任务目标：修复后端启动时报 `ModuleNotFoundError: No module named 'numpy'`。
-- 修改文件：
-  - `backend/app/services/global_relocalization.py`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 在项目 `.venv` 中安装 `numpy 2.5.1`。
-  - 将 `global_relocalization.py` 的 numpy 改为延迟导入，缺依赖时只影响全局重定位候选点相关接口，不阻断 FastAPI 主应用导入。
-- 风险、限制或尚未验证项：
-  - 已用 `.venv\Scripts\python.exe -c "import app.main"` 验证后端应用可导入。
-  - 8000 端口已有进程监听，未强行停止旧进程；未在本轮完整重启用户正在占用的后端服务。
-
-- 任务目标：按 `GlobalRelocalization_OfflineDB_Design_and_CPP_Prompt.md` 补全全局重定位候选点审核页的数据流、参数草案和人工编辑文件导出。
-- 修改文件：
-  - `backend/app/services/global_relocalization.py`
-  - `backend/app/api/routes.py`
-  - `backend/app/catalog.py`
-  - `backend/requirements.txt`
-  - `frontend/src/api/client.ts`
-  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
-  - `frontend/src/styles.css`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 日期：2026-08-07
-- 任务目标：分析定位导航测试模块通过 rosbridge websocket 订阅点云时的积压原因，并把点云限频前移到 rosbridge 订阅层，降低主机端 rosbridge 负载与旧帧堆积。
-- 修改文件：
-  - `frontend/src/lib/ros/liveAdapter.ts`
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `frontend/src/components/NavTopicPanelList.vue`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 确认共享订阅层当前仅做“同 topic 复用连接”，不会自动把页面中的 `hzLimit` 传给 rosbridge；原实现仍会按话题原始频率持续收包，再由页面侧二次丢帧。
-  - 为实时订阅抽象新增 `RosSubscriptionOptions`，支持把点云显示项/点云卡片的 `hzLimit` 转成 rosbridge `throttle_rate`，并为点云订阅增加 `queue_length=1`，尽量只保留最新帧。
-  - 共享连接层新增订阅参数合并逻辑；当多个页面模块复用同一 topic 时，只有在所有订阅方都声明了限流参数的情况下，才把限流参数安全地下推到共享 rosbridge 订阅，避免静默改变其他未声明订阅方的语义。
-  - 保留页面内现有 `hzLimit` 二次过滤逻辑，避免单次重建点云或 UI 渲染过重时重新放大浏览器侧压力。
-- 风险、限制或尚未验证项：
-  - 已运行 `npm run build` 并通过；构建仍有 Vite 对 Three/OrbitControls chunk 体积的常规警告。
-  - `queue_length=1` 与 `throttle_rate` 能显著减少桥接层和浏览器积压，但如果上游 ROS 节点本身发布频率极高、单帧点云极大，rosbridge 主机端仍可能需要继续做上游限频、压缩或独立转发。
-  - 当前仅对导航测试页中的点云主视图和点云卡片下推限流参数；延迟诊断订阅与非点云话题保持原语义未变。
-
-- 主要变更：
-  - 新增后端 PCD 预览接口，支持读取 ASCII/binary PCD 的 `x/y/z` 采样点。
-  - 新增候选点读取接口，支持 `candidates.csv` 与 `candidates.npy [N,16]`。
-  - 新增人工编辑导出接口，按 MD 推荐输出 `manual_candidates.yaml` 与 `reviewed_candidates.csv`。
-  - 前端补齐 MD 中的离线参数草案、人工新增点、删除规则、锁定点、质量指标显示、删除区域和 YAML 预览。
-  - `backend/requirements.txt` 增加 `numpy`，用于读取 `.npy` 和 binary PCD。
-- 风险、限制或尚未验证项：
-  - 已运行 `python -m compileall backend\app`、`npm run build` 和临时文件服务回路测试；构建仍有 Vite 对 Three/OrbitControls chunk 体积的常规警告。
-  - 当前仍未实现真实 Scan Context / ray casting / descriptors.npy / ring_keys.npy 生成，前端导出的人工编辑文件需要后续 C++ 离线工具消费。
-  - `manual_candidates.yaml` 中的 `z: null` 只表达“由 3D ground index 自动估计”，实际估计逻辑尚未接入当前工具箱。
-
-- 任务目标：新增“全局重定位候选点”地图处理工具页框架，用于后续基于 arXiv.2605.07741 的离线候选点生成与人工审核。
-- 修改文件：
-  - `backend/app/catalog.py`
-  - `backend/app/api/routes.py`
-  - `backend/data/tool_modules.json`（本地运行配置，未纳入版本控制）
-  - `data/tool_modules.json`
-  - `frontend/src/App.vue`
-  - `frontend/src/components/ToolForm.vue`
-  - `frontend/src/components/GlobalRelocalizationCandidateTool.vue`
-  - `frontend/src/styles.css`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 新增工具 key `global_relocalization_candidates`，默认启用并归入地图处理分区；同步更新本地运行配置以便当前开发服务立即显示。
-  - 新增三维候选点审核组件，支持 ASCII PCD 预览、CSV 候选点加载、点击选择、框选、删除到回收站、恢复、人工加点和 CSV 导出预览。
-  - 后端 `/tools/global_relocalization_candidates/run` 返回框架态摘要和日志，真实候选点生成与写回逻辑暂未接入。
-  - 新建项目地图，记录当前仓库主线结构和工具接入方式。
-- 风险、限制或尚未验证项：
-  - 已运行 `npm run build` 并通过；存在 Vite 对 Three/OrbitControls chunk 体积的常规警告。
-  - 当前点云预览只在浏览器端解析 ASCII PCD；binary PCD 和 `.npy` 写回需后续接入后端采样/转换接口。
-  - 当前人工补点导出为 `candidates_reviewed.csv`，尚未实现写回 `candidates.npy/descriptors.npy/ring_keys.npy` 的兼容流程。
-- 日期：2026-07-28
-- 任务目标：分析两次手动初始定位日志，判断一次成功、一次角度略偏后失败的逻辑归因。
-- 修改文件：
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 记录本次仅基于用户提供日志和仓库中运行时参数展示代码进行分析，未修改定位节点源码。
-- 风险、限制或尚未验证项：
-  - 仓库中未发现 `initialpose_bridge`、`lio_delta_pose_bridge`、`ndt_health_monitor` 等 ROS 节点源码；结论为基于日志时序的推断，尚未通过机器人现场话题和运行时参数复核。
-
-- 日期：2026-08-14
-- 任务目标：修复 ROS 定位导航模块三维视图里点云按 z 分层增强时的颜色方向，使高处点云显示更深，便于分辨障碍物。
-- 修改文件：
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 首次尝试通过亮度压深高点，但在红色系点云上会把主色观感破坏得过重。
-  - 根据实际界面反馈，改为以色相偏移和饱和度增强为主做 z 分层，亮度只保留很小的稳定扰动，尽量保住原始主色同时增强高处障碍物辨识度。
-  - 进一步将高度参考从全局 z 范围改为点云自身的中位高度面，并按“高于中位面”的相对高度重点增强颜色，降低整片地面一起变色导致的障碍物不明显问题。
-  - 为避免每帧全量排序带来的额外开销，改为只用固定上限采样点估计中位高度。
-  - 根据进一步反馈，撤掉局部 `x/y/z -> RGB` 混色，改为仅在当前选中主色与其补色之间做高度驱动的受控过渡，让地面保持主色、障碍物再向补色偏移。
-  - 更新函数注释，明确当前策略优先保证颜色体系稳定和可辨识度。
-- 风险、限制或尚未验证项：
-  - 本次未运行前端页面进行视觉复核；当前结论基于已确认代码逻辑，属于“已修改、尚未实际界面验证”。
-
-- 日期：2026-08-14
-- 任务目标：清理 ROS 导航测试页中话题选择小窗与链路延迟窗口的默认话题，并把配置保存时机收敛为页面刷新后自动保存一次默认态、退出模块时再保存一次当前态。
-- 修改文件：
-  - `frontend/src/components/ToolForm.vue`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 清空侧边小窗、完整小窗和链路延迟窗口的默认预置话题，避免页面进入后自动带出一批诊断话题。
-  - 将链路延迟窗口的话题文本纳入 `nav_layout_json` 一并保存和恢复，不再只保存主视图与小窗布局。
-  - 新增导航模块会话级自动保存控制：进入 `ros_nav_test` 后在配置加载完成时自动保存一次当前默认态，离开该模块或组件卸载时再自动保存一次当前配置。
-- 风险、限制或尚未验证项：
-  - 本次未实际切换模块并抓取后端保存文件验证保存时机，只基于前端代码路径完成修改，属于“已修改、尚未交互验证”。
-
-- 日期：2026-08-17
-- 任务目标：修复 ROS 导航测试页“刷新话题”时漏掉 `/fallback_global_*` 一类实际存在 topic 的问题。
-- 修改文件：
-  - `backend/app/services/ros_data_source.py`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 调整 rosbridge 话题查询逻辑，不再只依赖 `/rosapi/topics_and_raw_types` 单次返回结果。
-  - 新增 `/rosapi/topics` 名单补齐和 `/rosapi/topic_type` 单 topic 类型补查，避免 rosapi 批量接口遗漏部分新话题或漏掉消息类型时，前端话题选择窗直接看不到这些 topic。
-- 风险、限制或尚未验证项：
-  - 已通过 `python -m compileall backend\\app\\services\\ros_data_source.py` 做语法校验。
-  - 尚未连接现场 rosbridge 实际验证 `/fallback_global_candidate_poses`、`/fallback_global_pose` 等话题是否已在前端刷新列表中出现；若 rosapi 本身也拿不到这些 topic，则仍需继续排查机器人侧 rosbridge/rosapi 配置。
-
-- 日期：2026-08-18
-- 任务目标：修复 TFMessage 类型显示项对非 `/tf` 话题不通用，以及 `/tf` 节点筛选/显示不完整的问题。
-- 修改文件：
-  - `frontend/src/lib/ros/displayRegistry.ts`
-  - `frontend/src/components/ToolForm.vue`
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 补齐 `tf2_msgs/msg/TFMessage` 的统一识别逻辑，让 `/display/tf` 一类非标准命名 TF 话题也会被识别成 TF 显示项。
-  - 将 TF 历史缓存从全局 child frame 共享改为按 topic 维护，并在 TF 渲染时按当前显示项的话题范围解析节点列表和坐标链路，避免不同 TF 话题之间互相串节点筛选结果。
-  - 保留 `/tf_static` 作为 TF 解析的静态补充源，同时去掉前端对 TF 节点渲染数量的固定截断，优先保证调试时看到完整节点集合。
-- 风险、限制或尚未验证项：
-  - 本次未实际连接页面验证 `/display/tf` 与 `/tf` 的节点筛选行为，只完成了代码级修正，属于“已修改、尚未交互验证”。
-
-- 日期：2026-08-25
-- 任务目标：将 ROS 定位测试页的初始化定位从平面拖拽即发布改为 3D 候选预览、点云对齐比对、确认后发布流程。
-- 修改文件：
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `frontend/src/components/ToolForm.vue`
-  - `frontend/src/styles.css`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - `Nav3DViewer.vue` 新增初始化候选位姿 group，拖拽初始化时只保留箭头并挂载 Three.js `TransformControls`，不再由主视图触发立即发布。
-  - 新增单帧点云绑定接口，外层页面抓到点云后绑定到候选位姿；TF 齐全时会把点云转为 `base_link` 局部快照，TF 缺失时退回原始局部坐标并提示。
-  - `ToolForm.vue` 新增初始化点云 topic 输入、刷新点云帧、平移/旋转模式、确定初始化位姿和取消预览控制；确认后发布包含 `x/y/z/roll/pitch/yaw` 的 `/initialpose`，随后清理箭头、控件和点云。
-  - 发布 quaternion 从 yaw-only 改为 roll/pitch/yaw，并给 z/roll/pitch 协方差设置非零值，以匹配 3D 初始化语义。
-  - 更新样式和项目地图，记录 ROS 导航测试页新的初始化定位主流程。
-- 风险、限制或尚未验证项：
-  - 已运行 `npm run build` 并通过；存在 Vite 对大 chunk 的常规警告。
-  - 尚未连接真实 rosbridge/机器人现场验证点云 topic 抓帧、TF 转换和下游定位节点是否完整消费 z/roll/pitch。
-  - rosbridge 前端订阅无法保证读取历史缓存帧，本次“刷新点云帧”的实际语义是订阅后等待下一帧。
-
-- 日期：2026-08-25
-- 任务目标：修复 3D 初始化定位预览中的点云抓帧超时体验、三维控件不可见和初始化无法取消问题。
-- 修改文件：
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `frontend/src/components/ToolForm.vue`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 按当前 Three.js `TransformControls` API 改为将 `getHelper()` 加入场景，确保平移/旋转三维控件可见可交互。
-  - 新增主视图点云缓存帧兜底：刷新初始化点云时优先绑定主视图已收到的最近一帧；没有缓存时再等待下一帧，超时时间从 6 秒调整到 15 秒。
-  - 新增初始化候选状态，初始化按钮在等待拖拽或已有候选位姿时变为“取消初始化定位”，并允许点云抓取等待期间通过取消预览清理候选对象。
-- 风险、限制或尚未验证项：
-  - 已运行 `npm run build` 并通过；存在 Vite 对大 chunk 的常规警告。
-  - 尚未连接真实 rosbridge 验证 `/points_aligned` 在无新帧发布时是否能从主视图缓存满足预览；若主视图也从未收到该 topic，则仍需机器人侧持续发布或改选实时点云 topic。
-
-- 日期：2026-08-25
-- 任务目标：修复初始化点云 Topic 原生下拉框在鼠标移入列表时自动消失的问题。
-- 修改文件：
-  - `frontend/src/components/ToolForm.vue`
-  - `frontend/src/styles.css`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 将初始化点云 Topic 的原生 `datalist` 替换为受控自定义 combobox，支持输入过滤和点击选择。
-  - 新增外部点击关闭、Esc 关闭和菜单内 `mousedown.prevent` 选择逻辑，避免输入框失焦导致菜单提前消失。
-  - 补充下拉菜单、滚动列表、选项 hover/focus 和右侧展开按钮样式。
-- 风险、限制或尚未验证项：
-  - 已运行 `npm run build` 并通过；存在 Vite 对大 chunk 的常规警告。
-  - 尚未在真实页面中手动验证鼠标悬停、滚动、选择和点外关闭行为。
-
-- 日期：2026-08-25
-- 任务目标：为 3D 初始化定位的一帧点云预览增加点大小调整能力。
-- 修改文件：
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `frontend/src/components/ToolForm.vue`
-  - `frontend/src/styles.css`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 主视图新增 `updateInitialPosePointCloudSize` 暴露接口，可直接调整当前初始化预览点云的 `PointsMaterial.size`。
-  - 定位控制区新增“点大小”输入，范围 `0.005 ~ 0.8`，刷新点云帧时使用当前值。
-  - 已绑定点云后修改点大小会立即生效，无需重新抓取点云。
-- 风险、限制或尚未验证项：
-  - 已运行 `npm run build` 并通过；存在 Vite 对大 chunk 的常规警告。
-  - 尚未在真实页面中手动验证不同点大小下的视觉效果和可读性。
-
-- 日期：2026-08-25
-- 任务目标：优化 IP 扫描模块速度，并提升主机名/MAC 补全能力。
-- 修改文件：
-  - `backend/app/services/network_scan.py`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 将扫描拆成“连通性扫描”和“在线设备详情补全”两阶段，日志中分别输出耗时。
-  - ARP 查询从每台在线设备单独执行 `arp -a ip` 改为整轮扫描后一次性读取 ARP 表，减少大量系统命令调用。
-  - ping 未通但 ARP 表存在记录的 IP 会作为在线候选继续补全，并在备注中标记“ARP表发现，可能禁用 ICMP ping”。
-  - 主机名解析保留反向 DNS，并在 Windows 下增加 `nbtstat -A` NetBIOS 名称兜底；SSH 探测超时从 0.25s 收敛到 0.18s。
-  - 增加 IP 排序容错，避免异常 IP 字符串影响结果排序。
-- 风险、限制或尚未验证项：
-  - 已通过 `python -m compileall backend\\app\\services\\network_scan.py`。
-  - 已用本机 IP 做单地址最小实测，返回结构正常。
-  - 尚未在完整局域网大范围扫描中对比优化前后耗时；主机名仍受 DNS/PTR、NetBIOS、设备策略和网络防火墙影响，不保证全部可见。
-
-- 日期：2026-08-25
-- 任务目标：为 IP 扫描模块增加 mDNS/Avahi 主机名发现，以补全 Ubuntu 等 `.local` 设备名称。
-- 修改文件：
-  - `backend/app/services/network_scan.py`
-  - `backend/requirements.txt`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 后端依赖新增 `zeroconf`，并已安装到当前 `.venv`。
-  - 在线设备详情补全阶段新增一次性 mDNS 服务浏览，覆盖 `_workstation._tcp.local.`、`_ssh._tcp.local.`、`_sftp-ssh._tcp.local.`、`_http._tcp.local.`、`_device-info._tcp.local.`。
-  - 主机名补全顺序调整为 `反向 DNS -> mDNS -> NetBIOS`，命中 mDNS 时备注会显示 `主机名=xxx(mdns)`。
-  - 扫描日志新增 `mDNS匹配 N 台`，用于判断 Avahi/Bonjour 发现是否生效。
-- 风险、限制或尚未验证项：
-  - 已通过 `.venv\\Scripts\\python.exe -m compileall backend\\app\\services\\network_scan.py`。
-  - 已用本机 IP 做单地址最小实测，返回结构正常；本机未匹配 mDNS。
-  - mDNS 发现依赖 Ubuntu 设备启用 Avahi/Bonjour，并且 Windows 防火墙/网络策略允许 UDP 5353 多播；扫描详情补全会增加一个短固定发现窗口。
-
-- 日期：2026-08-26
-- 任务目标：评估 ROS 定位导航测试模块加入离线 PCD 点云加载、下采样预览和初始化点地面法线吸附方案。
-- 修改文件：
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 本轮仅做方案确认和源码路径核对，未修改业务代码。
-  - 确认全局重定位候选点工具已有 Python PCD 预览接口，C++ 全局重定位生成器已有可复用的 `PCDReader`、体素降采样、ground cell 和 base_link 高度估计逻辑。
-  - 确认导航测试页当前初始化拖拽仍基于固定交互平面取点，候选位姿生成后才绑定实时点云帧。
-- 风险、限制或尚未验证项：
-  - 尚未实现新的 C++ PCD 预览/地面查询接口。
-  - 尚未用真实大地图验证下采样速度、地面法线稳定性和初始化姿态是否被下游定位节点完整消费。
-
-- 日期：2026-08-26
-- 任务目标：为 ROS 定位导航测试模块接入离线 PCD 地图加载、可调下采样和三维视图六面裁剪。
-- 修改文件：
-  - `backend/app/catalog.py`
-  - `backend/app/api/routes.py`
-  - `backend/app/services/nav_offline_map.py`
-  - `cpp/CMakeLists.txt`
-  - `cpp/src/nav_pcd_preview_cli/main.cpp`
-  - `frontend/src/api/client.ts`
-  - `frontend/src/components/ToolForm.vue`
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `frontend/src/styles.css`
-  - `scripts/install_local.ps1`
-  - `scripts/build_dist.ps1`
-  - `README.md`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 新增 `nav_pcd_preview_cli.exe`，复用 C++ `PCDReader` 流式读取 ASCII/binary PCD，按 `offline_map_voxel_leaf_m` 做体素下采样，并用 `offline_map_max_points` 控制前端预览点数上限。
-  - 新增 `/api/tools/ros_nav_test/offline-map-preview`，返回下采样点云、PCD bounds，并解析 `map.yaml` 的 `image/resolution/origin` 与 PGM 宽高，供三维视图按 map 坐标显示参考范围。
-  - 新增 `/api/files/pgm-image`，将 PGM 地图转换为 PNG，三维视图会把它按 `map.yaml` 坐标贴到 z=0 附近作为定位地图参考底图。
-  - 导航测试页新增离线地图点云加载/清除入口，并在三维视图左上角增加六面裁剪按钮，可分别移动 z 上/下边界、x 左/右边界、y 前/后边界以隐藏局部点云。
-  - 本地安装和发行脚本的 C++ 必需产物清单加入 `nav_pcd_preview_cli.exe`。
-- 风险、限制或尚未验证项：
-  - 已运行 `cmake --build cpp\\build --target nav_pcd_preview_cli --config Release`。
-  - 已运行 `.venv\\Scripts\\python.exe -m compileall backend\\app\\services\\nav_offline_map.py backend\\app\\api\\routes.py`。
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
-  - 已用临时小 PCD + map.yaml/PGM 跑通后端 service 回路。
-  - 已用临时 PGM 直接验证 `/api/files/pgm-image` 底层转换函数可输出 PNG 字节。
-  - 尚未用真实大 PCD 和真实导航 map.yaml/PGM 做浏览器视觉对齐验证。
-  - 本轮尚未实现初始化点依据地面法线自动调整 roll/pitch。
-
-- 日期：2026-08-26
-- 任务目标：修复 ROS 定位导航测试页离线地图点云卡片缺少 PCD/PGM/YAML 选择入口的问题。
-- 修改文件：
-  - `backend/app/catalog.py`
-  - `backend/app/api/routes.py`
-  - `backend/app/services/nav_offline_map.py`
-  - `frontend/src/api/client.ts`
-  - `frontend/src/components/ToolForm.vue`
-  - `frontend/src/styles.css`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 离线地图点云卡片内直接展示 `离线地图 PCD`、`map.yaml`、`map.pgm` 三个路径输入与选择按钮。
-  - 增加 `map.pgm` 手动覆盖参数；不填写时继续使用 `map.yaml` 的 `image` 字段自动解析。
-  - 将离线点云下采样体素和最大点数参数移动到同一卡片内，避免用户需要回到顶部通用参数区查找。
-- 风险、限制或尚未验证项：
-  - 已运行 `.venv\\Scripts\\python.exe -m compileall backend\\app\\services\\nav_offline_map.py backend\\app\\api\\routes.py`。
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
-  - 尚未在浏览器中手动点击文件选择按钮验证弹窗路径回填。
-
-- 日期：2026-08-26
-- 任务目标：修复离线地图点云卡片中 map.pgm 选择无响应、参数输入溢出和清除按钮文字挤压问题。
-- 修改文件：
-  - `frontend/src/components/ToolForm.vue`
-  - `frontend/src/styles.css`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - `getBrowseMode()` 增加 `pgm` 文件字段识别，确保 `offline_map_pgm` 的选择按钮能打开文件选择。
-  - 离线地图路径和过滤参数改为自适应网格，数字参数字段限制宽度并在窄屏下恢复整行，避免输入框超出卡片边界。
-  - 离线点云加载/清除操作改用独立 action 行，按钮使用 flex 居中和稳定高度，避免“清除离线点云”文字与按钮尺寸不匹配。
-- 风险、限制或尚未验证项：
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
-  - 尚未在真实浏览器中手动点击 map.pgm 选择按钮验证系统弹窗。
-
-- 日期：2026-08-26
-- 任务目标：将离线地图点云裁剪控件从文字按钮改为盒子/箭头式交互，并排查裁剪不可点击体验。
-- 修改文件：
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `frontend/src/styles.css`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 左上角裁剪控件改为 SVG 盒子和红色方向箭头，替代原文字按钮网格。
-  - 中心盒子支持拖动旋转，箭头视觉随盒子旋转；水平箭头根据当前盒子朝向映射到 X/Y 裁剪面，上下箭头对应 z 裁剪面。
-  - 裁剪控件显式设置 `pointer-events: auto`，加载离线点云后按钮解除禁用；未加载点云时保持半透明禁用并提示先加载点云。
-- 风险、限制或尚未验证项：
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
-  - 尚未在真实浏览器中手动验证拖动旋转、箭头点击和点云裁剪方向是否完全符合现场直觉。
-
-- 日期：2026-08-26
-- 任务目标：修复离线点云裁剪控件加载后仍禁用，并缩小控件、移除背景遮挡。
-- 修改文件：
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `frontend/src/styles.css`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 将裁剪启用状态从普通变量派生改为 Vue `ref`，加载离线点云成功后立即解除 disabled，清除点云时再禁用。
-  - 缩小左上角裁剪控件尺寸，移除卡片背景、边框、模糊和阴影，只保留透明叠加的盒子、箭头与轻量重置按钮。
-  - 同步调整移动端尺寸，避免窄屏下控件重新变大。
-- 风险、限制或尚未验证项：
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
-  - 尚未在真实浏览器中手动确认加载后按钮状态立即变化。
-
-- 日期：2026-08-26
-- 任务目标：将离线点云裁剪控件改为真实 3D 立方体语义，并支持按住箭头拖动裁剪面。
-- 修改文件：
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `frontend/src/styles.css`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 移除原二维 SVG 盒子示意，改为 CSS 3D 立方体，六个面分别绑定 `xmin/xmax/ymin/ymax/zmin/zmax` 六个点云包围盒裁剪面，并用不同颜色区分。
-  - 立方体本体拖动只旋转裁剪控件，方便把目标箭头转到容易操作的位置；旋转不改变点云包围盒坐标系和裁剪面绑定关系。
-  - 六个三维箭头固定跟随立方体对应面，按住箭头拖动时根据该面法线在屏幕上的投影和鼠标拖动距离连续移动对应裁剪边界。
-- 风险、限制或尚未验证项：
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
-  - 尚未在真实浏览器中手动验证各方向箭头拖动手感和现场直觉是否一致。
-
-- 日期：2026-08-26
-- 任务目标：按用户反馈将离线点云裁剪控件从 3D 立方体改为六向坐标轴式控件。
-- 修改文件：
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `frontend/src/styles.css`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 移除 3D cube DOM/CSS 和盒子旋转交互，改为透明背景的六向红色轴箭头控件。
-  - 六根箭头分别固定对应 `xmin/xmax/ymin/ymax/zmin/zmax` 六个点云包围盒裁剪面。
-  - 按住任意轴拖动时高亮当前轴，并按鼠标拖动距离移动对应裁剪边界；水平轴使用水平拖动量，上下轴使用垂直拖动量。
-- 风险、限制或尚未验证项：
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
-  - 已确认源码中无旧 `clip-cube`/`offlineClipRotate` 残留引用。
-  - 尚未在真实浏览器中手动验证六向轴拖动手感。
-
-- 日期：2026-08-26
-- 任务目标：修正离线点云六向裁剪控件中左、前、下三个箭头拖动方向相反的问题。
-- 修改文件：
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 为 `xmin/ymax/zmin` 三个裁剪面增加拖动方向符号修正，使左、前、下箭头的鼠标拖动方向与包围盒面移动方向一致。
-  - 保持 `xmax/ymin/zmax` 三个已确认正确的方向不变。
-- 风险、限制或尚未验证项：
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
-  - 尚未在真实浏览器中再次手动复核六根箭头方向。
-
-- 日期：2026-08-26
-- 任务目标：修正离线点云裁剪控件前后箭头拖动方向相反的问题。
-- 修改文件：
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 将 Y 轴裁剪方向修正从 `ymax` 调整为 `ymin`，使前后箭头相对上一版整体反向。
-  - 保持左右和上下裁剪方向不变。
-- 风险、限制或尚未验证项：
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
-  - 尚未在真实浏览器中再次手动复核前后箭头方向。
-
-- 日期：2026-08-26
-- 任务目标：排查离线地图点云加载返回 `Not Found` 的原因，并优化前端错误提示。
-- 修改文件：
-  - `frontend/src/components/ToolForm.vue`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 确认本机 `http://127.0.0.1:8000/api/tools/ros_nav_test/offline-map-preview` 当前返回 404，说明运行中的后端进程尚未加载新增接口。
-  - 前端离线点云加载捕获 `Not Found/404` 时改为提示需要重启 backend，而不是显示裸错误。
-- 风险、限制或尚未验证项：
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
-  - 尚未重启用户当前占用的 8000 后端进程，避免擅自中断正在运行的服务。
-
-- 日期：2026-08-27
-- 任务目标：接续实现初始化拖拽“先定方向，再通过离线 PCD 三维占据射线吸附地面”。
-- 修改文件：
-  - `backend/app/services/nav_offline_map.py`
-  - `backend/app/api/routes.py`
-  - `backend/app/catalog.py`
-  - `frontend/src/api/client.ts`
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `frontend/src/components/ToolForm.vue`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 后端基于离线 PCD 预览的下采样点云构建稀疏三维占据缓存，新增 raycast 查询可靠地面命中点、局部法线、邻域数量和置信度。
-  - 初始化拖拽 pointerdown 时前端向后端发送相机射线；命中可靠地面后使用 `ground_z + initial_pose_base_height_offset_m` 作为候选 z，roll/pitch 由地面法线决定，yaw 仍由拖拽方向决定。
-  - 导航页暴露 base 高度偏移、法线估计半径和最大坡度参数，并传入 `Nav3DViewer`；未加载离线点云或射线失败时保留旧平面回退逻辑。
-  - 修正高楼层初始化拖拽预览仍画在 z=0 附近的问题，并将初始化模式状态文案改为“松开后生成候选位姿”。
-- 风险、限制或尚未验证项：
-  - 已运行 `.venv\\Scripts\\python.exe -m compileall backend\\app\\services\\nav_offline_map.py backend\\app\\api\\routes.py`。
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
-  - 尚未用真实多楼层 PCD 在浏览器中手动验证射线命中层、坡面法线姿态和回退提示效果。
-
-- 日期：2026-08-27
-- 任务目标：让离线 PCD 生成的三维占据 voxel 在前端可见，并支持与下采样点云切换显示。
-- 修改文件：
-  - `backend/app/services/nav_offline_map.py`
-  - `frontend/src/api/client.ts`
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `frontend/src/components/ToolForm.vue`
-  - `frontend/src/styles.css`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - `offline-map-preview` 返回 `occupancy.voxel_m`、`occupancy.occupied_count` 和占据 voxel 中心点，前端加载一次即可拿到可视化数据。
-  - `Nav3DViewer.vue` 新增占据网格 `InstancedMesh`，默认加载后显示 voxel box，不再默认显示点云；三维画布左上角和离线地图卡片操作区都提供“占据网格 / 点云”切换按钮。
-  - 六向裁剪同时作用于 voxel 和点云两种显示模式，切换显示时不需要重新加载 PCD。
-  - 导航页离线地图统计增加占据 voxel 数量，并显示实际占据体素尺寸。
-- 风险、限制或尚未验证项：
-  - 已运行 `.venv\\Scripts\\python.exe -m compileall backend\\app\\services\\nav_offline_map.py backend\\app\\api\\routes.py`。
-  - 已运行后端合成缓存检查，确认 occupancy payload 可返回 voxel 尺寸、数量和中心点。
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
-  - 尚未用真实大 PCD 在浏览器/手机中验证大量 voxel box 的帧率；如数量过大，建议先调低 `离线点云最大点数` 或增大 `下采样 m`。
-
-- 日期：2026-08-27
-- 任务目标：修复启用占据网格可视化后离线地图加载失败且错误提示过于笼统的问题。
-- 修改文件：
-  - `backend/app/services/nav_offline_map.py`
-  - `backend/app/api/routes.py`
-  - `backend/app/catalog.py`
-  - `frontend/src/api/client.ts`
-  - `frontend/src/components/ToolForm.vue`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 新增 `offline_map_max_voxels` 参数，默认最多返回 60000 个可视化 voxel，后端按步长抽样显示数据但保留总占据数，避免真实大图一次返回过大 JSON。
-  - 后端 `offline-map-preview` 和 `offline-map-raycast` 捕获非 `RuntimeError` 异常并返回 JSON detail，前端失败时显示 HTTP 状态和响应文本。
-  - 体素 key 计算增加极小 epsilon，降低浮点边界值落入相邻格导致的显示/统计抖动。
-  - 导航页离线地图卡片增加“最大 voxel”输入，统计显示“当前显示 / 总占据数”。
-- 风险、限制或尚未验证项：
-  - 已运行 `.venv\\Scripts\\python.exe -m compileall backend\\app\\services\\nav_offline_map.py backend\\app\\api\\routes.py`。
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
-  - 已用合成点云验证总占据数 7200 时按 `max_voxels=1000` 抽样返回 900 个显示 voxel。
-  - 尚未拿用户真实 PCD 复现原始失败；若仍失败，前端现在应显示更具体的后端 detail。
-
-- 日期：2026-08-27
-- 任务目标：修复后端未返回 occupancy 数据时占据网格显示为 0 的兼容问题。
-- 修改文件：
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `frontend/src/components/ToolForm.vue`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - `Nav3DViewer.vue` 在后端响应缺少 `occupancy.voxels` 时，会用当前已加载的下采样点云按体素尺寸在前端本地合并生成 voxel center，保证“占据网格”模式仍能显示 box。
-  - 离线地图卡片的占据 voxel 统计增加同样兜底，避免后端旧接口返回时继续显示 `0 / 0`。
-- 风险、限制或尚未验证项：
-  - 已运行 `.venv\\Scripts\\python.exe -m compileall backend\\app\\services\\nav_offline_map.py backend\\app\\api\\routes.py`。
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
-  - 本地兜底 voxel 基于前端下采样点云生成，只用于可视化；后端 raycast 仍建议重启 backend 后使用完整的后端占据缓存。
-
-- 日期：2026-08-27
-- 任务目标：让初始化定位 raycast 遵守离线地图六向裁剪范围，避免命中已隐藏的楼顶/上层点云。
-- 修改文件：
-  - `backend/app/services/nav_offline_map.py`
-  - `backend/app/api/routes.py`
-  - `frontend/src/api/client.ts`
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 前端初始化拖拽发起 `offline-map-raycast` 时携带当前 `offlineMapClipBounds`。
-  - 后端 raycast 在命中占据 voxel 和估计法线邻域时都过滤裁剪范围外的点，裁掉上层后射线会继续向后查找下层可靠地面。
-  - 后端新增裁剪范围解析与合法性校验，非法裁剪值会回退为无裁剪，避免接口异常。
-- 风险、限制或尚未验证项：
-  - 已运行 `.venv\\Scripts\\python.exe -m compileall backend\\app\\services\\nav_offline_map.py backend\\app\\api\\routes.py`。
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
-  - 已用两层合成点云验证：不裁剪时射线命中上层 `z=2.0`，设置 `zmax=1.0` 裁掉上层后命中下层 `z=0.0`。
-  - 尚未用真实多楼层 PCD 手动验证裁剪后的点击命中手感。
-
-- 日期：2026-08-27
-- 任务目标：修正可视占据网格与初始化 raycast 命中结果不一致的问题。
-- 修改文件：
-  - `backend/app/services/nav_offline_map.py`
-  - `backend/app/api/routes.py`
-  - `frontend/src/api/client.ts`
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 后端记录 `offline-map-preview` 实际返回给前端显示的可视 voxel 集合，初始化 raycast 默认只命中该集合。
-  - raycast 命中判断从邻近 `3x3x3` voxel 放宽命中改为射线所在 voxel 精确命中，避免对着视觉空洞点击时被附近占据格吸附。
-  - 前端 raycast 请求显式传入 `use_visible_voxels=true`，保持用户看到的占据网格与初始化命中语义一致。
-- 风险、限制或尚未验证项：
-  - 已运行 `.venv\\Scripts\\python.exe -m compileall backend\\app\\services\\nav_offline_map.py backend\\app\\api\\routes.py`。
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
-  - 已用合成点云验证：射线穿过空格但旁边存在 voxel 时不再误命中；两层点云裁掉上层后仍能命中下层。
-  - 尚未在真实地图上验证精确命中后是否需要额外加一个可调“点击容差”。
-
-- 日期：2026-08-27
-- 任务目标：按用户要求恢复初始化 raycast 的 `3x3x3` 邻近 voxel 命中容差，提高地面命中率。
-- 修改文件：
-  - `backend/app/services/nav_offline_map.py`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 后端命中判断从单 voxel 精确命中恢复为当前射线 voxel 周围 `3x3x3` 邻域命中。
-  - 保留当前裁剪范围过滤和可视 voxel 集合过滤，避免被裁掉的楼层重新参与命中。
-- 风险、限制或尚未验证项：
-  - 已运行 `.venv\\Scripts\\python.exe -m compileall backend\\app\\services\\nav_offline_map.py backend\\app\\api\\routes.py`。
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
-  - 已用合成地面 patch 验证邻近 voxel 容差可提高命中率；已用两层合成点云验证裁剪上层后仍命中下层。
-  - `3x3x3` 容差可能让视觉空洞附近也被吸附，后续可按需要改成可调点击容差参数。
-
-- 日期：2026-08-27
-- 任务目标：修复粗下采样 voxel 被点中但因可靠地面判断失败而回退到平面初始化的问题。
-- 修改文件：
-  - `backend/app/services/nav_offline_map.py`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 法线估计实际半径改为不小于 `2.2 * occupancy_voxel_m`，避免 `offline_map_voxel_leaf_m=0.8` 这类粗下采样下邻域点过少。
-  - raycast 记录首个“占据命中但法线不可靠”的候选；若后续找不到可靠法线，则返回该候选并只吸附 z，normal 回退为 `[0,0,1]`，roll/pitch 等效回退为 0。
-  - 保留最大坡度过滤的优先级：可靠法线命中仍优先返回，z-only 仅作为避免错误回退到平面初始化的兜底。
-- 风险、限制或尚未验证项：
-  - 已运行 `.venv\\Scripts\\python.exe -m compileall backend\\app\\services\\nav_offline_map.py backend\\app\\api\\routes.py`。
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
-  - 已用粗 voxel 稀疏地面合成数据验证命中后不再回退平面，返回 z 与地面高度一致。
-  - 尚未用用户真实 PCD 复测 0.8 下采样下的现场命中率。
-
-- 日期：2026-08-27
-- 任务目标：将离线点云下采样参数与占据 voxel 尺寸解耦。
-- 修改文件：
-  - `backend/app/services/nav_offline_map.py`
-  - `backend/app/api/routes.py`
-  - `backend/app/catalog.py`
-  - `frontend/src/api/client.ts`
-  - `frontend/src/components/ToolForm.vue`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 新增 `offline_map_occupancy_voxel_m` 参数，默认 `0.30m`，专门控制占据网格显示尺寸和后端 raycast 占据结构分辨率。
-  - `offline_map_voxel_leaf_m` 只继续用于 PCD 读取/预览下采样，不再隐式决定占据 voxel 尺寸。
-  - 离线地图卡片新增“占据 voxel m”输入，加载点云时一并传给后端。
-- 风险、限制或尚未验证项：
-  - 已运行 `.venv\\Scripts\\python.exe -m compileall backend\\app\\services\\nav_offline_map.py backend\\app\\api\\routes.py`。
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
-  - 已用后端合成数据验证：下采样 `0.01` 时，占据 voxel 仍可按 `0.30m` 生成。
-  - 尚未用真实 PCD 验证不同 `下采样 m / 占据 voxel m` 组合下的显示和初始化命中效果。
-
-- 日期：2026-08-27
-- 任务目标：排查 `/grid_map/occupancy_inflate` 有 ROS 输出但前端 PointCloud 显示不出来的问题。
-- 修改文件：
-  - `frontend/src/lib/ros/displayRegistry.ts`
-  - `frontend/src/components/ToolForm.vue`
-  - `frontend/src/components/NavTopicPanelList.vue`
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 统一 ROS topic 消息类型识别，`PointCloud2 / LaserScan / Marker / Path / TF / Pose` 等同时兼容 ROS1 `pkg/Type` 和 ROS2 `pkg/msg/Type` 写法。
-  - 诊断小窗和主视图共用 `isPointCloudMessageType` 判断，避免 rosapi 返回 `sensor_msgs/PointCloud2` 时点云显示项或点云限流配置失效。
-  - PointCloud2 字段名匹配改为大小写不敏感，并按 `is_bigendian` 读取 xyz 浮点值。
-  - 主视图点云解析失败时不再静默吞掉，会在状态和 ROS 日志中提示收到消息但缺少可渲染 xyz，并输出 fields、point_step、width、height、data 字节数。
-- 风险、限制或尚未验证项：
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
-  - 尚未连接用户现场 rosbridge 验证 `/grid_map/occupancy_inflate` 的实际字段内容；若仍不显示，前端现在会给出具体解析失败信息。
-
-- 日期：2026-08-28
-- 任务目标：修复 `/ndt_pose` 明明包含 z 和非平面 quaternion，但前端显示成平面箭头的问题。
-- 修改文件：
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 单个 Pose 渲染改为用消息 `position.x/y/z` 和完整 `orientation` quaternion 作为 Three.js 对象局部变换。
-  - PoseArray 渲染同步改为每个 marker 使用完整三维位置和四元数，避免仍按 2D yaw 压平。
-  - `createPoseMarker` 改为局部坐标箭头，箭头自身朝向 +X，外层对象负责承载真实 pose 变换。
-  - 保留 `poseAnchorByTopic` 的 x/y/z/yaw 摘要，供镜头聚焦、HUD 和障碍区锚点继续使用。
-- 风险、限制或尚未验证项：
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
-  - 尚未连接用户现场 rosbridge 目视验证 `/ndt_pose` 的 roll/pitch/z 显示效果。
-
-- 日期：2026-08-28
-- 任务目标：将三维主视图右下角“机器狗位置”默认改为从 `/display/tf` 获取。
-- 修改文件：
-  - `frontend/src/components/Nav3DViewer.vue`
-  - `.agents/PROJECT_OVERVIEW.md`
-  - `.agents/TASK_LOG.md`
-- 主要变更：
-  - 新增 `robotPoseTfTopic = "/display/tf"`，并把机器狗位置 HUD 的 `base_link` 解析改为使用该 TF topic。
-  - 支持 TF 自动订阅列表增加 `/display/tf`，保留 `/tf_static` 和 `/tf` 供其他显示项与兼容路径继续使用。
-  - HUD 文案增加 `topic: /display/tf`，当该 topic 中无法解析 `base_link` 时明确提示 `/display/tf` 中位姿暂不可用。
-- 风险、限制或尚未验证项：
-  - 已运行 `cd frontend && npm run build`，构建通过；仍有 Three/OrbitControls 大 chunk 常规警告。
-  - 尚未连接用户现场 rosbridge 验证 `/display/tf` 是否包含完整 `base_link -> fixed frame` 链路。
+## 2026-09-21：取消初始化定位点云历史帧回退
+
+- 目标：避免 ROS 节点停止发布后，初始化定位仍使用主视图最后收到的旧点云帧。
+- 修改文件：`frontend/src/composables/useNavigationController.ts`、`frontend/src/components/Nav3DViewer.vue`、`.agents/TASK_LOG.md`。
+- 主要变更：删除 `attachInitialPoseLatestPointCloud` 及其调用；点击“刷新点云帧”后仅订阅并接受操作开始后的下一帧。15 秒内未收到新帧会明确提示确认 ROS 节点仍在发布。
+- 验证：`frontend` 下 `npm run typecheck`、`npm run build` 通过；构建保留既有大于 500 kB 的分包警告。
+
+## 2026-09-21：离线地图点云显示外观配置
+
+- 目标：让离线地图加载区可明确设置占据网格/点云显示方式，以及点云大小、点云颜色和占据网格颜色。
+- 修改文件：`frontend/src/App.vue`、`backend/app/catalog.py`、`frontend/src/pages/NavigationWorkspace.vue`、`frontend/src/composables/useNavigationController.ts`、`frontend/src/components/Nav3DViewer.vue`、`frontend/src/lib/ros/offlineVoxelRender.ts`、`frontend/src/styles.css`、`.agents/PROJECT_OVERVIEW.md`、`.agents/TASK_LOG.md`。
+- 主要变更：新增四个持久化 ROS 接入选项 `offline_map_display_mode`、`offline_map_point_size`、`offline_map_point_color`、`offline_map_voxel_color`；加载区增加“显示外观”配置组。已加载地图变更大小或颜色时直接更新 Three.js 几何/材质，无需重新读取 PCD；占据网格配色改为从用户所选主色生成稳定明暗变化。
+- 验证：`frontend` 下 `npm run typecheck`、`npm run build` 通过；构建保留既有大于 500 kB 的分包警告。
+- 限制：未使用现场 PCD 进行视觉验收；显示方式和外观设置随“保存配置”写入 ROS 数据源配置，离线 PCD 文件本身仍需用户手动加载。
+
+## 2026-09-21：机器人 TF 坐标系改为 ROS 接入配置
+
+- 目标：解决现场 `/display/tf` 发布 `base_link` 而前端固定查询 `body`，导致机器狗位姿不可用的问题。
+- 修改文件：`frontend/src/App.vue`、`frontend/src/pages/NavigationWorkspace.vue`、`frontend/src/composables/useNavigationController.ts`、`frontend/src/components/Nav3DViewer.vue`、`backend/app/catalog.py`、`.agents/PROJECT_OVERVIEW.md`、`.agents/TASK_LOG.md`。
+- 主要变更：ROS 接入设置新增“机器人 TF 坐标系”，默认 `body`；配置会同时保存到本地缓存和后端 ROS 数据源配置。三维 HUD、场景机器狗和导航任务“机器狗取点”统一读取该字段；空值及旧配置均兼容回退到 `body`，并清除输入的前导 `/`。
+- 补充：该输入框改为前端 ROS 接入面板固定渲染，不再依赖后端工具目录热重载；后端尚未重启时也会显示，重启后不会重复出现。
+- 补充：`/display/tf` 的历史节点筛选不会再隐藏当前“机器人 TF 坐标系”；三维主视图始终渲染该选中帧。现场只读订阅已确认其中持续包含 `base_link`。
+- 补充：已发现历史主视图布局可能完全没有 TF 显示项；加载与刷新话题时会自动补入 `/display/tf`，避免三维场景没有 TF 渲染入口。
+- 根因修复：现场 `/display/tf` 的 ROS 时间与浏览器系统时间相差约 76 天，旧代码用两者比较并在 30 秒后删除刚收到的 TF。现在新增 `receivedAtMs`，缓存淘汰按浏览器实际接收时间计算；ROS 时间戳仍只用于同一 ROS 时间线内的变换匹配。
+- 验证：`frontend` 下 `npm run typecheck` 与 `npm run build` 已通过；现场 rosbridge 已只读确认 `/display/tf` 包含 `base_link`。构建保留既有大包提示。
+
+## 2026-09-09：ROS_PLATFROM 四模块重构
+
+- 用户确认后创建 ROS_PLATFROM 分支及 G:/ros_proj/ros_platform 工作树，原工作区及未跟踪文件保持。
+- 新增 frontend/src/pages、composables、lib/scene、platform，以 Vue/Three.js 移植参考页面、模型、动作和轨迹；新增玻璃抽屉、平台导航和监控交互。
+- 对接原导航、候选点、地图和切片；补齐候选点拖动/多选/锁定/回收站/姿态编辑/历史及话题暂停/排序/详情/录制。
+- 修改 catalog、routes、cpp_runner、main、CMake 和启动脚本：仅保留四模块，默认输出随工作区，独立使用 5180/8100，支持静态页面刷新。
+- 移除旧首页/收藏配置、Python GUI、无关网络/回放/导出代码和 Android 产物；必要 ROS/文件服务与算法保留。旧历史可在原分支查阅。
+- 更新 README、架构和项目地图；新增四项集成回归与本地 rosbridge 替身。
+- 已验证：类型检查、生产构建、四 CLI 编译、HTTP/C++ 回归；浏览器页面对照、地图生成、候选点导入/拖动/撤销/锁定/导出和本地 ROS 接管。
+- 限制：真实机器人、现场服务/网络、长时录制、超大地图和安装包发布尚未验证。未提交或推送。
+- 收尾修正：真实轨迹使用固定容量 GPU 缓冲区；补齐状态栏真实遥测和消息超时状态；更新依赖补丁后 npm audit 为 0 项漏洞。
+- 生产版 ROS 替身复测确认完整运动轨迹，浏览器无 error/warn；联调服务已停止，默认地址恢复为 ws://127.0.0.1:9090。
+
+## 2026-09-09：ROS 测试页交互与样式修正
+
+- 任务目标：修复 ROS 测试平台 HUD 溢出、列表滚动条样式、话题拖拽新增、主视图显示项样式和地图默认显示问题。
+- 修改文件：frontend/src/pages/NavigationWorkspace.vue、frontend/src/components/NavTopicPanelList.vue、frontend/src/composables/useNavigationController.ts、frontend/src/components/Nav3DViewer.vue、frontend/src/styles.css、frontend/src/monitor.css。
+- 主要变更：话题拖拽同时写入 text/ros-topic 与 text/plain，真实监控卡片 drop 优先识别外部话题新增，避免满列表时被卡片排序事件截断；HUD 改为内容自适应并限制长文本；全局滚动条隐藏箭头和轨道背景，仅保留滑块；真实监控卡、右侧话题卡和主视图显示项统一为 platform 玻璃卡片风格；默认主视图补入 /map 栅格地图，离线地图加载后强制同步体素渲染模式。
+- 已验证：frontend 下 npm run build 通过；本机 127.0.0.1:5180 页面可打开，程序化检查 status-hud 无横向溢出，三维 canvas 为 1280x720 且非零尺寸。
+- 限制：未连接真实 ROS 环境复测 /map OccupancyGrid 实时消息渲染，拖拽新增在真实连接后的完整鼠标路径仍需现场确认。
+
+## 2026-09-09：离线点云渲染模式迁移
+
+- 任务目标：把 ros_tool main 中残留但未接入的非透明 voxel 渲染模式恢复，并迁移到 ros_platform。
+- 修改文件：frontend/src/lib/ros/offlineVoxelRender.ts、frontend/src/components/Nav3DViewer.vue、frontend/src/composables/useNavigationController.ts、frontend/src/pages/NavigationWorkspace.vue、.agents/TASK_LOG.md。
+- 主要变更：新增暮光光照/阴影渲染工具，离线地图显示模式扩展为“占据网格 / 点云 / 渲染”；加载离线地图后默认切到“渲染”；切换模式或清空地图时恢复原 Three.js 材质、背景、tone mapping 和阴影配置。
+- 已验证：frontend 下 `npm run typecheck` 通过；`npm run build` 通过，仍有 NavigationWorkspace/OrbitControls 大 chunk 常规警告。
+- 限制：尚未用真实离线 PCD 与用户截图做现场目视对照。
+
+## 2026-09-09：离线点云渲染光照校正
+
+- 任务目标：修正 ros_tool main 与 ros_platform 当前分支中离线地图渲染模式过暗、材质不接近参考图的问题。
+- 修改文件：frontend/src/lib/ros/offlineVoxelRender.ts、.agents/TASK_LOG.md。
+- 主要变更：提高 voxel 实例色明度/饱和度，改为偏米黄与灰绿的实体表面；增加暖色环境光和冷色补光；保留投影但关闭 voxel 自接收阴影，减少密集体素黑块。
+- 已验证：ros_tool frontend `npm run build` 通过；ros_platform frontend `npm run typecheck` 与 `npm run build` 通过，仍有大 chunk 常规警告。
+- 限制：尚未用真实离线 PCD 在浏览器中目视微调最终光照观感。
+
+## 2026-09-09：离线点云渲染亮度二次校正
+
+- 任务目标：继续修正离线地图渲染模式整体仍然发黑的问题。
+- 修改文件：frontend/src/lib/ros/offlineVoxelRender.ts、.agents/TASK_LOG.md。
+- 主要变更：进一步抬高 voxel 实例色亮度；为标准材质加入暖色 emissive 基底；提高 tone mapping 曝光、环境光、半球光、主光和补光强度，使体素不再完全依赖场景光照才可读。
+- 已验证：ros_tool frontend `npm run build` 通过；ros_platform frontend `npm run typecheck` 与 `npm run build` 通过，仍有大 chunk 常规警告。
+- 限制：尚未通过浏览器截图进行最终观感验收。
+
+## 2026-09-09：离线点云渲染自发光回退与光照排查
+
+- 任务目标：去掉自发光方案，确认离线地图渲染过暗是否来自后处理、tone mapping 或光照链路。
+- 修改文件：frontend/src/lib/ros/offlineVoxelRender.ts、.agents/TASK_LOG.md。
+- 主要变更：搜索确认前端未使用 EffectComposer、Bloom、ShaderPass 等后处理；撤销材质 emissive；将渲染模式从 MeshStandardMaterial 改为 MeshLambertMaterial；将 ACESFilmicToneMapping 改为 LinearToneMapping；阴影改为 PCFSoftShadowMap 且保持 autoUpdate。
+- 已验证：ros_tool frontend `npm run build` 通过；ros_platform frontend `npm run typecheck` 与 `npm run build` 通过，仍有大 chunk 常规警告。
+- 限制：尚未通过浏览器截图进行最终光照验收。
+
+## 2026-09-09：离线点云渲染纯黑修复
+
+- 任务目标：修复撤销自发光后离线地图渲染模式变成纯黑的问题。
+- 修改文件：frontend/src/lib/ros/offlineVoxelRender.ts、frontend/src/components/Nav3DViewer.vue、.agents/TASK_LOG.md。
+- 主要变更：渲染模式材质不再启用 vertexColors；停止写入 instanceColor，让 InstancedMesh 只承载 voxel 位置；使用固定米黄色 MeshLambertMaterial 配合真实灯光，排除实例色属性异常导致颜色被乘黑的问题。
+- 已验证：ros_tool frontend `npm run build` 通过；ros_platform frontend `npm run typecheck` 与 `npm run build` 通过，仍有大 chunk 常规警告。
+- 限制：尚未通过浏览器截图确认最终观感。
+
+## 2026-09-09：离线点云渲染实验回退
+
+- 任务目标：按用户要求回退后续光照/材质实验，恢复到“main 分支和当前分支光照模式不太对”之前的渲染状态。
+- 修改文件：frontend/src/lib/ros/offlineVoxelRender.ts、frontend/src/components/Nav3DViewer.vue、.agents/TASK_LOG.md。
+- 主要变更：恢复 MeshStandardMaterial、vertexColors、voxelSurfaceColor、ACESFilmicToneMapping、原始三灯布光、PCF 阴影和静态阴影贴图策略；重新接回 voxel 实例色写入；保留“渲染”显示模式入口、默认加载渲染和模式切换能力。
+- 已验证：ros_tool frontend `npm run build` 通过；ros_platform frontend `npm run typecheck` 与 `npm run build` 通过，仍有大 chunk 常规警告。
+- 限制：尚未继续调整光照问题，当前仅回退到用户指定的修改前状态。
+
+## 2026-09-09：离线体素颜色通道与平台灯光组修复
+
+- 任务目标：定位离线渲染体素近黑、与旧版暮光效果不一致的原因。
+- 修改文件：frontend/src/lib/ros/offlineVoxelRender.ts、frontend/tests/offline-voxel-render.html、.agents/TASK_LOG.md。
+- 已确认根因：BoxGeometry 没有顶点 color 属性，却启用了 vertexColors；Three.js 将缺失的顶点色与已有 instanceColor 相乘，导致底色近黑。现在根据几何属性启用顶点色，保留 voxelSurfaceColor 实例配色、Standard 材质、ACES、原有曝光与三灯参数。
+- 主要变更：递归记录并关闭场景内已有灯光，覆盖 platformArena 的嵌套灯光组；退出离线渲染时恢复原可见状态，避免两套照明叠加。
+- 已验证：浏览器真实 WebGL 对照测试通过，相同照明下样本中心 RGB 从 [2,1,0] 恢复到 [151,134,94]；嵌套灯光隔离、原隐藏灯光状态、材质及渲染器状态恢复通过；npm run typecheck、npm run build 通过（仍有大 chunk 提示）。测试入口为 Vite 开发服务 /tests/offline-voxel-render.html，不进入生产入口。
+- 限制：使用单体素回归样本验证根因，用户截图中的完整地图最终观感尚未验证；未更改后台功能，未启动或停止服务。
+
+## 2026-09-09：主视图地图显示项自动补齐
+
+- 任务目标：修复连接 rosbridge 后 `/map` 没有出现在主视图显示项、主界面看不到地图的问题。
+- 修改文件：frontend/src/composables/useNavigationController.ts、frontend/src/components/Nav3DViewer.vue、.agents/TASK_LOG.md。
+- 主要变更：加载保存布局后不再完全信任旧 `nav_layout_json`，若主视图缺少 `map` 类型显示项，会自动补入 `/map`；刷新 ROS 话题成功或失败后也会执行同样补齐，避免历史保存布局导致地图长期缺失；OccupancyGrid 渲染支持普通数组和 TypedArray 数据。
+- 已验证：frontend 下 `npm run typecheck` 与 `npm run build` 通过，仍有大 chunk 常规警告。
+- 限制：尚未连接现场 rosbridge 目视确认 `/map` 消息是否按预期渲染；若现场 `/map` 本身未发布或 frame 无法转换，仍需看三维主视图状态/日志。
+
+## 2026-09-09：真实话题监控卡片样式对齐
+
+- 任务目标：修复连接 ROS 前后的左侧话题监控标题和小卡片操作按钮样式不一致的问题。
+- 修改文件：frontend/src/components/NavTopicPanelList.vue、frontend/src/monitor.css、.agents/TASK_LOG.md。
+- 主要变更：确认连接前使用 DemoDock、连接后使用 NavTopicPanelList；为真实监控 compact 模式补齐“话题监控”标题栏和整体收起按钮；真实小卡片头部改为与演示卡一致的拖拽手柄、topic 标题、状态点、hover 图标按钮组；保留真实订阅、暂停、折叠、录制保存、删除和详情抽屉逻辑。
+- 已验证：frontend 下 `npm run typecheck` 与 `npm run build` 通过，仍有大 chunk 常规警告。
+- 限制：右侧 ROS 话题列表仍是 NavigationWorkspace 内的独立模板，仅保留连接后的多选、刷新、批量监控和批量 3D 交互，未在本次改成独立复用组件。
+
+## 2026-09-09：离线 voxel 生长动画与地图淡入淡出
+
+- 任务目标：复刻 G:\test\ros-test-platform 中 VoxelMap.tsx 的点云加载扩散生长效果，并接入 ros_platform 的离线点云加载、体素/渲染切换和 ROS map 替换。
+- 修改文件：frontend/src/lib/ros/voxelGrowth.ts、frontend/src/lib/ros/offlineVoxelRender.ts、frontend/src/components/Nav3DViewer.vue、.agents/PROJECT_OVERVIEW.md、.agents/TASK_LOG.md。
+- 主要变更：新增 GPU shader 生长材质，按水平距离、层号和随机扰动生成实例延迟，voxel 底面固定并沿 ROS Z-up 方向向上生长；离线占据网格和渲染模式共用该动画，切换模式时重新播放且不改 camera/controls；重复加载离线点云时旧地图 0.45s 淡出，新地图同步生长；ROS OccupancyGrid 更新时旧 map 淡出、新 map 淡入。
+- 已验证：frontend 下 `npm run typecheck` 与 `npm run build` 通过，仍有 NavigationWorkspace/OrbitControls 大 chunk 常规警告。
+- 限制：尚未连接真实 rosbridge 或加载现场 PCD 做浏览器目视验收；ROS `/map` 是 2D OccupancyGrid，没有离线 voxel 高度数据，本次只做新旧地图淡入淡出，不伪造三维生长体素。
+
+## 2026-09-09：离线 voxel 过渡细节修正
+
+- 任务目标：修正离线 voxel 生长过渡中背景/光照硬切、渲染终态材质变化、裁剪重复触发动画的问题。
+- 修改文件：frontend/src/lib/ros/offlineVoxelRender.ts、frontend/src/components/Nav3DViewer.vue、.agents/TASK_LOG.md。
+- 主要变更：渲染模式进入时按生长进度渐变背景、曝光、平台灯光和暮光灯光；shader 只作为过渡材质，动画结束后切回上一版 MeshStandardMaterial 暮光渲染效果；恢复 voxel 实例缩放和实例色写入；裁剪只更新可见实例并直接进入完成态，不再重播生长动画，只有加载新离线点云和切换 voxel/render 模式会触发过渡。
+- 已验证：frontend 下 `npm run typecheck` 与 `npm run build` 通过，仍有 NavigationWorkspace/OrbitControls 大 chunk 常规警告。
+- 限制：尚未在浏览器中用用户现场 PCD 截图确认渐变观感是否完全贴近 G:\test\ros-test-platform 的 1-4 帧效果。
+
+## 2026-09-09：离线 voxel 过渡锚点与正反渐变
+
+- 任务目标：按用户反馈消除渲染模式终态材质闪变、默认场景切点云跳变，以及 render 与非 render 模式之间反向缺少环境渐变的问题。
+- 修改文件：frontend/src/lib/scene/platformArena.ts、frontend/src/lib/ros/voxelGrowth.ts、frontend/src/lib/ros/offlineVoxelRender.ts、frontend/src/components/Nav3DViewer.vue、.agents/PROJECT_OVERVIEW.md、.agents/TASK_LOG.md。
+- 主要变更：渲染模式改为 MeshStandardMaterial 单材质体系，通过 onBeforeCompile 注入底部锚定生长逻辑，动画结束不再切换材质；默认场地和离线点云仍在同一 scene 中，加载过渡期间锁定 demo controls 约束并保留机器狗视觉锚点，演示场地逐步淡出；voxel 延迟中心改为当前机器狗/controls target；render 环境渐变抽为独立 0-1 状态，进入和退出都用同一套 clamp/lerp，退出 render 不再瞬间恢复背景和灯光。
+- 已验证：frontend 下 `npm run typecheck` 与 `npm run build` 通过，仍有 NavigationWorkspace/OrbitControls 大 chunk 常规警告。
+- 限制：尚未通过浏览器录屏逐帧对照 G:\test\ros-test-platform 的 1-4 帧效果；默认机器狗作为离线地图视觉锚点是过渡表现层逻辑，不代表真实 ROS 位姿。
+
+## 2026-09-09：机器狗相机跟随与三模式互切过渡
+
+- 任务目标：修正真实位姿到来时机器狗瞬移、相机相对位置跳变，以及点云/体素/渲染三种模式互切时展示场景被错误拉回的问题。
+- 修改文件：frontend/src/lib/scene/platformArena.ts、frontend/src/components/Nav3DViewer.vue、.agents/TASK_LOG.md。
+- 主要变更：机器狗从默认展示位姿到真实 pose 时使用 position lerp 与 quaternion slerp，避免收到位姿后直接刷新；离线地图加载过渡期间 camera position 与 controls target 同步平移，保持相机和机器狗相对静止；展示场地淡出只在从默认展示态首次加载地图时启用，点云/体素/渲染互切不会再显示展示场地；三模式互切增加当前对象淡出、目标对象淡入，只在两种目标显示之间过渡。
+- 已验证：frontend 下 `npm run typecheck` 与 `npm run build` 通过，仍有 NavigationWorkspace/OrbitControls 大 chunk 常规警告。
+- 限制：尚未用真实 rosbridge 位姿流与离线 PCD 在浏览器中目视确认相机跟随速度是否需要继续调参。
+
+## 2026-09-10：占据网格模式恢复
+
+- 任务目标：修复从渲染模式切到占据网格时先出现渲染过渡、随后占据网格消失的问题。
+- 修改文件：frontend/src/lib/ros/offlineVoxelRender.ts、frontend/src/components/Nav3DViewer.vue、.agents/TASK_LOG.md。
+- 主要变更：offlineVoxelRender 新增 restoreMeshMaterial，退出渲染模式时立即恢复 voxel shader 材质，只保留背景/光照做反向渐变；恢复占据网格材质后主动重置 uFade 和 uTime，避免之前点云/体素互切淡出把 shader 透明度留在 0。
+- 已验证：frontend 下 `npm run typecheck` 与 `npm run build` 通过，仍有 NavigationWorkspace/OrbitControls 大 chunk 常规警告。
+- 限制：尚未在浏览器中用真实离线地图目视确认占据网格切换观感。
+
+## 2026-09-10：主视图显示项卡片化
+
+- 任务目标：修复主视图显示项抽屉中条目和配置散落、摘要并列显示过多导致难以识别的问题。
+- 修改文件：frontend/src/pages/NavigationWorkspace.vue、frontend/src/styles.css、.agents/TASK_LOG.md。
+- 主要变更：移除“当前主视图显示 N 项”的长文本摘要 chips；每个显示项改为紧凑卡片，主行整合类型、名称、topic 和消息类型，移除按钮改为 hover 显示；颜色、点大小、Hz、透明度、TF 等配置默认收起，鼠标悬停或键盘聚焦时展开。
+- 已验证：frontend 下 `npm run typecheck` 与 `npm run build` 通过，仍有 NavigationWorkspace/OrbitControls 大 chunk 常规警告。
+- 限制：尚未在浏览器中目视微调抽屉宽度下的最长 topic 截断效果。
+
+## 2026-09-10：诊断与离线地图面板卡片化
+
+- 任务目标：按主视图显示项的整理方向，修复诊断界面接入检测、录制文件、链路延迟，以及平台设置离线地图中的样式和排版松散问题。
+- 修改文件：frontend/src/pages/NavigationWorkspace.vue、frontend/src/styles.css、.agents/TASK_LOG.md。
+- 主要变更：为离线地图设置区增加专用样式作用域；离线地图字段、加载动作和显示模式改为统一卡片分组；链路延迟的话题编辑、图例、录制入口和图表区域收束为紧凑条目；录制文件列表、预览和图表改为左右卡片化浏览布局；接入检测的配置键值、检测结果、能力和提示统一为卡片/标签样式。
+- 已验证：frontend 下 `npm run typecheck` 与 `npm run build` 通过，仍有 NavigationWorkspace/OrbitControls 大 chunk 常规警告。
+- 限制：尚未在浏览器中逐项目视确认四个抽屉在真实数据量下的 hover、截断和滚动表现。
+
+## 2026-09-11：机器狗腿部关节方向修正
+
+- 任务目标：修正默认机器狗动画中腿部关节反向折叠的问题。
+- 修改文件：frontend/src/lib/scene/platformRobot.ts、.agents/TASK_LOG.md。
+- 主要变更：腿部定义增加前后腿折叠方向，保留原对角步态相位；前腿与后腿的小腿/大腿旋转方向改为镜像折叠，避免四条腿都按同一方向形成反关节观感。
+- 已验证：frontend 下 `npm run typecheck` 与 `npm run build` 通过，仍有 NavigationWorkspace/OrbitControls 大 chunk 常规警告。
+- 限制：尚未在浏览器中逐帧目视确认不同视角下的腿部动态观感。
+
+## 2026-09-11：ROS 话题点云发光配置
+
+- 任务目标：为主视图中通过 ROS 话题接入的点云显示项增加自发光效果，并把强度配置放到显示项小卡片上。
+- 修改文件：frontend/src/lib/ros/displayRegistry.ts、frontend/src/composables/useNavigationController.ts、frontend/src/pages/NavigationWorkspace.vue、frontend/src/components/Nav3DViewer.vue、.agents/TASK_LOG.md。
+- 主要变更：NavViewerDisplay 新增 pointEmissiveIntensity；点云显示项小卡片新增“发光”强度输入；保存布局读取、默认显示项和配置更新链路保留该字段；实时 PointCloud2 渲染按强度提亮颜色并在强度大于 0 时启用 additive blending，分层配色会同步重算颜色 buffer。
+- 已验证：frontend 下 `npm run typecheck` 与 `npm run build` 通过，仍有 NavigationWorkspace/OrbitControls 大 chunk 常规警告。
+- 限制：Three.js PointsMaterial 没有 emissive 字段，本次以点材质颜色增强和叠加混合实现视觉自发光；尚未连接真实 rosbridge 目视确认不同强度下的现场观感。
+
+## 2026-09-16：三维机器狗位姿改用 body TF
+
+- 任务目标：将三维主场景机器狗位置从 `/display/tf` 的 `base_link` 改为读取 `body`。
+- 修改文件：frontend/src/components/Nav3DViewer.vue、frontend/src/lib/ros/liveAdapter.ts、.agents/TASK_LOG.md。
+- 主要变更：新增统一的 robotPoseFrame=`body`，机器狗姿态解析和底部 HUD 均使用 `body`；本地模拟适配器的 TF child_frame_id 同步改为 `body`，保持模拟链路和真实链路一致。
+- 已验证：frontend 下 `npm run typecheck` 与 `npm run build` 通过，仍有 NavigationWorkspace/OrbitControls 大 chunk 常规警告。
+- 限制：初始化点云局部转换仍保留 `base_link` 语义，未随本次机器狗显示位姿变更一起修改。
+
+## 2026-09-11：三面板样式统一与离线裁剪坐标轴人性化
+
+- 任务目标：统一「离线地图裁剪」「离线地图点云」「主视图显示项」三个面板的玻璃卡片风格与布局，并把裁剪坐标轴做得更易识别、可精调。
+- 修改文件：frontend/src/components/Nav3DViewer.vue、frontend/src/pages/NavigationWorkspace.vue、frontend/src/styles.css、frontend/src/monitor.css、.agents/TASK_LOG.md。
+- 主要变更：裁剪面板改为标题+分段控件+等轴测立方体线框+六个带轴向标签的胶囊手柄（X 橙/Y 绿/Z 蓝）+三行实时范围读数+重置按钮；新增 offlineClipBoundsView 响应式镜像在加载/清除/重置/设置边界四处同步读数；手柄由 span 改为 button 并接入方向键微调（复用原空置的 moveOfflineClipFace），pointerdown 后自动聚焦；离线点云表单拆分“文件来源/采样与占据参数”分组，数字参数改两列网格（label 在上、输入框全宽）；操作区改纵向排列并补上此前缺失的 .segmented-control 分段控件样式，状态消息允许换行不再截断；主视图显示项把支持类型标签与“当前显示 N 项”计数合并为一行，管理按钮移至标题右上，显示项卡片头部简化为 类型/名称/删除 三列，话题移入悬停展开行。
+- 已验证：frontend 下 `npm run typecheck` 与 `npm run build` 通过；本机 5180 开发页实测：真实 PCD 加载成功，裁剪面板六手柄渲染与 X+ 拖拽读数变化、重置恢复均生效，显示项面板布局正常，console 无报错。
+- 限制：方向键微调与 Y/Z 手柄拖拽未逐项实测；700px 以下窄屏断点仅静态检查未目视确认。
+
+## 2026-09-11：右侧工具栏互斥展开与控制抽屉分组重排
+
+- 任务目标：按用户反馈修复主视图多余箭头、离线裁剪面板改为放射状箭头并可缩起挂靠、与话题列表互斥展开，以及定位导航控制抽屉布局拥挤问题。
+- 修改文件：frontend/src/components/Nav3DViewer.vue、frontend/src/pages/NavigationWorkspace.vue、frontend/src/styles.css、.agents/TASK_LOG.md。
+- 主要变更：删除主视图无样式的 focus 罗盘按钮（与底部"重置视角"重复）；裁剪坐标轴由立方体线框改为中心 hub + 六向放射箭头，hover/点击亮起所在轴并与读数行联动；右上角新增数据驱动的竖排工具按钮栏（sideTools 注册表，新增面板只需追加定义），话题列表与地图裁剪面板互斥展开，加载离线地图自动切到裁剪面板、清除后回落话题列表；Nav3DViewer 新增 offlineClipPanelOpen prop 由父组件面板状态控制；定位导航控制抽屉重排为"任务控制/运动控制/初始位姿候选/手动输入位姿"四个分组卡片，初始位姿与手动输入行改网格布局；两面板与裁剪面板统一挂在按钮栏左侧（right: 66px，700px 断点 62px）。
+- 已验证：frontend 下 `npm run typecheck` 与 `npm run build` 通过（仅常规大 chunk 警告）；5180 开发页浏览器实测：工具栏两按钮渲染、话题面板展开/收起互斥切换、地图裁剪按钮禁用态、定位导航抽屉四分组无溢出均正常，刷新后 console 无新增运行时错误。
+- 限制：离线地图加载后的裁剪面板展开与放射箭头 hover 亮起效果未实测（需真实 PCD）；dev server HMR 编辑期会出现一次性的 Vue reload TypeError（reading 'flags'），硬刷新后不复现，非业务缺陷。
+
+## 2026-09-11：坐标裁剪控件视觉重设计
+
+- 任务目标：按用户详细设计规范重做离线地图裁剪面板的坐标轴控件视觉层，与平台 Low Poly 暖色毛玻璃风格统一；不改任何业务逻辑与事件绑定。
+- 修改文件：frontend/src/components/Nav3DViewer.vue、frontend/src/styles.css、.agents/TASK_LOG.md。
+- 主要变更：面板卡片改为规范毛玻璃参数（rgba(245,241,232,0.55)、blur(14px)、16px 圆角、柔和阴影），宽 192px；标题改"坐标裁剪/拖动轴向裁剪点云"两行；坐标轴控件重做为 SVG 几何层（两圈暖灰同心辅助圆 + 六条 2.5px 轴向细杆）+ 奶白半透明中心点 + 六个 28px 圆形命中区按钮（13px 小三角箭头、±X/±Y/±Z 标签）；三轴换低饱和暖色（X 珊瑚 #c96f5d、Y 鼠尾草 #7f9a7a、Z 赭黄 #a89a63），标签色更深一档；hover/拖拽态为淡光晕 + 箭头 1.05/1.08 缩放 + 轴杆 3.2px 变粗 + 其余方向压暗 0.35（:has() 渐进增强，容器 dragging-x/y/z 类由既有 activeOfflineClipFace 派生）；重置按钮改 32px ghost 风格"↻ 重置裁剪"；读数行标签同步新三色。所有 pointerdown/move/up、keydown、拖拽与裁剪逻辑、按钮 DOM 与事件绑定完全未动。
+- 已验证：npm run typecheck 与 npm run build 通过；浏览器实测（加载真实 PCD map_origin.pcd）：面板/轴杆/箭头/标签/读数/重置渲染无重叠，hover 实测 ::before scale(1.05)+radial-gradient 光晕与轴杆 2.5→3.2px 变粗生效，重置按钮点击后读数与初始值完全一致，真实鼠标拖拽改变边界读数正常（第一轮代理曾误报重置异常，经初始值复核确认为误报）。
+- 限制：拖拽中间态的"其余方向压暗 0.35"视觉由纯 CSS 类驱动，浏览器会话中未能截到按住瞬间的画面，未直接目视确认；合成 PointerEvent 因 setPointerCapture 拒绝合成 pointerId 无法自动化验证拖拽全程。
+
+## 2026-09-11：定位导航抽屉非模态化与折叠状态记忆
+
+- 任务目标：按用户反馈修复定位导航抽屉点击三维场景即收起、无法配合场景操作的问题；平台设置等抽屉内可折叠分组需记住上次展开/收起状态。
+- 修改文件：frontend/src/composables/usePersistentDetails.ts（新增）、frontend/src/components/GlassDrawer.vue、frontend/src/pages/NavigationWorkspace.vue、frontend/src/styles.css、.agents/TASK_LOG.md。
+- 主要变更：GlassDrawer 新增 persistent 非模态模式（无遮罩、drawer-layer pointer-events 穿透、抽屉本体恢复交互、跳过 Tab 焦点锁定、aria-modal false，Escape/X 仍可关闭）；定位导航（control）抽屉启用 persistent，打开时可正常旋转/点击三维场景；工具带三个抽屉按钮改为 toggle 语义（再点收起），话题列表"详情"跳转按钮保持打开语义不变；新增 usePersistentDetails（模块级状态 + localStorage ros-platform.details-open），平台设置（ROS 接入/离线地图/外观与场景）与诊断抽屉（话题详情/链路延迟/运行时参数/录制文件/接入检测/运行日志）共 9 个 details 分组改为受控绑定，展开状态跨抽屉开关与页面刷新保持。
+- 已验证：npm run typecheck 与 npm run build 通过；浏览器实测：定位导航抽屉打开后点击/拖动 3D 场景不收起，按钮再点可收起；平台设置默认状态正确（ROS 接入展开、离线地图收起），改折叠状态后关开抽屉与刷新页面均保持（localStorage 实测值正确）；显示项等模态抽屉的遮罩关闭链路经 JS dismiss.click() 与 Escape 双路验证正常。
+- 限制：自动化工具按视口坐标点击遮罩存在坐标偏移（事件落在 BODY），无法模拟真实用户点击遮罩关闭，该路径仅通过事件追踪+JS 触发间接验证；RelocalizationWorkspace 页面的 details 分组未纳入持久化（该页 details 为页面常驻或动态条件驱动，无抽屉销毁丢状态问题）。
+
+## 2026-09-16：Android 直连机器狗适配
+
+- 任务目标：参考 feat/ros_android 分支，把 ROS 测试平台当前分支适配为 Android App 可直接连接机器狗 IP/rosbridge，不依赖电脑后端完成话题读取、rosapi 查询和离线地图文件选择。
+- 修改文件：frontend/android/**、frontend/capacitor.config.ts、frontend/package.json、frontend/package-lock.json、frontend/vite.config.ts、frontend/src/App.vue、frontend/src/composables/useNavigationController.ts、frontend/src/lib/nativeFilePicker.ts、frontend/src/lib/ros/directRosClient.ts、frontend/src/lib/ros/mobileAppState.ts、frontend/src/lib/ros/mobileCatalog.ts、.agents/TASK_LOG.md。
+- 主要变更：恢复 Capacitor Android 工程、沉浸横屏 Activity、明文 ws/http 网络配置和原生文件选择插件；Vite 改为相对资源 base，保证 WebView 可加载打包资源；在后端 tools 接口不可用时提供 ROS 导航页面兜底工具定义；ROS 接入配置优先保存在本地缓存，后端保存失败时仍能在 Android 上继续使用；话题列表、接入检测和运行时参数在后端不可用时改走前端直连 rosbridge/rosapi；离线 PCD/YAML/PGM 在 Android 上通过原生文件选择与本地预览流程处理。
+- 已验证：frontend 下 `npm run typecheck` 通过；`npm run build:android` 通过并完成 `npx cap sync android`；frontend/android 下 Gradle debug 包已产出 `frontend/android/app/build/outputs/apk/debug/app-debug.apk`。
+- 限制：当前只验证 debug APK 构建，未做 release 签名；真机连接仍要求手机与机器狗网络互通，机器狗开放 rosbridge/rosapi，并允许 `ws://机器狗IP:9090` 这类明文连接；npm install 后仍提示 3 个 moderate 依赖审计项，未在本次处理。
+
+## 2026-09-16：Android 包名与图标区分
+
+- 任务目标：避免当前分支打出的 Android App 与 feat/ros_android 分支安装包互相覆盖或在桌面图标上混淆。
+- 修改文件：frontend/capacitor.config.ts、frontend/android/app/build.gradle、frontend/android/app/src/main/AndroidManifest.xml、frontend/android/app/src/main/res/values/strings.xml、frontend/android/app/src/main/res/drawable/ros_platform_launcher.xml、frontend/android/app/src/main/java/com/moontoolbox/rosplatform/MainActivity.java、frontend/android/app/src/main/java/com/moontoolbox/rosplatform/RosFilePickerPlugin.java、.agents/TASK_LOG.md。
+- 主要变更：appId/applicationId/namespace 从 `com.moontoolbox.rosnav` 改为 `com.moontoolbox.rosplatform`；应用名从 `MoonToolBox ROS Nav` 改为 `ROS Platform Dev`；MainActivity 与 RosFilePickerPlugin 移到新 Java package；Manifest 启动图标改用当前分支专用的暖色网格 ROS Platform 矢量图标。
+- 已验证：frontend 下 `npm run build:android` 通过并同步生成 `capacitor.config.json`；frontend/android 下 `./gradlew.bat assembleDebug` 通过，debug APK 已重新产出。
+- 限制：旧 `MoonToolBox ROS Nav` 如果已经装在手机上，本次包名不同，会作为新应用并存安装，不会自动升级覆盖旧应用。
+
+## 2026-09-17：新增 IMU Allan 标定页面
+
+- 任务目标：在 ROS_PLATFROM 分支新增可从左上角标题按钮切换进入的 IMU 标定模块，用于 Windows 本地解析 rosbag2 `.db3` 并做 Allan 方差/噪声参数估计。
+- 修改文件：backend/app/catalog.py、backend/app/api/routes.py、backend/app/services/imu_calibration.py、data/tool_modules.json、frontend/src/api/client.ts、frontend/src/main.ts、frontend/src/App.vue、frontend/src/components/PlatformLauncher.vue、frontend/src/pages/ImuCalibrationPage.vue、.agents/PROJECT_OVERVIEW.md、.agents/TASK_LOG.md。
+- 主要变更：新增 `imu_calibration` 工具、`/tools/imu-calibration` 路由和左上角工具箱第五项；后端直接读取 rosbag2 SQLite3 的 `topics/messages` 表，按 ROS2 CDR 对齐规则解析 `sensor_msgs/msg/Imu` 的 gyro/accel；新增 inspect/analyze API；前端页面支持 db3 选择、topic 检查、起始/时长/抽样/Tau 参数、Allan 双对数曲线、三轴估计表和 YAML 导出预览。
+- 已验证：用 `G:\humble_loc\bags\livox_imu_allan_20260916_120110_0.db3` 检查出 `/livox/imu`、约 1401015 帧、约 200Hz；用 2 万帧抽样跑通 Allan 计算；`python -m compileall backend/app/services/imu_calibration.py backend/app/api/routes.py backend/app/catalog.py` 通过；frontend 下 `npm run build` 通过。
+- 限制：当前只支持 `sensor_msgs/msg/Imu` 或 `sensor_msgs/Imu` 且 `serialization_format=cdr` 的 rosbag2 SQLite3；Allan 指标为第一版自动估计，拟合区间尚不能人工选择；本次样本显示 accel z 均值约 0.98，推断驱动可能按 g 而非 ROS 标准 m/s² 发布，页面当前按消息原单位展示。
+
+## 2026-09-18 导航任务与定位面板分离
+
+- 目标：参考图拆分导航侧栏，共享三维场景和机器人位置 HUD；支持当前位置与地图打点，导航通信延后接入。
+- 修改文件：frontend/src/pages/NavigationWorkspace.vue；frontend/src/components/NavigationTasks.vue、Nav3DViewer.vue；frontend/src/lib/navigationTasks.ts；frontend/src/composables/useNavigationController.ts；frontend/tests/navigation-tasks.test.mjs；.agents/PROJECT_OVERVIEW.md、TASK_LOG.md。
+- 主要变更：顶部切换、任务增删改、点位增删排序、定位到点、编号/朝向/虚线、草稿取消与保存、本地持久化、JSON 导入导出。定位抽屉移除导航入口，旧消息方法保留但新导航面板不调用。HUD 无改动。
+- 接口：新增 TaskScene 与 NavigationTransport；execute 返回未接入，开始不下发，继续/暂停/取消禁用。坐标单位 m，yaw 单位 rad；坐标系不符时禁止编辑。
+- 验证：类型检查、Vite 构建、任务协议回归通过。Edge/Playwright 检查打点、变换模式、手动坐标、取消、刷新恢复、断线取点保护及通信占位；切换前后 canvas 对象一致，无页面脚本错误。
+- 风险与限制：真实硬件位姿、离线地图射线吸附、真实导航消息与执行反馈尚未验证。构建仍有大包提示。任务保存在当前浏览器，可用 JSON 迁移；连线不是规划路径。
+
+## 2026-09-18 修复局域网新建任务并实现顺序执行
+
+- 目标：修复新建无响应，完善建任务/编辑点位界面，按上一点成功后才下发下一点实现调度。
+- 已确认根因：局域网 HTTP 下 isSecureContext=false，crypto.randomUUID 为 undefined；旧新建事件抛错，任务数仍为 0。之前 localhost 回归未覆盖此场景。
+- 修改文件：frontend/src/components/NavigationTasks.vue；frontend/src/lib/navigationTasks.ts；新增 frontend/src/lib/navigationRunner.ts；frontend/tests/navigation-tasks.test.mjs；新增 frontend/tests/navigation-runner.test.mjs；docs/NAVIGATION_TASKS.md；.agents/PROJECT_OVERVIEW.md、TASK_LOG.md。
+- 主要变更：兼容非安全上下文的编号；新建名称/类型表单及首点编辑；任务类型/时间/执行进度；编辑布局、坐标显示精度；真实/模拟执行切换；运行时锁定任务编辑；修改停止任务时清除旧进度。
+- 执行逻辑：固定任务快照、单点下发、确认与到达分离；runId/goalId 过滤旧结果和重复反馈；到达后续发、失败停止；暂停期间记完成但不续发，继续确认后推进；取消后不下发后续点。模拟模式需人工反馈且不发 ROS 消息。
+- 接口变化：整任务 execute 占位改为 sendGoal/control/subscribe；真实适配器仍返回未接入，可注入 NavigationTasks.transport。旧 ROS 控制器不受影响。
+- 验证：协议测试、顺序执行回归、类型检查、构建通过；Edge/Playwright 在局域网 HTTP 5180 与 8100 验证新建、打点、三点编辑持久化、真实未接入、模拟顺序执行、暂停到达/继续、失败、取消和刷新，无页面脚本错误。
+- 尚未验证：真实硬件位置取点、离线地图吸附、真实导航协议。仅持久化任务定义；真实执行恢复、断线/超时处理需通信适配层实现。构建大包警告仍存在。
+
+## 2026-09-18 初始化与任务点改用组合位姿控件
+
+- 目标：平移箭头和旋转圆环同时显示，无需点击按钮切换操作。
+- 修改文件：frontend/src/lib/scene/combinedPoseControls.ts（新增）；frontend/src/components/Nav3DViewer.vue、NavigationTasks.vue；frontend/src/pages/NavigationWorkspace.vue；frontend/src/composables/useNavigationController.ts；frontend/src/lib/navigationTasks.ts；frontend/tests/combined-pose-controls.html、combined-pose-controls.test.cjs（新增）；docs/NAVIGATION_TASKS.md；.agents/PROJECT_OVERVIEW.md、TASK_LOG.md。
+- 主要变更：组合控件负责两个 TransformControls 的公开指针方法调用与互斥，平移在内侧、旋转在外侧；去除自由旋转中心球以免遮挡平移。初始化保留三轴局部旋转；任务数据仅包含 yaw，因此使用世界坐标平移与 Z 轴旋转。删除旧切换按钮、模式状态与内部 setInitialPoseTransformMode 接口，替换为直接操作提示。
+- 生命周期：指针捕获、松开、取消、失焦、候选清除、组件销毁统一释放；拖动期间冻结相机阻尼，避免残余相机运动改变交互平面。定位发布与任务保存仍走原回调。
+- 验证：类型检查与构建通过；独立浏览器真实拖动验证 X/Y 平移、Z/X 旋转、相机不动、任务仅 yaw、失焦/清除/销毁；任务实际页面连续旋转和平移无需切换且坐标同步正确；导航创建/编辑/模拟顺序执行流程回归通过，无脚本错误。
+- 尚未验证：真实机器狗定位发布、实机点云绑定后的拖动、触屏设备现场操作。构建仍有原有大包提示。
+
+## 2026-09-18 任务点补全三轴姿态
+
+- 目标：修复任务编辑只有单轴旋转的问题，使任务点与初始化均显示三轴圆环。
+- 修改文件：frontend/src/lib/scene/combinedPoseControls.ts、lib/navigationTasks.ts、components/Nav3DViewer.vue、components/NavigationTasks.vue；tests/combined-pose-controls.html、combined-pose-controls.test.cjs、navigation-tasks.test.mjs、navigation-runner.test.mjs；docs/NAVIGATION_TASKS.md；.agents/PROJECT_OVERVIEW.md、TASK_LOG.md。
+- 主要变更：取消任务点 showX/showY 限制，保留其世界坐标操作；新增 roll/pitch 输入、校验与持久化；完整姿态用于候选预览、机器人当前位置、重新编辑和场景方向箭头。下发点位通过原快照保留三轴数据。
+- 兼容性：version 1 及原本地存储键不变，旧点位缺失 roll/pitch 自动补零；角度统一使用 XYZ 欧拉角和 rad。
+- 验证：浏览器在初始化及任务模式实际拖动三轴旋转，任务表单完整姿态保存后重开与候选四元数一致；文件兼容/非法角度与下发字段回归通过。类型检查与生产构建通过。
+- 尚未验证：真实机器狗三轴姿态取点和导航通信联调；实际导航端对横滚/俯仰的支持需后续适配。构建大包提示仍保留。
+
+## 2026-09-18 导航任务弹窗与详情视觉优化
+
+- 目标：仅优化新建任务弹窗及右侧详情的信息层级、密度和控件样式，与定位页面的暖灰工具界面一致。
+- 修改文件：frontend/src/components/NavigationTasks.vue；docs/NAVIGATION_TASKS.md；.agents/TASK_LOG.md。
+- 主要变更：弹窗宽度收为 320px，两行配置采用统一 30px 控件；压缩辅助文案，使用低饱和灰绿主按钮。详情宽度 310px，分为基础信息及任务点列表，元数据右对齐、小型状态标签、轻分隔线；点位行仅保留定位/编辑/删除图标，排序按钮移至点位编辑区。短窗口可滚动访问完整表单。
+- 范围：未改动模式切换、左侧任务结构、三维场景、设备状态与底部执行控件；未变更通信或数据协议。项目地图无需更新。
+- 验证：类型检查、生产构建通过；Edge 浏览器检查 1440x900 与 1280x720 排版、编辑排序；现有局域网浏览器回归覆盖创建、地图打点、保存刷新、模拟逐点执行、暂停继续、失败取消，无脚本错误。
+- 限制：真实机器人通信与触屏设备尚未验证；构建仍有原有的大包警告。
+
+## 2026-09-18 精简导航任务提示
+
+- 目标：取消逐点导航常驻说明和点位保存成功提示；按操作节奏关闭新建、缺失机器人位姿及地图操作提示。
+- 修改文件：frontend/src/components/NavigationTasks.vue；.agents/TASK_LOG.md。
+- 主要变更：指定三类提示显示 2 秒；文档捕获阶段监听点击、指针按下及键盘操作关闭提示，不影响本次操作产生的新提示。地图提示每次切换打开任务仅显示一次，“不再提示”替换关闭图标，使用独立 localStorage 键 ros-platform.navigation-map-hint.dismissed 保存偏好，跨任务及刷新生效。卸载清理监听器与计时器；未修改导航调度和任务数据格式，项目地图无需更新。
+- 验证：类型检查及生产构建通过；Edge 浏览器覆盖超时消失、操作关闭、同任务不重复、新任务恢复提示、跨任务和刷新持久关闭、静默保存，无脚本错误。
+- 限制：偏好属于当前浏览器来源；清除站点数据会重置。构建保留原有大包警告，真实硬件通信尚未验证。
+
+## 2026-09-18 导航任务编排流程与退出动效
+
+- 目标：统一删除确认与文件展开反馈，移除模拟执行，添加渐隐，并改为先选择取点来源再创建点位。
+- 修改文件：frontend/src/components/NavigationTasks.vue、Nav3DViewer.vue；frontend/src/pages/NavigationWorkspace.vue；frontend/src/lib/navigationRunner.ts；frontend/tests/navigation-runner.test.mjs、navigation-workflow.test.cjs（新增）；docs/NAVIGATION_TASKS.md；.agents/PROJECT_OVERVIEW.md、TASK_LOG.md。
+- 主要变更：删除任务改为暖灰页面内确认窗；文件箭头旋转为向下；弹窗/侧栏/提示/编辑区及任务点列表使用 180ms 淡出；定位模式覆盖层切换也加入淡出。移除执行模式选择、人工结果按钮及生产模拟适配器。
+- 点位流程：先选机器狗取点或地图打点。机器狗有效位姿生成草稿后手动保存；地图连续点击或拖动直接新增并持久化，坐标轴和表单实时更新当前点，完成打点退出。地图编号命中优先于空白点选，并丢弃此前未完成的地面查询；控件指针仲裁仍优先，避免误新增。
+- 接口：新增 Viewer taskPosePlaced 事件区分新增与 taskPoseChange 编辑；NavigationTransport/RunState 删除 mode 字段，sendGoal/control/subscribe 及顺序调度不变。
+- 验证：类型检查、生产构建、任务协议和顺序执行回归通过；新增 Edge 交互测试覆盖连续自动保存、实际坐标轴拖动不新增、编号选点、文件箭头、渐隐离场、删除取消/确认、真实未接入保护及刷新持久化。开发环境使用测试替身验证有效机器人位姿的手动保存分支，生产构建跳过该调试入口替身分支。
+- 限制：真实机器人位姿与导航消息联调、离线点云射线服务及触屏设备尚未验证；已有构建大包警告保留。
+
+## 2026-09-20 排查 loaded_pointcloud_map 无数据
+
+- 目标：定位 /debug/loaded_pointcloud_map 数据无法接收的原因；本次仅进行只读检查。
+- 已确认：用户提供发布者与 rosbridge 订阅者均为 RELIABLE / TRANSIENT_LOCAL。直连当前配置的 rosbridge 可发现该话题，但独立订阅 15 秒没有收到地图消息；同链路 /tf_static 与 /lio/cloud_local_base_exact 正常返回。
+- 关键证据：通过 /ndt_scan_matcher/list_parameters、get_parameters 读取到 dynamic_map_loading.publish_loaded_map=false；describe_parameters 返回 read_only=false，但是否动态更新实际发布行为尚未验证。Autoware 官方参数文档说明此参数控制 debug/loaded_pointcloud_map 发布。
+- 结论：运行中 NDT 节点的调试地图发布开关关闭；话题存在和发布端数量不代表实际已发布地图帧。应在 ROS 端开启对应配置并确认加载后发布，不能通过前端解析或 QoS 修改解决此开关问题。
+- 修改文件：仅 .agents/TASK_LOG.md；未更改前端、机器人运行参数或重启节点，项目地图无需更新。
+- 限制：ROS 主机 SSH 无免密访问；未读取其实际部署源码、未验证参数热更新或开启后的地图接收。用户 CLI 不支持 --once / --field，原命令未执行订阅。
+
+## 2026-09-20 接入默认 SCAN 真实导航协议
+
+- 目标：根据用户提供的接口说明，将导航任务页面接入单点请求、编号关联反馈、控制命令和定位状态，保留平台逐点队列。
+- 新增文件：frontend/src/lib/rosNavigationTransport.ts（协议适配）、navigationOwnership.ts（同来源浏览器控制租约）；frontend/src/composables/useTaskNavigation.ts（共享连接生命周期）；frontend/tests/ros-navigation-transport.test.mjs、navigation-ros-workflow.test.cjs。
+- 修改文件：frontend/src/lib/navigationRunner.ts；frontend/src/components/NavigationTasks.vue；frontend/src/pages/NavigationWorkspace.vue；frontend/tests/navigation-workflow.test.cjs；docs/NAVIGATION_TASKS.md；.agents/PROJECT_OVERVIEW.md、TASK_LOG.md。
+- 协议：发布 /nav2_goal_request 的 String JSON，goalId 对应唯一 request_planid，pose 包含 frame_id/x/y/z/yaw，context 携带任务/运行/点序号与名称。订阅 /nav2_goal_context，只有同编号 reached 且 request_completed=true 才成功推进；path_ready、WAIT_TARGET 和恢复原因不算到点。默认不使用 /nav2_status。
+- 控制：pause/resume/cancel 发往 /nav2_goal_control 并等待状态确认；取消后的空编号只在同一连接周期等待本次 cancel 时处理。陌生编号、连接目标改变、租约丢失均禁止控制。取消与到点竞态停止剩余队列。
+- 健康：订阅 /nav_ndt_status，1/2 可启动，0/3 不可。状态与定位超过 3 秒视为过期，确认等待 8 秒；超时显示 unknown 并锁定任务，不自动重发。新增 blocked/unknown 运行状态及可选进度订阅，恢复收到当前编号状态再对账。定位异常只阻断平台队列推进，机器人暂停仍由导航端负责。
+- 界面：沿用暖灰工具条展示导航阶段、定位质量和未就绪原因，未就绪禁用开始；执行状态新增定位等待/状态未知。
+- 兼容：任务 JSON 保留 roll/pitch，但线协议仅发送 yaw；reached 不代表最终朝向达标。切换定位/导航不重建连接或执行器，刷新不自动恢复执行。
+- 验证：类型检查、生产构建、原逐点执行与新增协议测试通过。浏览器隔离全部 WebSocket 验证生产页面连接、连续目标、暂停/继续、断流、取消及原点位编辑流程。现场仅只读订阅：context 为 idle 且字段符合协议，nav_ndt_status=1；未发布测试目标或控制消息。
+- 限制：真实机器人运动、定位自动暂停恢复、实际最终姿态尚未验证。同来源浏览器租约不是跨设备服务端互斥；外部控制不校验请求编号，现场仍需唯一控制源。大包构建提示保留。
+- 补充边界：暂停/取消确认超时仍保留用户停止后续队列的意图；迟到的到点反馈不触发续发。新增对应回归并通过，最终生产页面协议回归通过。
+
+## 2026-09-20 导航列表拖动与路线插点
+- 目标：补齐任务点拖动排序和三维顺序路线点击插入。
+- 文件：frontend/src/components/NavigationTasks.vue、Nav3DViewer.vue、frontend/src/pages/NavigationWorkspace.vue、frontend/src/lib/navigationTasks.ts；frontend/tests/navigation-route-editing.test.cjs；docs/NAVIGATION_TASKS.md、项目地图。
+- 变更：拖放落点边缘提示、列表移动动画和边缘滚动；路线 8px 拾取与 5px 拖动排除，相邻编号校验，插点立即保存并选中。保留原点编辑模式与运行任务锁定。
+- 验证：typecheck、Vite build 通过；浏览器双向拖放、路线插点、刷新持久化、视角拖动防误触及原连续打点/坐标轴回归通过；隔离 WebSocket 的导航逐点执行、暂停继续与取消回归通过。
+- 限制：尚未验证触屏拖放和真实机器人执行；没有发送真实导航目标。构建仍有大于 500 kB 的分包提示。
+
+## 2026-09-22 位姿编辑缩放、插点方向与多客户端位姿
+- 文件：frontend/src/lib/scene/poseVisualScale.ts、combinedPoseControls.ts；frontend/src/lib/navigationTasks.ts；frontend/src/components/Nav3DViewer.vue、NavigationTasks.vue；frontend/tests/navigation-tasks.test.mjs、combined-pose-controls.html/.test.cjs、navigation-multiclient-pose.test.cjs；docs/NAVIGATION_TASKS.md、项目地图。
+- 变更：控件/图标距离缩放衰减且封顶，编号显示与拾取优先；插点默认方向取入段/出段切线角平分线，处理折返/重合；重复选择同点也将列表居中。统一模型、HUD、狗当前位置 TF 解析，旧 body 无样本时降级至完整 base_link 链并标识。
+- 现场只读证据：配置 robot_tf_frame=body；两个并发 WebSocket 各 10 秒收到 /display/tf 20 帧、/tf 20 帧、/tf_static 1 帧，抽样 TF 包含 base_link 未包含 body。未复现双客户端互相断流，不把配置问题等同于全部双机故障根因。未发送任何导航目标。
+- 验证：类型检查和构建通过；连续打点、路线插点、列表拖动、三轴旋转与导航协议回归通过；新增隔离双浏览器覆盖接入/断开互不影响、base_link 降级、body 恢复优先、同点重复选中列表居中；方向边界单测通过。查看截图确认控件收敛和编号可见。
+- 尚未验证：用户两台物理设备现场复测与真实机器人运动；构建仍有既有的大分包警告。
+
+## 2026-09-22 Super-LIO 建图工作台界面
+
+- 目标：在现有三维定位导航工作台内补齐建图模式，覆盖 Super-LIO 实时建图与录包处理的关键输入、预检、任务状态及产物信息。
+- 修改文件：`frontend/src/pages/NavigationWorkspace.vue`、`frontend/src/components/MappingWorkspace.vue`、`.agents/PROJECT_OVERVIEW.md`、`.agents/TASK_LOG.md`。
+- 主要变更：顶部模式增加“建图”；三维场景不重建，建图覆盖层左右分别展示输入校验和地图产物，底部提供本地状态机形式的开始、暂停、结束操作。录包模式明确要求先解析 rosbag2 metadata 并绑定 LiDAR/IMU/TF，实时模式明确校验外参与时间连续性；产物定义为全局点云、轨迹关键帧和可复现配置快照。
+- 布局适配：建图输入面板改为受顶部和底部安全区约束的内部滚动容器；进入建图模式时隐藏仅供定位使用的“重置视角”与说明，避免小高度窗口覆盖输入参数。
+- 验证：`frontend` 下 `npm run typecheck`、`npm run build` 通过；浏览器实测定位→建图切换、实时/录包切换及离线任务开始/结束状态均正常，无控制台异常。
+- 限制：当前仅是前端交互与信息架构，未接入 Super-LIO 节点生命周期、真实 rosbag2 文件选择/解析、数据流频率检查、录制、PCD/轨迹导出或地图后处理；构建保留既有大于 500 kB 的分包警告。
+
+## 2026-09-22 保存当前分支并准备 Android 适配方案
+- 用户要求：先提交并推送当前全部修改，再参考 feat/ros_android 分支给出适配方案。
+- 提交范围：当前平台重构、导航/定位/建图前端、ROS 通信、相关后端与测试，以及现有 Android 工程调整。
+- 验证：本次提交前前端类型检查、生产构建与导航任务单测通过；Android APK 尚未构建验证。
+- 推送与 Android 方案结果在本次会话说明。

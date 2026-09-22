@@ -1,0 +1,127 @@
+<!-- 功能说明：在 Vite 开发服务下对照体素颜色通道，并验证切换渲染模式后灯光和材质恢复。 -->
+<!doctype html>
+<html lang="zh-CN">
+  <meta charset="utf-8" />
+  <title>离线体素渲染回归检查</title>
+  <style>
+    body {
+      background: #202829;
+      color: #eee;
+      font: 16px sans-serif;
+      padding: 24px;
+    }
+    main {
+      display: flex;
+      gap: 24px;
+    }
+    canvas {
+      display: block;
+    }
+    pre {
+      white-space: pre-wrap;
+    }
+  </style>
+  <h1>离线体素渲染回归检查</h1>
+  <main></main>
+  <pre id="result">检查中</pre>
+  <script type="module">
+    import * as THREE from "three";
+    import {
+      createOfflineVoxelRender,
+      voxelSurfaceColor,
+    } from "/src/lib/ros/offlineVoxelRender.ts";
+
+    // 使用真实 WebGL 像素验证底色，避免仅检查材质配置而漏掉着色器问题。
+    function renderSample(reproduceBug) {
+      const scene = new THREE.Scene();
+      const group = new THREE.Group();
+      const visibleLight = new THREE.AmbientLight(0xffffff, 10);
+      const hiddenLight = new THREE.DirectionalLight();
+      hiddenLight.visible = false;
+      group.add(visibleLight, hiddenLight);
+      scene.add(group);
+      const baseMaterial = new THREE.MeshBasicMaterial();
+      const mesh = new THREE.InstancedMesh(
+        new THREE.BoxGeometry(1, 1, 1),
+        baseMaterial,
+        1,
+      );
+      mesh.setMatrixAt(0, new THREE.Matrix4());
+      mesh.setColorAt(0, voxelSurfaceColor(0, 0, 0, 1, new THREE.Color()));
+      scene.add(mesh);
+      const renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        preserveDrawingBuffer: true,
+      });
+      renderer.setSize(360, 300);
+      const originalToneMapping = renderer.toneMapping;
+      const originalShadowType = renderer.shadowMap.type;
+      const camera = new THREE.PerspectiveCamera(40, 360 / 300, 0.1, 100);
+      camera.up.set(0, 0, 1);
+      camera.position.set(-3, -4, 3);
+      camera.lookAt(0, 0, 0);
+      const mode = createOfflineVoxelRender(scene, renderer, mesh);
+      const isolated = !visibleLight.visible && !hiddenLight.visible;
+      if (reproduceBug) mesh.material.vertexColors = true;
+      renderer.render(scene, camera);
+      const pixel = new Uint8Array(4);
+      renderer
+        .getContext()
+        .readPixels(
+          180,
+          150,
+          1,
+          1,
+          renderer.getContext().RGBA,
+          renderer.getContext().UNSIGNED_BYTE,
+          pixel,
+        );
+      const card = document.createElement("section");
+      const title = document.createElement("h2");
+      title.textContent = reproduceBug
+        ? "修复前：缺失顶点色被相乘"
+        : "修复后：保留实例色";
+      card.append(title, renderer.domElement);
+      document.querySelector("main").append(card);
+      mode.dispose();
+      const restored =
+        visibleLight.visible &&
+        !hiddenLight.visible &&
+        mesh.material === baseMaterial &&
+        scene.background === null &&
+        renderer.toneMapping === originalToneMapping &&
+        !renderer.shadowMap.enabled &&
+        renderer.shadowMap.type === originalShadowType &&
+        renderer.shadowMap.autoUpdate &&
+        !mesh.castShadow &&
+        !mesh.receiveShadow &&
+        !scene.getObjectByName("offline-voxel-twilight-lighting");
+      mesh.geometry.dispose();
+      baseMaterial.dispose();
+      renderer.dispose();
+      return { rgb: Array.from(pixel.slice(0, 3)), isolated, restored };
+    }
+    try {
+      const before = renderSample(true);
+      const after = renderSample(false);
+      const passed =
+        after.rgb.reduce((a, b) => a + b, 0) >
+          before.rgb.reduce((a, b) => a + b, 0) + 150 &&
+        before.isolated &&
+        after.isolated &&
+        before.restored &&
+        after.restored;
+      document.querySelector("#result").textContent = JSON.stringify(
+        { passed, before, after },
+        null,
+        2,
+      );
+      document.title = passed ? "PASS：离线体素渲染" : "FAIL：离线体素渲染";
+    } catch (error) {
+      document.querySelector("#result").textContent = String(
+        error.stack || error,
+      );
+      document.title = "FAIL：离线体素渲染";
+    }
+  </script>
+</html>

@@ -1,9 +1,8 @@
+// 功能说明：平台四模块与公共 ROS、文件服务的类型化客户端。
 import type {
   BrowseDialogPayload,
   ToolDefinition,
   ToolRunResponse,
-  PreferencesPayload,
-  SystemInfoResponse,
   RosDataSourceConfig,
   RosInspectionResponse,
   RosRuntimeParamsResponse,
@@ -30,13 +29,16 @@ export async function fetchTools(): Promise<ToolDefinition[]> {
   return response.json();
 }
 
-export async function runTool(toolKey: string, values: Record<string, string>): Promise<ToolRunResponse> {
+export async function runTool(
+  toolKey: string,
+  values: Record<string, string>,
+): Promise<ToolRunResponse> {
   const response = await fetch(`${API_BASE}/tools/${toolKey}/run`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
     },
-    body: JSON.stringify({ values })
+    body: JSON.stringify({ values }),
   });
   if (!response.ok) {
     let detail = "Failed to run tool";
@@ -51,22 +53,6 @@ export async function runTool(toolKey: string, values: Record<string, string>): 
   return response.json();
 }
 
-export async function fetchPreferences(): Promise<PreferencesPayload> {
-  const response = await fetch(`${API_BASE}/preferences`);
-  if (!response.ok) {
-    throw new Error("Failed to load preferences");
-  }
-  return response.json();
-}
-
-export async function fetchSystemInfo(): Promise<SystemInfoResponse> {
-  const response = await fetch(`${API_BASE}/system/info`);
-  if (!response.ok) {
-    throw new Error("Failed to load system info");
-  }
-  return response.json();
-}
-
 export async function fetchRosDataSourceConfig(): Promise<RosDataSourceConfig> {
   const response = await fetch(`${API_BASE}/ros/data-source`);
   if (!response.ok) {
@@ -75,13 +61,15 @@ export async function fetchRosDataSourceConfig(): Promise<RosDataSourceConfig> {
   return response.json();
 }
 
-export async function saveRosDataSourceConfig(payload: RosDataSourceConfig): Promise<RosDataSourceConfig> {
+export async function saveRosDataSourceConfig(
+  payload: RosDataSourceConfig,
+): Promise<RosDataSourceConfig> {
   const response = await fetch(`${API_BASE}/ros/data-source`, {
     method: "PUT",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
   });
   if (!response.ok) {
     throw new Error("Failed to save ROS data source config");
@@ -89,13 +77,15 @@ export async function saveRosDataSourceConfig(payload: RosDataSourceConfig): Pro
   return response.json();
 }
 
-export async function inspectRosDataSource(payload: RosDataSourceConfig): Promise<RosInspectionResponse> {
+export async function inspectRosDataSource(
+  payload: RosDataSourceConfig,
+): Promise<RosInspectionResponse> {
   const response = await fetch(`${API_BASE}/ros/data-source/inspect`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
   });
   if (!response.ok) {
     let detail = "Failed to inspect ROS data source";
@@ -110,13 +100,15 @@ export async function inspectRosDataSource(payload: RosDataSourceConfig): Promis
   return response.json();
 }
 
-export async function fetchRosTopics(payload: RosDataSourceConfig): Promise<RosTopicListResponse> {
+export async function fetchRosTopics(
+  payload: RosDataSourceConfig,
+): Promise<RosTopicListResponse> {
   const response = await fetch(`${API_BASE}/ros/topics`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
   });
   if (!response.ok) {
     let detail = "Failed to load ROS topics";
@@ -131,13 +123,15 @@ export async function fetchRosTopics(payload: RosDataSourceConfig): Promise<RosT
   return response.json();
 }
 
-export async function fetchRosRuntimeParams(payload: RosDataSourceConfig): Promise<RosRuntimeParamsResponse> {
+export async function fetchRosRuntimeParams(
+  payload: RosDataSourceConfig,
+): Promise<RosRuntimeParamsResponse> {
   const response = await fetch(`${API_BASE}/ros/runtime-params`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
   });
   if (!response.ok) {
     let detail = "Failed to load ROS runtime params";
@@ -152,27 +146,15 @@ export async function fetchRosRuntimeParams(payload: RosDataSourceConfig): Promi
   return response.json();
 }
 
-export async function savePreferences(payload: PreferencesPayload): Promise<PreferencesPayload> {
-  const response = await fetch(`${API_BASE}/preferences`, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(payload)
-  });
-  if (!response.ok) {
-    throw new Error("Failed to save preferences");
-  }
-  return response.json();
-}
-
-export async function browsePath(payload: BrowseDialogPayload): Promise<string> {
+export async function browsePath(
+  payload: BrowseDialogPayload,
+): Promise<string> {
   const response = await fetch(`${API_BASE}/dialogs/browse`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
   });
   if (!response.ok) {
     throw new Error("Failed to open browse dialog");
@@ -185,9 +167,9 @@ export async function openLocalPath(path: string): Promise<void> {
   const response = await fetch(`${API_BASE}/dialogs/open-path`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
     },
-    body: JSON.stringify({ path })
+    body: JSON.stringify({ path }),
   });
   if (!response.ok) {
     let detail = "Failed to open path";
@@ -209,13 +191,15 @@ export async function fetchNavRecordingFiles(): Promise<NavRecordingFileListResp
   return response.json();
 }
 
-export async function saveNavRecording(payload: NavRecordingSavePayload): Promise<NavRecordingFileListResponse> {
+export async function saveNavRecording(
+  payload: NavRecordingSavePayload,
+): Promise<NavRecordingFileListResponse> {
   const response = await fetch(`${API_BASE}/nav-recordings`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
   });
   if (!response.ok) {
     let detail = "Failed to save nav recording";
@@ -230,13 +214,15 @@ export async function saveNavRecording(payload: NavRecordingSavePayload): Promis
   return response.json();
 }
 
-export async function deleteNavRecording(path: string): Promise<NavRecordingFileListResponse> {
+export async function deleteNavRecording(
+  path: string,
+): Promise<NavRecordingFileListResponse> {
   const response = await fetch(`${API_BASE}/nav-recordings`, {
     method: "DELETE",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
     },
-    body: JSON.stringify({ path })
+    body: JSON.stringify({ path }),
   });
   if (!response.ok) {
     let detail = "Failed to delete nav recording";
@@ -279,12 +265,17 @@ export interface TilePreviewResponse {
   estimated_tiles: number;
 }
 
-export async function fetchPcdTilePreview(path: string, tileSize: string): Promise<TilePreviewResponse> {
+export async function fetchPcdTilePreview(
+  path: string,
+  tileSize: string,
+): Promise<TilePreviewResponse> {
   const query = new URLSearchParams({
     path,
-    tile_size: tileSize || "20.0"
+    tile_size: tileSize || "20.0",
   });
-  const response = await fetch(`${API_BASE}/tools/pcd_tile/preview?${query.toString()}`);
+  const response = await fetch(
+    `${API_BASE}/tools/pcd_tile/preview?${query.toString()}`,
+  );
   if (!response.ok) {
     throw new Error("Failed to preview pcd tile");
   }
@@ -374,6 +365,123 @@ export interface NavOfflineMapRaycastResponse {
   message: string;
 }
 
+export interface ImuCalibrationTopicInfo {
+  id: number;
+  name: string;
+  type: string;
+  serialization_format: string;
+  message_count: number;
+  start_ns: number;
+  end_ns: number;
+  duration_s: number;
+  frequency_hz: number;
+  supported: boolean;
+}
+
+export interface ImuCalibrationInspectResponse {
+  path: string;
+  status: string;
+  message: string;
+  topics: ImuCalibrationTopicInfo[];
+}
+
+export interface ImuCalibrationAllanPoint {
+  tau: number;
+  adev: number;
+}
+
+export interface ImuCalibrationAxisEstimate {
+  noise_density: number;
+  bias_instability: number;
+  random_walk: number;
+}
+
+export interface ImuCalibrationAxisStats {
+  mean: number;
+  std: number;
+  min: number;
+  max: number;
+}
+
+export interface ImuCalibrationGroup {
+  series: Record<"x" | "y" | "z", ImuCalibrationAllanPoint[]>;
+  estimates: Record<"x" | "y" | "z", ImuCalibrationAxisEstimate>;
+  stats: Record<"x" | "y" | "z", ImuCalibrationAxisStats>;
+}
+
+export interface ImuCalibrationAnalyzeResponse {
+  status: string;
+  message: string;
+  bag_path: string;
+  topic: {
+    id: number;
+    name: string;
+    type: string;
+    serialization_format: string;
+    message_count: number;
+    frame_id: string;
+  };
+  sample: {
+    count: number;
+    duration_s: number;
+    sample_dt_s: number;
+    sample_hz: number;
+    stride: number;
+    start_offset_s: number;
+  };
+  allan: {
+    gyro: ImuCalibrationGroup;
+    accel: ImuCalibrationGroup;
+  };
+  preview: {
+    columns: string[];
+    series: number[][];
+  };
+}
+
+export async function inspectImuCalibrationBag(
+  path: string,
+): Promise<ImuCalibrationInspectResponse> {
+  const query = new URLSearchParams({ path });
+  const response = await fetch(
+    `${API_BASE}/tools/imu_calibration/inspect?${query.toString()}`,
+  );
+  if (!response.ok) {
+    let detail = "Failed to inspect IMU bag";
+    try {
+      const data = await response.json();
+      detail = data.detail ?? detail;
+    } catch {
+      // Keep fallback message.
+    }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+export async function analyzeImuCalibrationBag(
+  payload: Record<string, string>,
+): Promise<ImuCalibrationAnalyzeResponse> {
+  const response = await fetch(`${API_BASE}/tools/imu_calibration/analyze`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    let detail = "Failed to analyze IMU bag";
+    try {
+      const data = await response.json();
+      detail = data.detail ?? detail;
+    } catch {
+      // Keep fallback message.
+    }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
 export async function fetchRosNavOfflineMapPreview(
   pcdPath: string,
   mapYamlPath: string,
@@ -381,7 +489,7 @@ export async function fetchRosNavOfflineMapPreview(
   voxelLeafM = "0.20",
   occupancyVoxelM = "0.30",
   maxPoints = "60000",
-  maxVoxels = "60000"
+  maxVoxels = "60000",
 ): Promise<NavOfflineMapPreviewResponse> {
   const query = new URLSearchParams({
     pcd_path: pcdPath,
@@ -390,9 +498,11 @@ export async function fetchRosNavOfflineMapPreview(
     voxel_leaf_m: voxelLeafM || "0.20",
     occupancy_voxel_m: occupancyVoxelM || "0.30",
     max_points: maxPoints || "60000",
-    max_voxels: maxVoxels || "60000"
+    max_voxels: maxVoxels || "60000",
   });
-  const response = await fetch(`${API_BASE}/tools/ros_nav_test/offline-map-preview?${query.toString()}`);
+  const response = await fetch(
+    `${API_BASE}/tools/ros_nav_test/offline-map-preview?${query.toString()}`,
+  );
   if (!response.ok) {
     let detail = `离线地图预览请求失败: HTTP ${response.status}`;
     try {
@@ -418,13 +528,16 @@ export async function raycastRosNavOfflineMap(payload: {
   clip_bounds?: Record<string, number>;
   use_visible_voxels?: boolean;
 }): Promise<NavOfflineMapRaycastResponse> {
-  const response = await fetch(`${API_BASE}/tools/ros_nav_test/offline-map-raycast`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
+  const response = await fetch(
+    `${API_BASE}/tools/ros_nav_test/offline-map-raycast`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
     },
-    body: JSON.stringify(payload)
-  });
+  );
   if (!response.ok) {
     let detail = "Failed to raycast offline map";
     try {
@@ -468,12 +581,17 @@ export interface GlobalRelocalizationFinalExportResponse {
   sector_key_shape: number[];
 }
 
-export async function fetchGlobalRelocalizationPcdPreview(path: string, maxPoints = 90000): Promise<GlobalRelocalizationPcdPreviewResponse> {
+export async function fetchGlobalRelocalizationPcdPreview(
+  path: string,
+  maxPoints = 90000,
+): Promise<GlobalRelocalizationPcdPreviewResponse> {
   const query = new URLSearchParams({
     path,
-    max_points: String(maxPoints)
+    max_points: String(maxPoints),
   });
-  const response = await fetch(`${API_BASE}/tools/global_relocalization_candidates/pcd-preview?${query.toString()}`);
+  const response = await fetch(
+    `${API_BASE}/tools/global_relocalization_candidates/pcd-preview?${query.toString()}`,
+  );
   if (!response.ok) {
     let detail = "Failed to load PCD preview";
     try {
@@ -487,9 +605,13 @@ export async function fetchGlobalRelocalizationPcdPreview(path: string, maxPoint
   return response.json();
 }
 
-export async function fetchGlobalRelocalizationCandidates(path: string): Promise<GlobalRelocalizationCandidatesResponse> {
+export async function fetchGlobalRelocalizationCandidates(
+  path: string,
+): Promise<GlobalRelocalizationCandidatesResponse> {
   const query = new URLSearchParams({ path });
-  const response = await fetch(`${API_BASE}/tools/global_relocalization_candidates/candidates?${query.toString()}`);
+  const response = await fetch(
+    `${API_BASE}/tools/global_relocalization_candidates/candidates?${query.toString()}`,
+  );
   if (!response.ok) {
     let detail = "Failed to load candidates";
     try {
@@ -503,187 +625,21 @@ export async function fetchGlobalRelocalizationCandidates(path: string): Promise
   return response.json();
 }
 
-export async function exportGlobalRelocalizationManual(payload: Record<string, unknown>): Promise<GlobalRelocalizationManualExportResponse> {
-  const response = await fetch(`${API_BASE}/tools/global_relocalization_candidates/manual-export`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
+export async function exportGlobalRelocalizationManual(
+  payload: Record<string, unknown>,
+): Promise<GlobalRelocalizationManualExportResponse> {
+  const response = await fetch(
+    `${API_BASE}/tools/global_relocalization_candidates/manual-export`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
     },
-    body: JSON.stringify(payload)
-  });
+  );
   if (!response.ok) {
     let detail = "Failed to export manual candidates";
-    try {
-      const data = await response.json();
-      detail = data.detail ?? detail;
-    } catch {
-      // Keep fallback message.
-    }
-    throw new Error(detail);
-  }
-  return response.json();
-}
-
-export async function exportGlobalRelocalizationFinal(payload: Record<string, unknown>): Promise<GlobalRelocalizationFinalExportResponse> {
-  const response = await fetch(`${API_BASE}/tools/global_relocalization_candidates/final-export`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(payload)
-  });
-  if (!response.ok) {
-    let detail = "Failed to export reviewed candidates";
-    try {
-      const data = await response.json();
-      detail = data.detail ?? detail;
-    } catch {
-      // Keep fallback message.
-    }
-    throw new Error(detail);
-  }
-  return response.json();
-}
-
-export interface MtslashCaptchaResponse {
-  session_id: string;
-  captcha_image: string;
-  message: string;
-}
-
-export async function fetchMtslashCaptcha(): Promise<MtslashCaptchaResponse> {
-  const response = await fetch(`${API_BASE}/tools/mtslash_export/login-captcha`, {
-    method: "POST"
-  });
-  if (!response.ok) {
-    let detail = "Failed to fetch captcha";
-    try {
-      const data = await response.json();
-      detail = data.detail ?? detail;
-    } catch {
-      // Keep fallback message.
-    }
-    throw new Error(detail);
-  }
-  return response.json();
-}
-
-export interface MtslashLoginResponse {
-  status: string;
-  message: string;
-  session_id: string;
-}
-
-export async function loginMtslash(values: Record<string, string>): Promise<MtslashLoginResponse> {
-  const response = await fetch(`${API_BASE}/tools/mtslash_export/login`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(values)
-  });
-  if (!response.ok) {
-    let detail = "Failed to login";
-    try {
-      const data = await response.json();
-      detail = data.detail ?? detail;
-    } catch {
-      // Keep fallback message.
-    }
-    throw new Error(detail);
-  }
-  return response.json();
-}
-
-export interface MtslashFavoriteItem {
-  title: string;
-  url: string;
-}
-
-export interface MtslashFavoritesResponse {
-  status: string;
-  page_count: number;
-  items: MtslashFavoriteItem[];
-}
-
-export async function fetchMtslashFavorites(sessionId: string): Promise<MtslashFavoritesResponse> {
-  const query = new URLSearchParams({
-    session_id: sessionId,
-    max_pages: "200"
-  });
-  const response = await fetch(`${API_BASE}/tools/mtslash_export/favorites?${query.toString()}`);
-  if (!response.ok) {
-    let detail = "Failed to fetch favorites";
-    try {
-      const data = await response.json();
-      detail = data.detail ?? detail;
-    } catch {
-      // Keep fallback message.
-    }
-    throw new Error(detail);
-  }
-  return response.json();
-}
-
-export async function fetchMtslashBrowserFavorites(browser: string): Promise<MtslashFavoritesResponse> {
-  const query = new URLSearchParams({
-    browser,
-    max_pages: "200"
-  });
-  const response = await fetch(`${API_BASE}/tools/mtslash_export/browser/favorites?${query.toString()}`);
-  if (!response.ok) {
-    let detail = "Failed to fetch browser favorites";
-    try {
-      const data = await response.json();
-      detail = data.detail ?? detail;
-    } catch {
-      // Keep fallback message.
-    }
-    throw new Error(detail);
-  }
-  return response.json();
-}
-
-export interface MtslashBrowserTab {
-  id: string;
-  title: string;
-  url: string;
-}
-
-export interface MtslashBrowserResponse {
-  status: string;
-  browser?: string;
-  port?: number;
-  message?: string;
-  items?: MtslashBrowserTab[];
-}
-
-export async function startMtslashBrowser(browser: string): Promise<MtslashBrowserResponse> {
-  const response = await fetch(`${API_BASE}/tools/mtslash_export/browser/start`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({ browser })
-  });
-  if (!response.ok) {
-    let detail = "Failed to start browser mode";
-    try {
-      const data = await response.json();
-      detail = data.detail ?? detail;
-    } catch {
-      // Keep fallback message.
-    }
-    throw new Error(detail);
-  }
-  return response.json();
-}
-
-export async function fetchMtslashBrowserTabs(browser: string): Promise<MtslashBrowserResponse> {
-  const query = new URLSearchParams({ browser });
-  const response = await fetch(`${API_BASE}/tools/mtslash_export/browser/tabs?${query.toString()}`);
-  if (!response.ok) {
-    let detail = "Failed to load browser tabs";
     try {
       const data = await response.json();
       detail = data.detail ?? detail;

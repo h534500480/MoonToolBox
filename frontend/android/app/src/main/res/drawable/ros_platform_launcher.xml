@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 功能说明：当前 ROS Platform Android 包专用启动图标，避免与 ros_android 分支应用混淆。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#E9E4D6"
+        android:pathData="M0,0h108v108h-108z" />
+    <path
+        android:fillColor="#DAD2BF"
+        android:pathData="M0,0h108v108h-108z"
+        android:fillAlpha="0.38" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M18,18h72v72h-72z"
+        android:strokeColor="#66FFFFFF"
+        android:strokeWidth="2" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M30,18L30,90M42,18L42,90M54,18L54,90M66,18L66,90M78,18L78,90M18,30L90,30M18,42L90,42M18,54L90,54M18,66L90,66M18,78L90,78"
+        android:strokeColor="#40AFA58D"
+        android:strokeWidth="1.25" />
+    <path
+        android:fillColor="#0EA5A4"
+        android:pathData="M54,17a37,37 0,1 0,0.1 0M54,24a30,30 0,1 1,-0.1 0z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,34a20,20 0,1 0,0.1 0M54,41a13,13 0,1 1,-0.1 0z" />
+    <path
+        android:fillColor="#0EA5A4"
+        android:pathData="M54,46a8,8 0,1 0,0.1 0M54,50a4,4 0,1 1,-0.1 0z" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54,10L54,32M54,76L54,98M10,54L32,54M76,54L98,54"
+        android:strokeColor="#0A6F75"
+        android:strokeLineCap="round"
+        android:strokeWidth="5" />
+    <path
+        android:fillColor="#F59E42"
+        android:pathData="M78,23l8,14l-16,0z" />
+    <path
+        android:fillColor="#F59E42"
+        android:pathData="M30,71l8,14l-16,0z" />
+</vector>

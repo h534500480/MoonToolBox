@@ -1,58 +1,25 @@
-# Web 架构说明
+# 四模块对应与验证边界
 
-当前主线已经切到：
+| 页面 | 控制层 | 实际业务 |
+| --- | --- | --- |
+| / | NavigationWorkspace / useNavigationController | 共享 rosbridge、TF/PointCloud2/Map/Path/Marker/Bspline、初始位姿、导航目标/暂停/恢复/取消、延迟、参数、录制 |
+| /tools/pcd-map | MappingPage | pcd_map/run → pcd_map_cli → PGM/YAML/PNG |
+| /tools/pcd-tile | MappingPage | 预扫描、pcd_tile/run → pcd_tile_cli → 切片/metadata |
+| /tools/global-relocalization | RelocalizationWorkspace / useRelocalizationController | PCD/候选点读取、人工 YAML/审核 CSV、C++ 真实 candidates/descriptors/ring_keys/sector_keys |
 
-- `frontend/`
-  Vue + Vite 前端
-- `backend/`
-  FastAPI 服务层
-- `cpp/`
-  C++ 核心和 CLI
+候选编辑包含锁定、删除区域、回收站和历史。加载真实文件清除演示历史；全部删除后禁止将空审核误判为自动重采样。质量过滤和导出格式沿用原算法。
 
-## 当前职责
+主视图保留原有点云解析、体素裁剪、地面法线和初始位姿操作。电量读取 /battery，速度读取 /odometry/filtered，消息超时显示未知。不同话题名称可使用通用监控卡。
 
-- `frontend`
-  负责页面、参数录入、工具切换、分区、收藏、日志展示
-- `backend`
-  负责工具目录、偏好设置、任务入口、调用 C++ CLI
-- `cpp`
-  负责重计算逻辑
+平台的 React/Next/R3F 页面移植到 Vue/原生 Three.js，以复用原 ROS 适配器和控制链路。布局、材质、模型和交互参考 platform，业务使用 ros_tool。
 
-## 当前状态
+## 已验证
 
-- `pcd -> pgm`
-  已接通 `frontend -> backend -> pcd_map_cli.exe`
-- `pcd slicing`
-  前后端页面和接口骨架已存在，CLI 还未完全接通
-- `ip check`
-  前后端页面和接口骨架已存在
-- `bag replay`
-  已接通 `frontend -> backend -> costmap_cli.exe`
-- `MTSlash 导出`
-  已接通账号登录、收藏夹读取、浏览器模式标签页读取和单帖 TXT 导出
+- Vue 严格类型检查、Vite 生产构建、四 CLI Windows Release 编译。
+- 四项 HTTP/C++ 集成回归：仅四模块、移除模块 404、子页面刷新、地图/切片文件、离线体素/射线、真实候选描述子。
+- 浏览器对照首页、地图和候选点页；真实地图生成/预览、候选点导入、拖动保持 Z、撤销、锁定保护和最终导出。
+- 本地 rosbridge 替身：场景接管、TF 驱动模型、PointCloud2、真实电量/速度、话题复选与监控。
 
-## 工具分区与收藏
+## 尚未验证
 
-前端左侧导航已支持：
-
-- 默认分区：`Favorites / Mapping / Network / Perception / Other`
-- 自定义分区
-- 拖拽工具到分区标题进行归类
-- 星标收藏到 `Favorites`
-
-偏好设置通过后端接口持久化：
-
-- `GET /api/preferences`
-- `PUT /api/preferences`
-
-存储文件：
-
-- `backend/data/tool_preferences.json`
-
-## 下一步
-
-继续沿 `frontend -> backend -> cpp` 的方向收敛旧 Python GUI 能力：
-
-- 将仍在 `src/ros_tool_suite/tools/` 中维护的旧桌面逻辑逐步下沉到后端或 C++ CLI
-- 把体积较大的前端工具页面拆成职责更清晰的组件
-- 为 MTSlash 这类依赖外部页面结构的模块补充诊断说明和失败样例记录
+真实机器人的服务/action 名称、自定义消息版本、实际导航运动、现场网络重连、长时间录制、超大点云帧率和安装包发布。协议替身及合成点云不能代替现场验证。

@@ -23,27 +23,10 @@ export interface ToolRunResponse {
   data?: Record<string, any>;
 }
 
-export interface ToolSection {
-  key: string;
-  label: string;
-}
-
-export interface PreferencesPayload {
-  sections: ToolSection[];
-  section_assignments: Record<string, string>;
-  favorite_keys: string[];
-}
-
 export interface BrowseDialogPayload {
   mode: "open_file" | "open_dir" | "save_file";
   title: string;
   initial_path: string;
-}
-
-export interface SystemInfoResponse {
-  local_ip: string;
-  subnet_prefix: string;
-  app_root: string;
 }
 
 export interface RosDataSourceConfig {

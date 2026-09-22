@@ -1,3 +1,4 @@
+"""功能说明：四模块保留的 C++ 调用与真实文件生成。"""
 from pathlib import Path
 import subprocess
 from datetime import datetime
@@ -15,8 +16,6 @@ ROOT_DIR = Path(__file__).resolve().parents[3]
 CPP_BUILD_DIR = ROOT_DIR / "cpp" / "build"
 PCD_MAP_CLI = CPP_BUILD_DIR / "pcd_map_cli.exe"
 PCD_TILE_CLI = CPP_BUILD_DIR / "pcd_tile_cli.exe"
-NETWORK_SCAN_CLI = CPP_BUILD_DIR / "network_scan_cli.exe"
-COSTMAP_CLI = CPP_BUILD_DIR / "costmap_cli.exe"
 GLOBAL_RELOCALIZATION_CLI = CPP_BUILD_DIR / "global_relocalization_cli.exe"
 
 
@@ -230,7 +229,7 @@ def run_pcd_tile(values: Dict[str, str]) -> ToolRunResponse:
         f"切片任务已执行：metadata={parsed.get('metadata_path', 'unknown')} | "
         f"tile_count={parsed.get('tile_count', '0')}"
     )
-    return ToolRunResponse(tool="pcd_tile", status="success", summary=summary, logs=logs)
+    return ToolRunResponse(tool="pcd_tile", status="success", summary=summary, logs=logs, data={**parsed, "output_dir": output_dir})
 
 
 def run_global_relocalization_candidates(values: Dict[str, str]) -> ToolRunResponse:
@@ -242,8 +241,10 @@ def run_global_relocalization_candidates(values: Dict[str, str]) -> ToolRunRespo
     if values.get("config_json", "").strip():
         try:
             config = json.loads(values["config_json"])
-        except json.JSONDecodeError:
-            config = {}
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="离线配置 JSON 格式错误") from exc
+        if not isinstance(config, dict):
+            raise HTTPException(status_code=400, detail="离线配置必须为对象")
     runtime_config_path = _write_runtime_global_reloc_config(output_dir, config)
     config_path = values.get("config_path", "").strip() or runtime_config_path
     input_pcd = values.get("input_pcd", "").strip()
@@ -330,69 +331,3 @@ def run_global_relocalization_candidates(values: Dict[str, str]) -> ToolRunRespo
 
     command.extend(_global_reloc_option_args(values))
     return _run_global_reloc_command(command)
-
-
-def run_network_scan(values: Dict[str, str]) -> ToolRunResponse:
-    if not NETWORK_SCAN_CLI.exists():
-        raise HTTPException(status_code=500, detail=f"C++ CLI not found: {NETWORK_SCAN_CLI}")
-
-    prefix = values.get("prefix", "").strip() or "192.168.1"
-    start = values.get("start", "").strip() or "1"
-    end = values.get("end", "").strip() or "32"
-    timeout_ms = values.get("timeout_ms", "").strip() or "400"
-
-    command = [
-        str(NETWORK_SCAN_CLI),
-        "--prefix",
-        prefix,
-        "--start",
-        start,
-        "--end",
-        end,
-        "--timeout-ms",
-        timeout_ms,
-    ]
-
-    completed, logs, stdout_lines, _ = _run_command("network_scan", command)
-    if completed.returncode != 0:
-        return ToolRunResponse(tool="network_scan", status="error", summary="网络扫描失败。", logs=logs)
-
-    device_lines = [line for line in stdout_lines if " | " in line]
-    summary = f"扫描完成：发现 {len(device_lines)} 条结果。"
-    return ToolRunResponse(tool="network_scan", status="success", summary=summary, logs=logs)
-
-
-def run_costmap(values: Dict[str, str]) -> ToolRunResponse:
-    if not COSTMAP_CLI.exists():
-        raise HTTPException(status_code=500, detail=f"C++ CLI not found: {COSTMAP_CLI}")
-
-    yaml_path = values.get("yaml_path", "").strip()
-    if not yaml_path:
-        raise HTTPException(status_code=400, detail="缺少输入 YAML")
-    input_path = Path(yaml_path)
-    if not input_path.exists():
-        raise HTTPException(status_code=400, detail=f"输入 YAML 不存在: {yaml_path}")
-
-    output_dir = values.get("output_dir", "").strip() or str(ROOT_DIR / "output_costmap")
-    command = [
-        str(COSTMAP_CLI),
-        "--yaml",
-        str(input_path),
-        "--output-dir",
-        output_dir,
-    ]
-
-    if values.get("fps", "").strip():
-        command.extend(["--fps", values["fps"].strip()])
-    if values.get("export_gif", "").strip().lower() in {"0", "false", "no", "n"}:
-        command.append("--no-gif")
-
-    completed, logs, _, parsed = _run_command("costmap", command)
-    if completed.returncode != 0:
-        return ToolRunResponse(tool="costmap", status="error", summary="Costmap 处理失败。", logs=logs)
-
-    summary = (
-        f"处理完成：summary={parsed.get('summary_path', 'unknown')} | "
-        f"frame_count={parsed.get('frame_count', '0')}"
-    )
-    return ToolRunResponse(tool="costmap", status="success", summary=summary, logs=logs)

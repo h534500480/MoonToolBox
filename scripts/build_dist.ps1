@@ -150,7 +150,7 @@ if ($LASTEXITCODE -ne 0) {
   throw ".venv is missing runtime Python dependencies. Run .\scripts\install_local.cmd and fix any pip errors first."
 }
 
-$RequiredExes = @("pcd_map_cli.exe", "pcd_tile_cli.exe", "global_relocalization_cli.exe", "nav_pcd_preview_cli.exe", "network_scan_cli.exe", "costmap_cli.exe")
+$RequiredExes = @("pcd_map_cli.exe", "pcd_tile_cli.exe", "global_relocalization_cli.exe", "nav_pcd_preview_cli.exe")
 foreach ($ExeName in $RequiredExes) {
   Require-Path (Join-Path "cpp\build" $ExeName) "Run .\scripts\install_local.cmd first."
 }
@@ -182,8 +182,6 @@ Copy-Item "scripts\start_local.vbs" (Join-Path $StageDir "scripts") -Force
 Copy-Item "scripts\stop_local.ps1" (Join-Path $StageDir "scripts") -Force
 Copy-Item "scripts\stop_local.cmd" (Join-Path $StageDir "scripts") -Force
 Copy-Item "scripts\tray_launcher.py" (Join-Path $StageDir "scripts") -Force
-Copy-Item "scripts\diagnose_mtslash.py" (Join-Path $StageDir "scripts") -Force
-Copy-Item "scripts\diagnose_mtslash.cmd" (Join-Path $StageDir "scripts") -Force
 if (Test-Path "assets\icons\runtime\setup.ico") {
   Copy-Item "assets\icons\runtime\setup.ico" (Join-Path $StageDir "MoonToolBox.ico") -Force
   Copy-Item "assets\icons\runtime\setup.ico" (Join-Path $ReleaseRoot "MoonToolBoxSetup.ico") -Force

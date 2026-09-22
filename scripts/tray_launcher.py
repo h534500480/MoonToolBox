@@ -22,7 +22,7 @@ import pystray
 from PIL import Image, ImageDraw
 
 
-BACKEND_URL = "http://127.0.0.1:8000"
+BACKEND_URL = "http://127.0.0.1:8100"
 HEALTH_URL = f"{BACKEND_URL}/api/health"
 HEALTH_TIMEOUT_SECONDS = 1.0
 READY_RETRY_INTERVAL_SECONDS = 0.5

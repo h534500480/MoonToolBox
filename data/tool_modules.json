@@ -3,8 +3,7 @@
     "pcd_map": true,
     "pcd_tile": true,
     "global_relocalization_candidates": true,
-    "network_scan": true,
-    "costmap": true,
-    "mtslash_export": false
+    "ros_nav_test": true,
+    "imu_calibration": true
   }
 }
