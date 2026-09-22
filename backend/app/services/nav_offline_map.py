@@ -11,8 +11,9 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 import yaml
 
 
-ROOT_DIR = Path(__file__).resolve().parents[3]
-CPP_BUILD_DIR = ROOT_DIR / "cpp" / "build"
+from app.paths import DATA_ROOT, CPP_BUILD_DIR
+
+ROOT_DIR = DATA_ROOT
 NAV_PCD_PREVIEW_CLI = CPP_BUILD_DIR / "nav_pcd_preview_cli.exe"
 
 
@@ -249,6 +250,7 @@ def _run_nav_pcd_preview(path: str, voxel_leaf_m: float, max_points: int) -> Dic
         command,
         cwd=str(ROOT_DIR),
         capture_output=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         text=True,
         encoding="utf-8",
         errors="replace",

@@ -1,0 +1,386 @@
+/* 功能说明：手机与高分辨率横屏预设共享安全区域，内部滚动替代面板裁切。 */
+html[data-interaction="touch"] button {
+  min-height: 36px;
+}
+html[data-compact="true"] .navigation-workspace,
+html[data-compact="true"] .relocalization-workspace {
+  min-height: 0;
+  height: 100dvh;
+}
+html[data-compact="true"] .task-details > header {
+  position: sticky;
+  top: -12px;
+  z-index: 2;
+  background: #ece8dd;
+}
+html[data-compact="true"] .platform-top-left {
+  top: 8px;
+  left: 10px;
+  gap: 4px;
+}
+html[data-compact="true"] .status-hud {
+  padding: 4px 7px;
+  gap: 5px;
+}
+html[data-compact="true"] .status-hud .hud-icon {
+  display: none;
+}
+html[data-compact="true"] .status-hud strong {
+  font-size: 10px;
+}
+html[data-compact="true"] .status-hud small {
+  font-size: 9px;
+}
+html[data-compact="true"] .navigation-task-ui.has-selection .task-sidebar {
+  display: none;
+}
+html[data-compact="true"] .task-sidebar,
+html[data-compact="true"] .task-details {
+  top: 88px;
+  bottom: 70px;
+  max-height: none;
+  width: min(310px, calc(100vw - 24px));
+}
+html[data-compact="true"] .task-details {
+  right: 12px;
+}
+html[data-compact="true"] .task-sidebar {
+  left: 12px;
+}
+html[data-compact="true"] .task-controls {
+  bottom: 10px;
+  left: 12px;
+  max-width: calc(100vw - 24px);
+  transform: none;
+}
+html[data-compact="true"] .task-execution {
+  bottom: 65px;
+  left: 12px;
+  max-width: 230px;
+  transform: none;
+}
+html[data-compact="true"] .task-connection {
+  left: 12px;
+  bottom: 65px;
+  transform: none;
+  max-width: 230px;
+}
+html[data-compact="true"] .task-create-dialog {
+  max-height: calc(100dvh - 24px);
+  overflow: auto;
+}
+html[data-compact="true"] .glass-drawer {
+  max-height: calc(100dvh - 24px);
+  top: 12px;
+  bottom: 12px;
+  width: min(420px, calc(100vw - 24px));
+}
+html[data-compact="true"] .pose-widget {
+  bottom: 10px;
+  right: 12px;
+  max-width: 210px;
+  height: 58px;
+  padding: 6px 8px;
+  box-sizing: border-box;
+  overflow: auto;
+}
+html[data-compact="true"] .pose-widget header {
+  font-size: 10px;
+}
+html[data-compact="true"] .pose-widget pre {
+  margin: 4px 0 0;
+  font-size: 9px;
+  max-height: 26px;
+  overflow: auto;
+}
+html[data-compact="true"] .pose-values {
+  margin-top: 4px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+}
+html[data-compact="true"] .pose-values > span {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+html[data-compact="true"] .pose-values b {
+  font-size: 9px;
+}
+html[data-compact="true"] .platform-bottom-left {
+  top: 14px;
+  right: 70px;
+  bottom: auto;
+  left: auto;
+}
+html[data-compact="true"] .platform-bottom-left > span {
+  display: none;
+}
+html[data-compact="true"] .workspace-mode-switch {
+  top: 18px;
+}
+html[data-compact="true"] .workspace-mode-switch button {
+  padding: 7px 12px;
+}
+html[data-compact="true"] .task-point-actions button {
+  width: 34px;
+  min-width: 34px;
+  height: 36px;
+}
+html[data-compact="true"] .task-number {
+  touch-action: none;
+  min-width: 28px;
+  min-height: 32px;
+  cursor: grab;
+}
+html[data-editing-input="true"] .task-message {
+  visibility: hidden;
+}
+@media (max-width: 650px) {
+  html[data-compact="true"] .pose-widget {
+    bottom: 65px;
+  }
+  html[data-compact="true"] .workspace-mode-switch {
+    top: 82px;
+  }
+  html[data-compact="true"] .task-sidebar,
+  html[data-compact="true"] .task-details {
+    top: 128px;
+    bottom: 132px;
+  }
+}
+
+/* 所有移动预设共用区域边界，物理像素不直接作为 CSS 尺寸。 */
+html[data-compact="true"] {
+  --mobile-panel-width: min(288px, 32vw);
+  --mobile-panel-top: 96px;
+  --mobile-panel-bottom: 122px;
+  --mobile-gap: 12px;
+}
+html[data-layout="wide-3200"] {
+  --mobile-panel-width: clamp(210px, 26vw, 280px);
+  --mobile-panel-top: 96px;
+  --mobile-panel-bottom: 120px;
+}
+html[data-compact="true"] .launcher-grid {
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  padding: 8px;
+}
+html[data-compact="true"] .launcher-button small {
+  display: none;
+}
+html[data-compact="true"] .launcher-button strong {
+  font-size: 16px;
+}
+html[data-compact="true"] .status-hud small {
+  margin-top: 2px;
+}
+html[data-compact="true"] .monitor-dock,
+html[data-compact="true"] .task-sidebar,
+html[data-compact="true"] .task-details,
+html[data-compact="true"] .mapping-source-panel,
+html[data-compact="true"] .mapping-output-panel,
+html[data-compact="true"] .topics-drawer {
+  top: var(--mobile-panel-top);
+  bottom: var(--mobile-panel-bottom);
+  width: var(--mobile-panel-width);
+  height: auto;
+  max-height: none;
+  min-height: 0;
+  box-sizing: border-box;
+}
+html[data-compact="true"] .monitor-dock {
+  left: var(--mobile-gap);
+  overflow: auto;
+  overscroll-behavior: contain;
+  border-radius: 14px;
+}
+html[data-compact="true"] .demo-dock {
+  min-height: 0;
+  padding: 10px;
+}
+html[data-compact="true"] .demo-dock > header {
+  position: sticky;
+  top: -10px;
+  z-index: 2;
+  background: #ebe7db;
+}
+html[data-compact="true"] .nav-topic-panels-shell.compact {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+html[data-compact="true"] .nav-topic-panels-grid.compact {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+}
+html[data-compact="true"] .topics-drawer {
+  right: 54px;
+  padding: 10px;
+  overflow: auto;
+}
+html[data-compact="true"] .topics-drawer > header,
+html[data-compact="true"] .topics-drawer > footer {
+  flex-shrink: 0;
+}
+html[data-compact="true"] .topic-search {
+  margin: 6px 0;
+  min-height: 32px;
+  flex-shrink: 0;
+}
+html[data-compact="true"] .topics-drawer .topic-list {
+  min-height: 48px;
+  flex: 1 0 48px;
+}
+html[data-compact="true"] .topics-drawer > small {
+  display: none;
+}
+html[data-compact="true"] .nav-side-tools {
+  top: var(--mobile-panel-top);
+  right: 8px;
+  padding: 3px;
+}
+html[data-compact="true"] .platform-toolbelt {
+  left: 12px;
+  bottom: 10px;
+  transform: none;
+  max-width: calc(100vw - 250px);
+  flex-wrap: wrap;
+}
+html[data-compact="true"] .task-sidebar {
+  padding: 10px;
+  gap: 8px;
+  overflow: auto;
+}
+html[data-compact="true"] .task-sidebar header {
+  flex-shrink: 0;
+}
+html[data-compact="true"] .task-sidebar header strong {
+  font-size: 13px;
+}
+html[data-compact="true"] .task-sidebar-content {
+  min-height: 0;
+  flex: 1;
+}
+html[data-compact="true"] .task-list {
+  min-height: 36px;
+  flex: 1;
+}
+html[data-compact="true"] .task-card {
+  padding: 8px;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+html[data-compact="true"] .task-card strong {
+  font-size: 12px;
+}
+html[data-compact="true"] .task-card small {
+  font-size: 10px;
+}
+html[data-compact="true"] .task-sidebar.collapsed {
+  width: auto;
+  bottom: auto;
+}
+html[data-compact="true"] .task-message {
+  bottom: 122px;
+  max-width: min(320px, calc(100vw - 24px));
+}
+html[data-compact="true"] .mapping-source-panel {
+  left: 12px;
+  padding: 10px;
+  overflow: auto;
+}
+html[data-compact="true"] .mapping-output-panel {
+  display: block;
+  right: 12px;
+  padding: 10px;
+  overflow: auto;
+}
+html[data-compact="true"] .mapping-panel-header {
+  position: sticky;
+  top: -10px;
+  z-index: 2;
+  background: #ece8dd;
+  padding-block: 4px;
+}
+html[data-compact="true"] .mapping-map-summary {
+  padding-block: 8px;
+}
+html[data-compact="true"] .mapping-map-orbit {
+  display: none;
+}
+html[data-compact="true"] .mapping-control-bar {
+  left: 12px;
+  bottom: 10px;
+  transform: none;
+  max-width: calc(100vw - 250px);
+  flex-wrap: wrap;
+}
+html[data-compact="true"] .mapping-stop-action {
+  display: flex !important;
+}
+.mapping-mobile-switch {
+  display: none;
+}
+html[data-layout="phone"] .mapping-mobile-switch {
+  display: inline-flex;
+  font-size: 10px;
+  padding: 4px 6px;
+}
+html[data-layout="phone"]
+  .mapping-workspace:not(.show-output)
+  .mapping-output-panel,
+html[data-layout="phone"] .mapping-workspace.show-output .mapping-source-panel {
+  display: none;
+}
+html[data-layout="phone"] .mapping-output-panel {
+  left: 12px;
+  right: auto;
+}
+html[data-compact="true"] .card-hover-actions {
+  display: flex;
+}
+@media (max-width: 700px) {
+  html[data-compact="true"] {
+    --mobile-panel-width: min(290px, calc(100vw - 76px));
+    --mobile-panel-top: 124px;
+    --mobile-panel-bottom: 138px;
+  }
+  html[data-compact="true"]
+    .navigation-workspace:has(.topics-drawer)
+    .monitor-dock {
+    visibility: hidden;
+  }
+  html[data-compact="true"] .workspace-mode-switch {
+    top: 78px;
+  }
+  html[data-compact="true"] .pose-widget {
+    bottom: 64px;
+  }
+  html[data-compact="true"] .platform-toolbelt,
+  html[data-compact="true"] .mapping-control-bar {
+    max-width: calc(100vw - 24px);
+  }
+  html[data-compact="true"] .task-connection {
+    display: none;
+  }
+  html[data-compact="true"] .task-execution {
+    bottom: 128px;
+    z-index: 15;
+  }
+  html[data-compact="true"] .mapping-mobile-switch {
+    display: inline-flex;
+  }
+  html[data-compact="true"]
+    .mapping-workspace:not(.show-output)
+    .mapping-output-panel,
+  html[data-compact="true"]
+    .mapping-workspace.show-output
+    .mapping-source-panel {
+    display: none;
+  }
+}

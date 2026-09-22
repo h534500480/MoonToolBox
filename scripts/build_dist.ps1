@@ -1,235 +1,92 @@
+﻿<# 功能说明：构建 Windows x64 无源码发行包，内置编译后的后端、算法与运行依赖。 #>
+[CmdletBinding()]
+param([string]$Python = "", [int]$Jobs = 4)
 $ErrorActionPreference = "Stop"
-
-$Root = Resolve-Path (Join-Path $PSScriptRoot "..")
-$ReleaseRoot = Join-Path $Root "release"
-$DistName = "MoonToolBox"
-$DistDir = Join-Path $ReleaseRoot $DistName
-$StageRoot = Join-Path $ReleaseRoot "_staging"
-$StageDir = Join-Path $StageRoot $DistName
-$ZipPath = Join-Path $ReleaseRoot "$DistName.zip"
-$PythonVersion = if ($env:ROS_TOOL_EMBED_PYTHON_VERSION) { $env:ROS_TOOL_EMBED_PYTHON_VERSION } else { "3.12.10" }
-$PythonZipName = "python-$PythonVersion-embed-amd64.zip"
-$PythonZipUrl = "https://www.python.org/ftp/python/$PythonVersion/$PythonZipName"
-$GetPipUrl = "https://bootstrap.pypa.io/get-pip.py"
-$DownloadDir = Join-Path $Root "build\downloads"
-
+$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $Root
+$Stage = Join-Path $Root "release\ROSPlatform"
+$Build = Join-Path $Root "build\desktop"
 
-function Require-Path($Path, $Hint) {
-  if (-not (Test-Path $Path)) {
-    throw "$Path not found. $Hint"
-  }
+function Invoke-Checked([string]$Executable, [string[]]$CommandArgs) {
+    & $Executable @CommandArgs
+    if ($LASTEXITCODE -ne 0) { throw "执行失败 ($LASTEXITCODE): $Executable $($CommandArgs -join ' ')" }
 }
 
-function Require-Command($Name, $InstallHint) {
-  if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
-    throw "$Name not found. $InstallHint"
-  }
-}
-
-function Copy-Directory($Source, $Destination) {
-  Require-Path $Source "Run .\scripts\install_local.cmd first."
-  New-Item -ItemType Directory -Force -Path $Destination | Out-Null
-  Copy-Item (Join-Path $Source "*") $Destination -Recurse -Force
-}
-
-function Remove-PathWithRetry {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string] $Path,
-    [int] $MaxAttempts = 5,
-    [int] $DelayMs = 800
-  )
-
-  for ($Attempt = 1; $Attempt -le $MaxAttempts; $Attempt++) {
-    try {
-      if (-not (Test-Path $Path)) {
-        return $true
-      }
-      Remove-Item $Path -Recurse -Force -ErrorAction Stop
-      return $true
-    } catch {
-      if ($Attempt -ge $MaxAttempts) {
-        Write-Warning "Failed to remove path after ${MaxAttempts} attempts: $Path`n$($_.Exception.Message)"
-        return $false
-      }
-      Start-Sleep -Milliseconds $DelayMs
+# 删除操作只允许在本仓库专用构建/发行目录内，拒绝路径逃逸。
+function Clear-Output([string]$Target) {
+    $Full = [IO.Path]::GetFullPath($Target)
+    $Allowed = @((Join-Path $Root "build"), (Join-Path $Root "release"))
+    if (-not ($Allowed | Where-Object { $Full.StartsWith($_ + '\', [StringComparison]::OrdinalIgnoreCase) })) {
+        throw "拒绝清理非构建路径: $Full"
     }
-  }
-
-  return $false
+    if (Test-Path -LiteralPath $Full) { Remove-Item -LiteralPath $Full -Recurse -Force }
 }
 
-function Invoke-Checked {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string] $Executable,
-    [string[]] $CommandArgs = @()
-  )
-
-  & $Executable @CommandArgs
-  if ($LASTEXITCODE -ne 0) {
-    throw "Command failed with exit code ${LASTEXITCODE}: $Executable $($CommandArgs -join ' ')"
-  }
-}
-
-function Get-Download($Url, $Path) {
-  if (Test-Path $Path) {
-    return
-  }
-
-  New-Item -ItemType Directory -Force -Path (Split-Path $Path -Parent) | Out-Null
-  Write-Host "Downloading $Url"
-  Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Path
-}
-
-function Enable-EmbeddedPythonSitePackages($PythonDir) {
-  $PthFile = Get-ChildItem $PythonDir -Filter "python*._pth" | Select-Object -First 1
-  if (-not $PthFile) {
-    throw "Embedded Python ._pth file was not found under $PythonDir."
-  }
-
-  $Lines = @(Get-Content $PthFile.FullName)
-  $Lines = @($Lines | ForEach-Object {
-    if ($_ -eq "#import site") { "import site" } else { $_ }
-  })
-
-  if ($Lines -notcontains "Lib\site-packages") {
-    $Lines += "Lib\site-packages"
-  }
-
-  Set-Content -Path $PthFile.FullName -Value $Lines -Encoding ASCII
-}
-
-function Install-EmbeddedPython($Destination) {
-  $PythonZip = Join-Path $DownloadDir $PythonZipName
-  $GetPip = Join-Path $DownloadDir "get-pip.py"
-
-  Get-Download $PythonZipUrl $PythonZip
-  Get-Download $GetPipUrl $GetPip
-
-  if (Test-Path $Destination) {
-    Remove-Item $Destination -Recurse -Force
-  }
-  New-Item -ItemType Directory -Force -Path $Destination | Out-Null
-  Expand-Archive -Path $PythonZip -DestinationPath $Destination -Force
-  Enable-EmbeddedPythonSitePackages $Destination
-
-  $RuntimePython = Join-Path $Destination "python.exe"
-  Invoke-Checked $RuntimePython @($GetPip, "--no-warn-script-location")
-  Invoke-Checked $RuntimePython @("-m", "pip", "install", "--no-warn-script-location", "--upgrade", "pip")
-  Invoke-Checked $RuntimePython @("-m", "pip", "install", "--no-warn-script-location", "-r", "backend\requirements.txt")
-  Invoke-Checked $RuntimePython @("-c", "import fastapi, uvicorn, yaml, PIL, websockets, pystray")
-}
-
-function Build-Frontend {
-  Require-Command "npm.cmd" "Install Node.js LTS and add npm to PATH, then run this script again."
-
-  Push-Location "frontend"
-  try {
-    if (-not (Test-Path "node_modules")) {
-      Write-Host "Frontend node_modules not found; installing dependencies..."
-      if (Test-Path "package-lock.json") {
-        Invoke-Checked "npm.cmd" @("ci")
-      } else {
-        Invoke-Checked "npm.cmd" @("install")
-      }
+if (-not $Python) {
+    $Python = Join-Path $Root "build\package-env\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $Python)) {
+        Invoke-Checked "py" @("-3.12", "-m", "venv", (Join-Path $Root "build\package-env"))
     }
-
-    Invoke-Checked "npm.cmd" @("run", "build")
-  } finally {
-    Pop-Location
-  }
 }
+$Python = (Resolve-Path $Python).Path
+Invoke-Checked $Python @("-m", "pip", "install", "-r", "scripts\requirements-package.txt")
+Invoke-Checked $Python @("-c", "import sys, struct, tkinter; assert sys.version_info[:2] == (3, 12) and struct.calcsize('P') == 8, '需要 Python 3.12 x64'")
 
-Write-Host "[1/7] Checking local runtime outputs..."
-Require-Path ".venv\Scripts\python.exe" "Run .\scripts\install_local.cmd first."
+Write-Host "[1/5] 编译 Release C++ 算法（静态运行库）..."
+. (Join-Path $PSScriptRoot "import_vsdev_env.ps1")
+Invoke-Checked "cmake" @("-S", "cpp", "-B", "build\cpp-release", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DROS_PLATFORM_STATIC_RUNTIME=ON")
+Invoke-Checked "cmake" @("--build", "build\cpp-release", "--config", "Release", "--parallel", "$Jobs")
 
-& ".venv\Scripts\python.exe" -c "import fastapi, uvicorn, yaml, PIL, websockets, pystray"
-if ($LASTEXITCODE -ne 0) {
-  throw ".venv is missing runtime Python dependencies. Run .\scripts\install_local.cmd and fix any pip errors first."
+Write-Host "[2/5] 在独立目录构建网页资源..."
+$FrontendBuild = Join-Path $Root "build\frontend-release"
+Clear-Output $FrontendBuild
+New-Item -ItemType Directory -Force -Path $FrontendBuild | Out-Null
+foreach ($Item in @('src', 'public', 'index.html', 'package.json', 'package-lock.json', 'tsconfig.json', 'vite.config.ts')) {
+    $Source = Join-Path $Root "frontend\$Item"
+    if (Test-Path -LiteralPath $Source) { Copy-Item -LiteralPath $Source -Destination $FrontendBuild -Recurse }
 }
-
-$RequiredExes = @("pcd_map_cli.exe", "pcd_tile_cli.exe", "global_relocalization_cli.exe", "nav_pcd_preview_cli.exe")
-foreach ($ExeName in $RequiredExes) {
-  Require-Path (Join-Path "cpp\build" $ExeName) "Run .\scripts\install_local.cmd first."
-}
-
-Write-Host "[2/7] Building frontend..."
-Build-Frontend
-Require-Path "frontend\dist\index.html" "Frontend build did not produce frontend\dist\index.html."
-
-Write-Host "[3/7] Cleaning release directory..."
-if (Test-Path $StageDir) {
-  [void](Remove-PathWithRetry -Path $StageDir)
-}
-New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
-
-Write-Host "[4/7] Copying app runtime files..."
-Copy-Directory "backend" (Join-Path $StageDir "backend")
-Copy-Directory "data" (Join-Path $StageDir "data")
-Copy-Directory "frontend\dist" (Join-Path $StageDir "frontend\dist")
-New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "cpp\build") | Out-Null
-foreach ($ExeName in $RequiredExes) {
-  Copy-Item (Join-Path "cpp\build" $ExeName) (Join-Path $StageDir "cpp\build") -Force
-}
-New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "output_nav\recordings") | Out-Null
-
-New-Item -ItemType Directory -Force -Path (Join-Path $StageDir "scripts") | Out-Null
-Copy-Item "scripts\start_local.ps1" (Join-Path $StageDir "scripts") -Force
-Copy-Item "scripts\start_local.cmd" (Join-Path $StageDir "scripts") -Force
-Copy-Item "scripts\start_local.vbs" (Join-Path $StageDir "scripts") -Force
-Copy-Item "scripts\stop_local.ps1" (Join-Path $StageDir "scripts") -Force
-Copy-Item "scripts\stop_local.cmd" (Join-Path $StageDir "scripts") -Force
-Copy-Item "scripts\tray_launcher.py" (Join-Path $StageDir "scripts") -Force
-if (Test-Path "assets\icons\runtime\setup.ico") {
-  Copy-Item "assets\icons\runtime\setup.ico" (Join-Path $StageDir "MoonToolBox.ico") -Force
-  Copy-Item "assets\icons\runtime\setup.ico" (Join-Path $ReleaseRoot "MoonToolBoxSetup.ico") -Force
-} elseif (Test-Path "assets\icons\runtime\moontoolbox.ico") {
-  Copy-Item "assets\icons\runtime\moontoolbox.ico" (Join-Path $StageDir "MoonToolBox.ico") -Force
-}
-Copy-Item "requirements.txt" $StageDir -Force
-Copy-Item "README.md" $StageDir -Force
-Copy-Item "LICENSE" $StageDir -Force
-
-Write-Host "[5/7] Installing embedded Python runtime..."
-Install-EmbeddedPython (Join-Path $StageDir "runtime\python")
-
-Write-Host "[6/7] Removing non-runtime files..."
-$CleanupPaths = @(
-  "backend\__pycache__",
-  "backend\app\__pycache__",
-  "backend\app\api\__pycache__",
-  "backend\app\services\__pycache__",
-  "backend\data\_debug",
-  "backend\data\browser_profiles",
-  "backend\data\tool_preferences.json"
-)
-foreach ($RelativePath in $CleanupPaths) {
-  $Target = Join-Path $StageDir $RelativePath
-  if (Test-Path $Target) {
-    [void](Remove-PathWithRetry -Path $Target)
-  }
-}
-
-Write-Host "[7/7] Creating zip..."
-if (Test-Path $ZipPath) {
-  Remove-Item $ZipPath -Force
-}
-Compress-Archive -Path $StageDir -DestinationPath $ZipPath -Force
-
-if (Test-Path $DistDir) {
-  [void](Remove-PathWithRetry -Path $DistDir)
-}
+Push-Location $FrontendBuild
 try {
-  Copy-Item $StageDir $DistDir -Recurse -Force -ErrorAction Stop
-} catch {
-  Write-Warning "Failed to refresh canonical release folder: $DistDir`n$($_.Exception.Message)"
-  Write-Warning "Portable folder remains available at: $StageDir"
+    Invoke-Checked "npm.cmd" @("ci")
+    Invoke-Checked "npm.cmd" @("run", "typecheck")
+    Invoke-Checked "npm.cmd" @("run", "build")
+} finally { Pop-Location }
+
+Write-Host "[3/5] 编译独立 Python 后端及托盘入口..."
+$OldPythonPath = $env:PYTHONPATH
+try {
+    $env:PYTHONPATH = Join-Path $Root "backend"
+    # 保留编译缓存，但每次重新汇集运行目录，避免历史文件进入交付包。
+    Clear-Output (Join-Path $Build "desktop.dist")
+    Invoke-Checked $Python @("-m", "nuitka", "--mode=standalone", "--msvc=latest", "--enable-plugin=tk-inter", "--include-package=app", "--include-package=uvicorn", "--include-package=pystray", "--windows-console-mode=disable", "--output-dir=build/desktop", "--output-filename=ROSPlatform.exe", "--assume-yes-for-downloads", "--report=build/desktop-report.xml", "--jobs=$Jobs", "backend/desktop.py")
+} finally { $env:PYTHONPATH = $OldPythonPath }
+
+Write-Host "[4/5] 汇集运行文件并审计源码泄露..."
+Clear-Output $Stage
+New-Item -ItemType Directory -Force -Path $Stage | Out-Null
+Copy-Item -LiteralPath (Join-Path $Build "desktop.dist") -Destination (Join-Path $Stage "runtime") -Recurse
+# 主程序必须与其依赖处于同级，不分发构建目录或源代码。
+$Runtime = Join-Path $Stage "runtime"
+New-Item -ItemType Directory -Force -Path (Join-Path $Runtime "cpp\build"), (Join-Path $Runtime "frontend") | Out-Null
+foreach ($Name in @("pcd_map_cli", "pcd_tile_cli", "global_relocalization_cli", "nav_pcd_preview_cli")) {
+    Copy-Item -LiteralPath (Join-Path $Root "build\cpp-release\$Name.exe") -Destination (Join-Path $Runtime "cpp\build\$Name.exe")
+}
+Copy-Item -LiteralPath (Join-Path $FrontendBuild "dist") -Destination (Join-Path $Runtime "frontend\dist") -Recurse
+Copy-Item -LiteralPath (Join-Path $Root "LICENSE") -Destination $Stage
+Copy-Item -LiteralPath (Join-Path $Root "docs\WINDOWS_DISTRIBUTION.md") -Destination (Join-Path $Stage "使用说明.md")
+Invoke-Checked $Python @("scripts\package_notices.py", $Stage, $FrontendBuild)
+$Leaked = @(Get-ChildItem -LiteralPath $Stage -Recurse -File | Where-Object { $_.Extension -in @('.py','.pyc','.cpp','.hpp','.pdb','.map','.ts','.vue') })
+if ($Leaked.Count) { throw "发现禁止交付的源码/调试文件: $($Leaked.FullName -join ', ')" }
+# Nuitka 应汇集 Python 和扩展模块运行库，缺失时拒绝生成安装包。
+foreach ($Required in @('ROSPlatform.exe','python312.dll','vcruntime140.dll')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $Runtime $Required))) { throw "缺少运行依赖: $Required" }
 }
 
-Write-Host ""
-Write-Host "Release folder: $DistDir"
-Write-Host "Staging folder: $StageDir"
-Write-Host "Release zip:    $ZipPath"
-Write-Host "Start with:     $DistName\scripts\start_local.vbs"
+Invoke-Checked $Python @("tests\test_distribution.py", (Join-Path $Runtime "ROSPlatform.exe"))
+Write-Host "[5/5] 生成便携包与校验值..."
+$Zip = Join-Path $Root "release\ROSPlatform.zip"
+if (Test-Path -LiteralPath $Zip) { Remove-Item -LiteralPath $Zip -Force }
+Compress-Archive -LiteralPath $Stage -DestinationPath $Zip
+(Get-FileHash -LiteralPath $Zip -Algorithm SHA256).Hash | Set-Content -LiteralPath "$Zip.sha256" -Encoding ASCII
+Write-Host "便携包: $Zip"
+Write-Host "启动入口: $Runtime\ROSPlatform.exe"

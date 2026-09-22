@@ -14,7 +14,9 @@ from app.models import (
 )
 
 
-ROOT_DIR = Path(__file__).resolve().parents[3]
+from app.paths import DATA_ROOT
+
+ROOT_DIR = DATA_ROOT
 RECORDINGS_DIR = ROOT_DIR / "output_nav" / "recordings"
 ALLOWED_SUFFIXES = {".txt", ".png", ".jpg", ".jpeg", ".webp"}
 JSON_BEGIN_MARKER = "--- NAV_RECORDING_JSON BEGIN ---"

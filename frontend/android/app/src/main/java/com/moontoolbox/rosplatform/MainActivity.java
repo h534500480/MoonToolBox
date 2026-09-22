@@ -1,3 +1,4 @@
+// 功能说明：Android 全屏容器与键盘遮挡信息桥接，页面按实际可用区域放置输入层。
 package com.moontoolbox.rosplatform;
 
 import android.content.res.Configuration;
@@ -26,7 +27,19 @@ public class MainActivity extends BridgeActivity {
 
         View decorView = getWindow().getDecorView();
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
-        ViewCompat.setOnApplyWindowInsetsListener(decorView, (view, insets) -> WindowInsetsCompat.CONSUMED);
+        ViewCompat.setOnApplyWindowInsetsListener(decorView, (view, insets) -> {
+            if (getBridge() != null && getBridge().getWebView() != null) {
+                View webView = getBridge().getWebView();
+                int[] webLocation = new int[2], decorLocation = new int[2];
+                webView.getLocationOnScreen(webLocation);
+                decorView.getLocationOnScreen(decorLocation);
+                int ime = insets.isVisible(WindowInsetsCompat.Type.ime()) ? insets.getInsets(WindowInsetsCompat.Type.ime()).bottom : 0;
+                int overlap = ime == 0 ? 0 : Math.max(0, webLocation[1] + webView.getHeight() - (decorLocation[1] + decorView.getHeight() - ime));
+                // 只传数值；CSS 像素换算使用 WebView 的实际设备像素比。
+                getBridge().getWebView().evaluateJavascript("window.dispatchEvent(new CustomEvent('ros-window-insets',{detail:{imeOverlap:" + overlap + "/(window.devicePixelRatio||1)}}))", null);
+            }
+            return WindowInsetsCompat.CONSUMED;
+        });
 
         WindowInsetsControllerCompat controller =
             ViewCompat.getWindowInsetsController(decorView);

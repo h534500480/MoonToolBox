@@ -3511,6 +3511,8 @@ let pendingTaskPick: {
   end: MouseEvent;
 } | null = null;
 async function handlePointerDown(event: MouseEvent) {
+  if (!(event instanceof PointerEvent) && performance.now() - lastTouchAt < 800)
+    return;
   pendingRouteClick = null;
   if (
     event.button !== 0 ||
@@ -3678,6 +3680,8 @@ function finishInteraction(emitResult: boolean) {
 }
 
 function handlePointerUp(event: MouseEvent) {
+  if (!(event instanceof PointerEvent) && performance.now() - lastTouchAt < 800)
+    return;
   if (pendingRouteClick) {
     const click = pendingRouteClick;
     pendingRouteClick = null;
@@ -3708,6 +3712,46 @@ function handlePointerLeave() {
     return;
   }
   finishInteraction(true);
+}
+
+let lastTouchAt = -Infinity;
+const sceneTouchPointers = new Set<number>();
+let sceneTouchTap: { start: PointerEvent; moved: boolean } | null = null;
+/** 触屏轻点选点，拖动与双指手势留给相机；方向通过选中点的旋转控件调整。 */
+function sceneTouchDown(event: PointerEvent) {
+  if (!["touch", "pen"].includes(event.pointerType)) return;
+  lastTouchAt = performance.now();
+  sceneTouchPointers.add(event.pointerId);
+  sceneTouchTap =
+    sceneTouchPointers.size === 1 ? { start: event, moved: false } : null;
+}
+function sceneTouchMove(event: PointerEvent) {
+  if (!["touch", "pen"].includes(event.pointerType)) return;
+  lastTouchAt = performance.now();
+  if (
+    sceneTouchTap &&
+    Math.hypot(
+      event.clientX - sceneTouchTap.start.clientX,
+      event.clientY - sceneTouchTap.start.clientY,
+    ) > 6
+  )
+    sceneTouchTap.moved = true;
+}
+function sceneTouchUp(event: PointerEvent) {
+  if (!["touch", "pen"].includes(event.pointerType)) return;
+  lastTouchAt = performance.now();
+  sceneTouchPointers.delete(event.pointerId);
+  const tap = sceneTouchTap;
+  sceneTouchTap = null;
+  if (
+    event.type === "pointercancel" ||
+    !tap ||
+    tap.moved ||
+    sceneTouchPointers.size ||
+    tap.start.pointerId !== event.pointerId
+  )
+    return;
+  void handlePointerDown(tap.start).then(() => handlePointerUp(event));
 }
 
 function quaternionToYaw(rotation: any) {
@@ -5483,6 +5527,10 @@ onMounted(async () => {
     resizeObserver.observe(mountRef.value);
   }
   renderer?.domElement.addEventListener("mousedown", handlePointerDown);
+  renderer?.domElement.addEventListener("pointerdown", sceneTouchDown);
+  renderer?.domElement.addEventListener("pointermove", sceneTouchMove);
+  renderer?.domElement.addEventListener("pointerup", sceneTouchUp);
+  renderer?.domElement.addEventListener("pointercancel", sceneTouchUp);
   renderer?.domElement.addEventListener("mousemove", handlePointerMove);
   renderer?.domElement.addEventListener("mouseup", handlePointerUp);
   renderer?.domElement.addEventListener("mouseleave", handlePointerLeave);
@@ -5497,6 +5545,10 @@ onBeforeUnmount(() => {
   }
   resizeObserver?.disconnect();
   renderer?.domElement.removeEventListener("mousedown", handlePointerDown);
+  renderer?.domElement.removeEventListener("pointerdown", sceneTouchDown);
+  renderer?.domElement.removeEventListener("pointermove", sceneTouchMove);
+  renderer?.domElement.removeEventListener("pointerup", sceneTouchUp);
+  renderer?.domElement.removeEventListener("pointercancel", sceneTouchUp);
   renderer?.domElement.removeEventListener("mousemove", handlePointerMove);
   renderer?.domElement.removeEventListener("mouseup", handlePointerUp);
   renderer?.domElement.removeEventListener("mouseleave", handlePointerLeave);

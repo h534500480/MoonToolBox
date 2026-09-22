@@ -1,10 +1,11 @@
-#define MyAppName "MoonToolBox"
-#define MyAppVersion "0.1.0"
+; 功能说明：安装内置运行库的 ROS 平台；个人数据与程序目录分离，卸载保留用户数据。
+#define MyAppName "ROSPlatform"
+#define MyAppVersion "0.2.0"
 #define MyAppPublisher "TreeMoon"
-#define MyAppExeName "scripts\start_local.vbs"
+#define MyAppExeName "runtime\ROSPlatform.exe"
 
 #ifndef PackageSourceDir
-  #define PackageSourceDir "..\release\MoonToolBox"
+  #define PackageSourceDir "..\release\ROSPlatform"
 #endif
 
 #ifexist "{#PackageSourceDir}\MoonToolBox.ico"
@@ -16,15 +17,15 @@
 #endif
 
 [Setup]
-AppId={{47D9C134-6420-49E3-82DD-D27C5D4B4C46}
+AppId={{80335628-4D7D-4070-B604-0A89324FB5D0}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-DefaultDirName={localappdata}\{#MyAppName}
+DefaultDirName={localappdata}\Programs\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\release
-OutputBaseFilename=MoonToolBoxSetup
+OutputBaseFilename=ROSPlatformSetup
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -33,6 +34,10 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#MyAppExeName}
 SetupLogging=yes
+MinVersion=10.0
+CloseApplications=yes
+RestartApplications=no
+SetupMutex=ROSPlatformInstaller
 #ifdef MySetupIconFile
 SetupIconFile={#MySetupIconFile}
 #endif

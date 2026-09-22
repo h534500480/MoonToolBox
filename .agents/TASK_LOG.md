@@ -375,3 +375,31 @@
 
 - 推送结果：当前实现提交 1b72fa9 已推送并验证 origin/ROS_PLATFROM；直连失败后使用系统已有代理 127.0.0.1:7897 的单次 Git 参数完成，未修改全局配置。
 - Android 方案：新建 docs/ANDROID_ADAPTATION_PLAN.md，已核对远端安卓分支 8b37ac9。确认旧悬浮框会实时写回，不符合确定才提交；当前 adjustNothing/Insets 消费、固定面板布局、JSON 网页导入导出与鼠标手势需统一适配。提出输入草稿事务、原生 IME 桥接、单面板布局、文件位置隔离及实机验收。只更新方案和项目地图，未实现 Android 新功能。
+
+## 2026-09-22 同分支桌面/触屏/Android 交互分流
+- 目标：业务共用、交互按能力适配，避免把桌面操作直接搬到 Android。
+- 文件：frontend/src/platform/interaction.ts、mobile.css、components/MobileInputOverlay.vue、App.vue、main.ts、NavigationTasks.vue、Nav3DViewer.vue、lib/nativeFilePicker.ts；Android MainActivity.java、RosFilePickerPlugin.java；tests/mobile-interaction.test.cjs；相关导航/安卓文档与项目地图。
+- 变更：确认式输入草稿（取消不写回、中文组合输入保护、数字约束）；原生 IME 遮挡桥接；JSON 原生系统读写；触屏编号排序、轻点放置和拖动防误插；解除低高度触屏工作区 500px 限制并分离详情/列表、底部按钮与位姿信息；缺少计算模块时提供说明和返回。
+- 验证：vue-tsc、Vite 构建、Android :app:compileDebugJavaWithJavac --offline 通过。桌面连续打点/坐标轴、排序/插点、导航协议回归通过；触屏回归覆盖草稿取消确认、中文候选、模拟 Insets、负数坐标提交、真实触摸事件排序和低高度控件边界。已检查 915x412 截图。
+- 限制：未安装或运行 APK，系统输入法、原生文件选择器、后台恢复仍需真机验证；PCD/IMU 等计算仍依赖后端，尚未统一所有计算服务地址及所有模块手势。此次未自动提交或推送。
+
+## 2026-09-22 3200×1440 与常规手机布局预设
+- 目标：修复 Android 三种工作模式的面板截断、状态栏和底部控件遮挡，允许本机选择布局。
+- 文件：frontend/src/platform/interaction.ts、mobile.css、pages/NavigationWorkspace.vue、components/MappingWorkspace.vue、tests/layout-presets.test.cjs；项目地图与 Android 适配文档。
+- 变更：新增自动/3200×1440 横屏/常规手机/桌面四项预设与本地持久化；按 CSS 视口约束左右面板并开放内部滚动，统一顶部/底部空间；手机建图输入与产物可切换。没有修改三维场景和导航通信。
+- 验证：类型检查、生产构建、移动输入与触屏回归、桌面导航连续打点和路线插点排序回归通过；布局覆盖 800×360 DPR4、1280×576 DPR2.5、3200×1440 DPR1、915×412 和 390×844，检查三模式边界、遮挡、任务详情、滚动和设置持久化。
+- 限制：真实 Android 3200×1440 设备尚未验证，需重新打包安装；构建仍有既有的大分包警告。本次未提交或推送。
+
+## 2026-09-22 Windows 编译发行包与端口避让
+- 目标：交付内置依赖的 Windows x64 安装包，C++/Python 不裸露源码，避免固定局域网地址和端口冲突。
+- 文件：backend/desktop.py、app/paths.py、desktop_api.py、main.py、catalog.py、api/routes.py、services/{cpp_runner,nav_offline_map,nav_recordings,ros_data_source}.py；cpp/CMakeLists.txt；scripts/{build_dist,build_installer}.ps1、installer.iss、requirements-package.txt、package_notices.py；frontend/src/{main,bootstrap}.ts、platform/desktopProfile.ts；tests/test_distribution.py、frontend/tests/desktop-distribution.test.cjs、layout-presets.test.cjs；README、项目地图、Windows 发行说明。
+- 实现：Nuitka standalone 编译 Python 3.12 x64，内置 Python/Tk/NumPy/相关 DLL；四个 C++ Release 程序静态链接 MSVC 运行库；Inno Setup 生成 ROSPlatformSetup.exe 并保留便携 ZIP 和 SHA256。白名单汇集运行文件，拒绝 .py/.cpp/.hpp/.pdb/.map 等源码/调试文件。构建产物不提交。
+- 启动：发行入口仅绑定 127.0.0.1，首选上次端口/8100，占用时保留系统分配的监听套接字；目录文件锁和实例随机标识防止误打开其他服务。托盘与后端同进程；个人数据在 LOCALAPPDATA/ROSPlatform/UserData，安装/卸载不清理个人数据；源码开发原有配置目录保留。
+- 偏好：发行版逐键同步任务与界面设置到本机文件，在 Vue 模块初始化前恢复，自动换端口后仍能读取；不持久化导航租约，不恢复任务执行。非发行网页及 Android 仍沿用原存储方式。
+- 验证：类型检查、生产构建、Windows PowerShell 5 语法检查通过；发布 EXE 在清除 Python/开发工具 PATH 后通过端口冲突、单实例、页面路由、偏好跨端口、四个真实 C++ 算法和 IMU SQLite/NumPy 分析。浏览器验证实际跨端口任务/布局恢复与深层页面资源。中文安装路径静默安装及安装后全套计算测试通过，卸载退出码为 0，程序及注册项清理完成。源码审计通过，抽查 C++ 仅依赖 KERNEL32.dll。
+- 构建修正：原开发 Python 3.13.4 与 Nuitka 不兼容，新增独立 build/package-env；npm ci 遇到正在运行的 esbuild 文件锁后，恢复开发依赖和 5180 预览服务，将发行前端构建改到 build/frontend-release，后续不修改开发环境依赖。
+- 限制：未在另一台电脑或干净 Windows VM 上验证；尚未签名，发布者验证提示取决于 Windows 策略。ROS 真机与现场网络未验证，用户仍需配置机器人 rosbridge。编译不是防逆向保证，前端 JS 仍可查看。本次未提交或推送。
+
+## 2026-09-22 提交当前修改并推送
+- 用户要求 push；提交范围为 Android 交互适配、布局预设、Windows 编译发行与端口避让、测试和文档。项目地图已同步，沿用上轮通过的构建及发行验证，本次差异检查通过。
+- 目标为 origin/ROS_PLATFROM；release/、build/ 等产物保持忽略，不上传安装包。不改写远端历史。

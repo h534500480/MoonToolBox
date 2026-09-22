@@ -1,3 +1,4 @@
+// 功能说明：Android 系统文件读写与离线地图预览，文件 URI 不暴露为后端路径。
 package com.moontoolbox.rosplatform;
 
 import android.app.Activity;
@@ -51,6 +52,58 @@ import java.util.UUID;
 @CapacitorPlugin(name = "RosFilePicker")
 public class RosFilePickerPlugin extends Plugin {
     private static final int BUFFER_SIZE = 1024 * 1024;
+    /** 小型任务 JSON 按大小上限读入，取消作为正常结果返回。 */
+    @PluginMethod
+    public void readTaskText(PluginCall call) {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        startActivityForResult(call, intent, "handleTaskText");
+    }
+    @ActivityCallback
+    private void handleTaskText(PluginCall call, ActivityResult result) {
+        if (call == null) return;
+        if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null || result.getData().getData() == null) {
+            JSObject answer = new JSObject(); answer.put("cancelled", true); call.resolve(answer); return;
+        }
+        Uri uri = result.getData().getData();
+        new Thread(() -> {
+            try (InputStream input = getContext().getContentResolver().openInputStream(uri); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+                if (input == null) throw new java.io.IOException("无法读取文件");
+                byte[] buffer = new byte[8192]; int count;
+                while ((count = input.read(buffer)) != -1) {
+                    if (output.size() + count > 5_000_000) throw new java.io.IOException("文件不能超过 5 MB");
+                    output.write(buffer, 0, count);
+                }
+                JSObject answer = new JSObject(); answer.put("text", new String(output.toByteArray(), StandardCharsets.UTF_8)); call.resolve(answer);
+            } catch (Exception error) { call.reject("读取任务文件失败：" + error.getMessage(), error); }
+        }).start();
+    }
+    /** 使用系统创建文档界面选择导出位置，不依赖 WebView 下载链接。 */
+    @PluginMethod
+    public void saveTaskText(PluginCall call) {
+        String text = call.getString("text");
+        if (text == null) { call.reject("缺少任务内容"); return; }
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE); intent.setType("application/json");
+        intent.putExtra(Intent.EXTRA_TITLE, "navigation-tasks.json");
+        startActivityForResult(call, intent, "handleSaveTaskText");
+    }
+    @ActivityCallback
+    private void handleSaveTaskText(PluginCall call, ActivityResult result) {
+        if (call == null) return;
+        if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null || result.getData().getData() == null) {
+            JSObject answer = new JSObject(); answer.put("cancelled", true); call.resolve(answer); return;
+        }
+        Uri uri = result.getData().getData();
+        new Thread(() -> {
+            try (java.io.OutputStream output = getContext().getContentResolver().openOutputStream(uri, "wt")) {
+                if (output == null) throw new java.io.IOException("无法写入文件");
+                output.write(call.getString("text", "").getBytes(StandardCharsets.UTF_8)); call.resolve();
+            } catch (Exception error) { call.reject("保存任务文件失败：" + error.getMessage(), error); }
+        }).start();
+    }
 
     @PluginMethod
     public void pickLocalFile(PluginCall call) {

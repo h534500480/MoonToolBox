@@ -1,3 +1,6 @@
+﻿<# 功能说明：验证独立发行包后生成离线安装程序；SkipBuild 只复用已构建产物。 #>
+[CmdletBinding()]
+param([switch]$SkipBuild)
 $ErrorActionPreference = "Stop"
 
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
@@ -48,17 +51,22 @@ Write-Host "[1/3] Checking Inno Setup compiler..."
 $Iscc = Get-InnoCompiler
 
 Write-Host "[2/3] Building portable release folder..."
-& ".\scripts\build_dist.ps1"
-if ($LASTEXITCODE -ne 0) {
-  throw "build_dist.ps1 failed with exit code $LASTEXITCODE"
+if (-not $SkipBuild) {
+  & ".\scripts\build_dist.ps1"
+}
+if ($SkipBuild) {
+  $Python = Join-Path $Root "build\package-env\Scripts\python.exe"
+  & $Python "tests\test_distribution.py" "release\ROSPlatform\runtime\ROSPlatform.exe"
+  if ($LASTEXITCODE -ne 0) { throw "发行包验证失败，停止生成安装程序" }
 }
 
 Write-Host "[3/3] Building installer..."
-$PackageSourceDir = "..\release\_staging\MoonToolBox"
+$PackageSourceDir = "..\release\ROSPlatform"
 & $Iscc "/DPackageSourceDir=$PackageSourceDir" ".\scripts\installer.iss"
 if ($LASTEXITCODE -ne 0) {
   throw "Inno Setup compiler failed with exit code $LASTEXITCODE"
 }
 
 Write-Host ""
-Write-Host "Installer: release\MoonToolBoxSetup.exe"
+(Get-FileHash -LiteralPath "release\ROSPlatformSetup.exe" -Algorithm SHA256).Hash | Set-Content -LiteralPath "release\ROSPlatformSetup.exe.sha256" -Encoding ASCII
+Write-Host "Installer: release\ROSPlatformSetup.exe"

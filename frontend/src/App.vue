@@ -4,6 +4,7 @@ import { computed, defineAsyncComponent, onMounted, ref } from "vue";
 import { useRoute } from "vue-router";
 import { fetchTools, runTool } from "./api/client";
 import type { ToolDefinition } from "./types";
+import MobileInputOverlay from "./components/MobileInputOverlay.vue";
 const NavigationWorkspace = defineAsyncComponent(
   () => import("./pages/NavigationWorkspace.vue"),
 );
@@ -167,6 +168,7 @@ const fallbackRosNavTool: ToolDefinition = {
 };
 const tools = ref<ToolDefinition[]>([]),
   error = ref("");
+const catalogLoaded = ref(false);
 const jobs = ref<
   Record<
     string,
@@ -201,6 +203,7 @@ const job = computed(
 );
 async function load() {
   error.value = "";
+  catalogLoaded.value = false;
   try {
     tools.value = await fetchTools();
   } catch (e) {
@@ -208,6 +211,8 @@ async function load() {
     if (key.value !== "ros_nav_test") {
       error.value = `后端连接失败：${(e as Error).message}`;
     }
+  } finally {
+    catalogLoaded.value = true;
   }
 }
 /** 按启动时的模块保存结果，切页不会把异步结果写入另一模块。 */
@@ -238,10 +243,17 @@ async function execute(values: Record<string, string>) {
 onMounted(load);
 </script>
 <template>
-  <div v-if="error" class="startup-error glass-strong">
+  <MobileInputOverlay />
+  <div v-if="catalogLoaded && !tool" class="startup-error glass-strong">
     <h1>ROS 测试平台</h1>
-    <p>{{ error }}</p>
+    <p>
+      {{
+        error ||
+        "当前环境未提供此工具所需的计算服务。PCD 转换、切片、重定位计算和 IMU 标定需要连接后端，不能仅在 Android 本机运行。"
+      }}
+    </p>
     <button class="primary-btn" @click="load">重新连接后端</button>
+    <RouterLink to="/">返回定位与导航</RouterLink>
   </div>
   <component
     v-else-if="tool"

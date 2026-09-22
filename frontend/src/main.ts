@@ -1,16 +1,4 @@
-// 功能说明：启动平台 Vue 应用与历史路由。
-import { createApp } from "vue";
-import { createRouter, createWebHistory } from "vue-router";
-import App from "./App.vue";
-import "./styles.css";
-const router = createRouter({
-  history: createWebHistory(),
-  routes: [
-    "/",
-    "/tools/pcd-map",
-    "/tools/pcd-tile",
-    "/tools/global-relocalization",
-    "/tools/imu-calibration",
-  ].map((path) => ({ path, component: { render: () => null } })),
-});
-createApp(App).use(router).mount("#app");
+// 功能说明：先恢复发行版跨端口偏好，再加载业务模块，避免初始化读到空任务。
+import { restoreDesktopProfile } from "./platform/desktopProfile";
+
+restoreDesktopProfile().finally(() => import("./bootstrap"));

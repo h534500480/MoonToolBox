@@ -44,6 +44,12 @@ import {
   type NavigationTransport,
 } from "../lib/navigationRunner";
 import type { NavigationConnectionState } from "../lib/rosNavigationTransport";
+import { interaction } from "../platform/interaction";
+import {
+  canUseNativeRosFilePicker,
+  pickNativeTaskText,
+  saveNativeTaskText,
+} from "../lib/nativeFilePicker";
 const props = defineProps<{
   active: boolean;
   frame: string;
@@ -535,28 +541,54 @@ function deleteTask() {
   deletingTask.value = null;
 }
 /** 文件导入采用追加策略并重建任务编号，避免覆盖已有任务。 */
+function importTaskText(text: string) {
+  if (new Blob([text]).size > 5_000_000) throw new Error("文件不能超过 5 MB。");
+  const imported = parseTasks(text).map((item) => ({
+    ...item,
+    id: createTaskId(),
+  }));
+  if (tasks.value.length + imported.length > 200)
+    throw new Error("任务总数不能超过 200。");
+  tasks.value.push(...imported);
+  message.value = `已导入 ${imported.length} 个任务。`;
+}
+async function chooseTaskFile() {
+  if (!canUseNativeRosFilePicker()) {
+    fileInput.value?.click();
+    return;
+  }
+  try {
+    const result = await pickNativeTaskText();
+    if (!result.cancelled && typeof result.text === "string")
+      importTaskText(result.text);
+  } catch (error) {
+    message.value = `导入失败：${(error as Error).message}`;
+  }
+}
 async function importTasks(event: Event) {
   const input = event.target as HTMLInputElement,
     file = input.files?.[0];
   if (!file) return;
   try {
     if (file.size > 5_000_000) throw new Error("文件不能超过 5 MB。");
-    const imported = parseTasks(await file.text()).map((item) => ({
-      ...item,
-      id: createTaskId(),
-    }));
-    if (tasks.value.length + imported.length > 200)
-      throw new Error("任务总数不能超过 200。");
-    tasks.value.push(...imported);
-    message.value = `已导入 ${imported.length} 个任务。`;
+    importTaskText(await file.text());
   } catch (error) {
     message.value = `导入失败：${(error as Error).message}`;
   }
   input.value = "";
 }
-function exportTasks() {
+async function exportTasks() {
+  const text = JSON.stringify({ version: 1, tasks: tasks.value }, null, 2);
+  if (canUseNativeRosFilePicker()) {
+    try {
+      await saveNativeTaskText(text);
+    } catch (error) {
+      message.value = `导出失败：${(error as Error).message}`;
+    }
+    return;
+  }
   const url = URL.createObjectURL(
-    new Blob([JSON.stringify({ version: 1, tasks: tasks.value }, null, 2)], {
+    new Blob([text], {
       type: "application/json",
     }),
   );
@@ -566,12 +598,64 @@ function exportTasks() {
   link.click();
   URL.revokeObjectURL(url);
 }
+let touchSort: {
+  pointer: number;
+  id: string;
+  target: string;
+  after: boolean;
+} | null = null;
+/** 触屏仅编号手柄发起排序，列表其余区域保留原生滚动。 */
+function startTouchSort(event: PointerEvent, id: string) {
+  if (!interaction.touch || locked.value || event.button !== 0) return;
+  event.preventDefault();
+  event.stopPropagation();
+  touchSort = { pointer: event.pointerId, id, target: id, after: false };
+  draggedPoint.value = id;
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+}
+function moveTouchSort(event: PointerEvent) {
+  if (!touchSort || touchSort.pointer !== event.pointerId) return;
+  const row = document
+    .elementFromPoint(event.clientX, event.clientY)
+    ?.closest<HTMLElement>(".task-point");
+  if (!row || !pointSection.value?.contains(row)) {
+    dropPoint.value = "";
+    touchSort.target = "";
+    return;
+  }
+  const bounds = row.getBoundingClientRect();
+  touchSort.target = row.dataset.pointId!;
+  touchSort.after = event.clientY > bounds.top + bounds.height / 2;
+  dropPoint.value = touchSort.target;
+  dropAfter.value = touchSort.after;
+  const list = row.parentElement!;
+  const rect = list.getBoundingClientRect();
+  if (event.clientY < rect.top + 24) list.scrollTop -= 10;
+  if (event.clientY > rect.bottom - 24) list.scrollTop += 10;
+}
+function finishTouchSort(event: PointerEvent, cancelled = false) {
+  if (!touchSort || touchSort.pointer !== event.pointerId) return;
+  const sort = touchSort;
+  touchSort = null;
+  const points = task.value?.points;
+  const from = points?.findIndex((point) => point.id === sort.id) ?? -1;
+  const to = points?.findIndex((point) => point.id === sort.target) ?? -1;
+  if (!cancelled && from >= 0 && to >= 0) {
+    const boundary = to + (sort.after ? 1 : 0);
+    movePoint(from, boundary - (from < boundary ? 1 : 0) - from);
+  }
+  endPointDrag();
+}
 defineExpose({ receivePose, placeMapPoint, editPoint, insertRoutePoint });
 </script>
 
 <template>
   <Transition name="task-fade"
-    ><div v-show="active" class="navigation-task-ui">
+    ><div
+      v-show="active"
+      class="navigation-task-ui"
+      :class="{ 'has-selection': !!task }"
+    >
       <aside class="glass-panel task-sidebar" :class="{ collapsed }">
         <header>
           <Transition name="task-fade"
@@ -629,7 +713,7 @@ defineExpose({ receivePose, placeMapPoint, editPoint, insertRoutePoint });
             </button>
             <Transition name="task-fade"
               ><div v-if="filesOpen" class="task-actions">
-                <button @click="fileInput?.click()">导入 JSON</button
+                <button @click="chooseTaskFile">导入 JSON</button
                 ><button :disabled="!tasks.length" @click="exportTasks">
                   <Download :size="13" />导出全部
                 </button>
@@ -832,7 +916,7 @@ defineExpose({ receivePose, placeMapPoint, editPoint, insertRoutePoint });
                 :key="point.id"
                 class="task-point"
                 :data-point-id="point.id"
-                :draggable="!locked"
+                :draggable="!locked && !interaction.touch"
                 @dragstart="startPointDrag($event, point.id)"
                 @dragover="previewPointDrop($event, point.id)"
                 @drop="dropTaskPoint($event, point.id)"
@@ -855,6 +939,11 @@ defineExpose({ receivePose, placeMapPoint, editPoint, insertRoutePoint });
               >
                 <span
                   class="task-number"
+                  @pointerdown="startTouchSort($event, point.id)"
+                  @pointermove="moveTouchSort"
+                  @pointerup="finishTouchSort($event)"
+                  @pointercancel="finishTouchSort($event, true)"
+                  @lostpointercapture="finishTouchSort($event, true)"
                   :title="locked ? undefined : '拖动调整点位顺序'"
                   :class="{
                     first: index === 0,

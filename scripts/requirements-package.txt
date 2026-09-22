@@ -1,0 +1,26 @@
+# 功能说明：Windows x64 Python 3.12 发行构建的固定工具链与运行依赖。
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+click==8.5.0
+fastapi==0.141.1
+h11==0.16.0
+httptools==0.8.0
+idna==3.20
+Nuitka==4.2.1
+numpy==2.5.3
+ordered-set==4.1.0
+pillow==12.3.0
+pydantic==2.13.5
+pydantic_core==2.46.5
+pystray==0.19.5
+python-dotenv==1.2.3
+PyYAML==6.0.3
+six==1.17.0
+starlette==1.6.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+uvicorn==0.53.0
+watchfiles==1.3.0
+websockets==17.1
+zstandard==0.25.0

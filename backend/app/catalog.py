@@ -4,10 +4,11 @@ from pathlib import Path
 from typing import Dict, List
 
 from app.models import ToolDefinition, ToolField
+from app.paths import CONFIG_ROOT, DATA_ROOT, PACKAGED
 
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-CONFIG_DIR = ROOT_DIR / "data"
+ROOT_DIR = DATA_ROOT if PACKAGED else Path(__file__).resolve().parents[2]
+CONFIG_DIR = CONFIG_ROOT if PACKAGED else ROOT_DIR / "data"
 MODULE_CONFIG_PATH = CONFIG_DIR / "tool_modules.json"
 
 

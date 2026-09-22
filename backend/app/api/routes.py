@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, Response
 
 from app.catalog import get_tool_definitions, is_tool_enabled
+from app.paths import DATA_ROOT
 from app.models import (
     BrowseDialogRequest,
     BrowseDialogResponse,
@@ -297,7 +298,7 @@ def run_tool(tool_key: str, request: ToolRunRequest):
 
     values = {key: str(value) for key, value in request.values.items()}
     # 所有 CLI 与本地文件服务使用同一工作区基准，避免启动目录改变输出位置。
-    workspace = Path(__file__).resolve().parents[3]
+    workspace = DATA_ROOT
     for key in ["input_pcd", "output_dir", "config_path", "candidate_file", "manual_file"]:
         if values.get(key, "").strip():
             path = Path(values[key]).expanduser()

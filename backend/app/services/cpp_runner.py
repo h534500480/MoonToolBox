@@ -9,11 +9,11 @@ import yaml
 from fastapi import HTTPException
 
 from app.models import ToolRunResponse
+from app.paths import DATA_ROOT, CPP_BUILD_DIR
 from app.services.global_relocalization import export_reviewed_database, load_candidates
 
 
-ROOT_DIR = Path(__file__).resolve().parents[3]
-CPP_BUILD_DIR = ROOT_DIR / "cpp" / "build"
+ROOT_DIR = DATA_ROOT
 PCD_MAP_CLI = CPP_BUILD_DIR / "pcd_map_cli.exe"
 PCD_TILE_CLI = CPP_BUILD_DIR / "pcd_tile_cli.exe"
 GLOBAL_RELOCALIZATION_CLI = CPP_BUILD_DIR / "global_relocalization_cli.exe"
@@ -34,6 +34,7 @@ def _run_command(tool_key: str, command: List[str]) -> Tuple[subprocess.Complete
         command,
         cwd=str(ROOT_DIR),
         capture_output=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         text=True,
         encoding="utf-8",
         errors="replace",

@@ -18,7 +18,7 @@
 
 开发前端 5180，后端/生产静态页面 8100。Python 用工作区 .venv，CLI 位于 cpp/build。配置、录制、测试输出受 ignore 管理。
 
-本分支 worktree 与原工作区分离，原项目未跟踪文件未覆盖。旧首页、收藏、Python GUI、网络扫描、回放及其他导出已移除。当前保留 frontend/android 原生工程和本地文件/点云预览能力；网页构建资源须经 Capacitor sync 更新，Android 交互适配方案见 docs/ANDROID_ADAPTATION_PLAN.md，方案尚未实施。
+本分支 worktree 与原工作区分离，原项目未跟踪文件未覆盖。旧首页、收藏、Python GUI、网络扫描、回放及其他导出已移除。当前保留 frontend/android 原生工程和本地文件/点云预览能力；网页构建资源须经 Capacitor sync 更新，Android 交互适配进度见 docs/ANDROID_ADAPTATION_PLAN.md。首轮容器/触屏能力分流、悬浮输入与导航文件/手势已接入，真机验收尚未完成。
 
 IMU 标定工具 key 为 `imu_calibration`，路由 `/tools/imu-calibration`，左上角标题按钮可切换进入。当前支持 `sensor_msgs/msg/Imu` 或 `sensor_msgs/Imu` 且 `serialization_format=cdr` 的 rosbag2 SQLite3 `.db3`，不依赖 Windows 本机 ROS2；输出 gyro/accel 三轴 Allan deviation、noise density、random walk、bias instability 和 YAML 预览。部分驱动可能把 `linear_acceleration` 按 g 发布，页面当前按消息原单位展示。
 
@@ -38,3 +38,13 @@ IMU 标定工具 key 为 `imu_calibration`，路由 `/tools/imu-calibration`，�
 - 导航点位编辑：NavigationTasks 支持列表拖放重排；Nav3DViewer 以屏幕距离拾取顺序线段，通过 TaskRouteInsertion 相邻编号校验插入位置。插点立即持久化，视角拖动和坐标轴操作不插点，运行任务仍锁定。
 
 - 2026-09-22 位姿编辑：poseVisualScale.ts 统一距离平方根缩放并封顶，编号拾取和显示优先于组合坐标轴；选点后仅列表内平滑居中。插点朝向取前后路径切线角平分线。模型/HUD/任务取狗位姿共用 resolveRobotTfPose：配置 body 无任何样本时允许 base_link 完整链降级并明确提示，自定义坐标系不降级。
+
+- 平台交互：platform/interaction.ts 集中识别 Android 原生容器、主指针触摸能力与紧凑布局，main.ts 安装；MobileInputOverlay.vue 在根层管理独立草稿和确认提交。Android MainActivity 发送 ros-window-insets，RosFilePickerPlugin 新增 readTaskText/saveTaskText。NavigationTasks 复用数据校验，桌面 HTML 拖放、触屏编号 Pointer 手柄；Viewer 触屏只对单指轻点执行选点，拖动/双指保留相机。App 工具目录加载结束仍缺失工具时显示能力不足入口，不无限等待。
+- 布局预设：平台设置提供自动、3200×1440 横屏、常规手机、桌面布局；interaction.ts 保存 ros-platform.layout-preset.v1，mobile.css 按实际 CSS 视口统一三个模式的面板安全区和滚动。预设不改变三维渲染或 ROS 会话；常规手机建图在输入/产物面板间切换，窄屏话题抽屉打开时暂时隐藏监控面板以避免重叠。
+
+## Windows 独立发行包
+
+- `backend/desktop.py` 是 Nuitka standalone 编译入口，托盘与 Uvicorn 同进程。发行版仅监听 127.0.0.1，保留已绑定套接字并在首选端口占用时回退到系统端口；用户目录文件锁与随机实例标识避免误认其他服务。源码开发仍使用 backend/run.py。
+- `backend/app/paths.py` 统一资源/用户数据路径；发行数据在 `%LOCALAPPDATA%/ROSPlatform/UserData`，静态资源与四个 CLI 在安装目录 runtime 下。`desktop_api.py` 仅发行版启用，持久化界面偏好和任务，排除控制租约；`frontend/src/main.ts` 先恢复偏好，再动态加载 bootstrap.ts 的 Vue 启动逻辑。
+- `scripts/build_dist.ps1` 使用独立 Python 3.12 x64 构建环境、固定 requirements-package.txt、CMake Release 静态 MSVC、Nuitka（含 Tk/NumPy 依赖），按白名单汇集运行文件并审计源码与调试产物。`build_installer.ps1` / installer.iss 生成 ROSPlatformSetup.exe；便携 ZIP 同时保留。构建缓存与发行产物继续位于已忽略 build/、release/，不提交。
+- 使用与验证见 docs/WINDOWS_DISTRIBUTION.md、tests/test_distribution.py、frontend/tests/desktop-distribution.test.cjs。C++/Python 编译不构成防逆向保证，浏览器端 JS 仍可访问。

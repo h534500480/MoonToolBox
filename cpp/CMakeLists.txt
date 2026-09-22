@@ -2,6 +2,12 @@
 cmake_minimum_required(VERSION 3.16)
 project(ros_tool_suite_cpp LANGUAGES CXX)
 
+# 发行版静态链接 MSVC 运行库，四个算法程序不依赖目标机安装开发工具。
+option(ROS_PLATFORM_STATIC_RUNTIME "静态链接发行版 MSVC 运行库" OFF)
+if(MSVC AND ROS_PLATFORM_STATIC_RUNTIME)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)

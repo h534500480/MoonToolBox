@@ -4,6 +4,12 @@
 
 ## 运行
 
+### 安装到其他 Windows 电脑
+
+使用 `release/ROSPlatformSetup.exe` 安装，或解压 `release/ROSPlatform.zip` 后运行 `runtime/ROSPlatform.exe`。发行包包含编译后的 C++、Python 后端与运行依赖，目标电脑无需开发环境。默认只监听本机，端口冲突自动避让，快捷方式自动打开实际地址。
+
+在开发电脑运行 `scripts/build_installer.cmd` 构建安装包；具体依赖、个人数据位置与交付边界见 [Windows 发行说明](docs/WINDOWS_DISTRIBUTION.md)。源码开发启动方式保持如下。
+
 需要 Windows、Python 3.10+、Node.js 22、CMake 和 Visual Studio C++ 编译工具。
 首次运行 scripts/install_local.cmd；安装后运行 scripts/start_local.cmd，访问 http://127.0.0.1:8100。scripts/stop_local.cmd 停止本工作区托盘与后端。
 
@@ -37,4 +43,4 @@ cd ..
 集成测试启动独立后端，用临时点云验证路由、地图/切片输出、体素/射线与真实描述子。
 tests/mock_rosbridge.py 提供 ws://127.0.0.1:9099，仅模拟本地消息；控制下发只写 output_qa/commands.jsonl，不接入真实机器人。
 
-真实机器人、服务版本、现场网络、长时录制、超大地图性能和安装包发布尚未验证。架构与对应接口见 docs/WEB_ARCHITECTURE.md。
+真实机器人、服务版本、现场网络、长时录制和超大地图性能尚未验证。Windows 安装包已完成本机隔离运行及安装/卸载测试，其他电脑与干净 Windows 虚拟机尚未验证。架构与对应接口见 docs/WEB_ARCHITECTURE.md。

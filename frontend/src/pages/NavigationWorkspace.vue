@@ -32,6 +32,7 @@ import type { TaskPoint } from "../lib/navigationTasks";
 import DemoDock from "../components/DemoDock.vue";
 import { demoData, demoTopics } from "../platform/demo";
 import { visual, platformState } from "../platform/ui";
+import { interaction, setLayoutPreset } from "../platform/interaction";
 import { useNavigationController } from "../composables/useNavigationController";
 import type { ToolDefinition } from "../types";
 const props = defineProps<{
@@ -201,7 +202,9 @@ const { transport: taskTransport, status: taskNavigationStatus } =
 const activeDrawer = ref("");
 const poseHelperHint =
   "直接拖动箭头或平面移动，拖动外侧圆环旋转，无需切换模式。";
-const workspaceMode = ref<"localization" | "navigation" | "mapping">("localization");
+const workspaceMode = ref<"localization" | "navigation" | "mapping">(
+  "localization",
+);
 const taskPanel = ref<InstanceType<typeof NavigationTasks>>();
 const taskPicking = ref(false);
 const taskPoints = ref<TaskPoint[]>([]);
@@ -686,7 +689,35 @@ function dropTopicFromPanel(topicKey: string) {
           <button class="primary-btn" type="submit">添加到监控</button>
         </form></template
       ><template v-if="activeDrawer === 'settings'"
-        ><details
+        ><section class="layout-preference">
+          <label class="field"
+            ><span>分辨率 / 布局预设</span>
+            <select
+              class="text-field"
+              aria-label="分辨率 / 布局预设"
+              :value="interaction.preset"
+              @change="
+                setLayoutPreset(($event.target as HTMLSelectElement).value)
+              "
+            >
+              <option value="auto">自动适配</option>
+              <option value="wide-3200">3200 × 1440 横屏</option>
+              <option value="phone">常规手机</option>
+              <option value="desktop">桌面布局</option>
+            </select>
+          </label>
+          <p class="feedback">
+            当前可用区域 {{ interaction.width }} × {{ interaction.height }} ·
+            像素比
+            {{
+              interaction.pixelRatio.toFixed(2)
+            }}。预设只调整界面布局，自动保存到本机。
+          </p>
+          <p v-if="interaction.preferenceError" class="feedback" role="alert">
+            {{ interaction.preferenceError }}
+          </p>
+        </section>
+        <details
           :open="isDetailsOpen('settings-ros', true)"
           @toggle="onDetailsToggle('settings-ros', $event)"
         >
@@ -855,7 +886,14 @@ function dropTopicFromPanel(topicKey: string) {
                   v-model="formValues.offline_map_display_mode"
                   class="field-input"
                   :disabled="offlineMapLoading"
-                  @change="setOfflineMapDisplayMode(formValues.offline_map_display_mode === 'pointcloud' || formValues.offline_map_display_mode === 'render' ? formValues.offline_map_display_mode : 'voxel')"
+                  @change="
+                    setOfflineMapDisplayMode(
+                      formValues.offline_map_display_mode === 'pointcloud' ||
+                        formValues.offline_map_display_mode === 'render'
+                        ? formValues.offline_map_display_mode
+                        : 'voxel',
+                    )
+                  "
                 >
                   <option value="voxel">占据网格</option>
                   <option value="pointcloud">点云</option>

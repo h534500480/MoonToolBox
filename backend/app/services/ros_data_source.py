@@ -18,8 +18,9 @@ from websockets.sync.client import connect
 from app.models import RosDataSourceConfig, RosInspectionResponse, RosTopicItem, RosTopicListResponse
 
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-DATA_DIR = ROOT_DIR / "data"
+from app.paths import CONFIG_ROOT
+
+DATA_DIR = CONFIG_ROOT
 ROS_DATA_SOURCE_CONFIG_PATH = DATA_DIR / "ros_data_source.json"
 
 
